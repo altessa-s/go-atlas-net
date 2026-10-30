@@ -2,7 +2,7 @@
 # Use these scopes in conventional commits: type(scope): description
 # Example: fix(http/client): keep the retry budget per request
 
-# Root-level scopes
+# Repository scopes (omit the scope for repository-wide changes)
 deps                        # Dependency management
 README                      # Root README
 docs                        # Documentation
