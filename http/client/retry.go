@@ -269,18 +269,19 @@ func (rt *retryRoundTripper) CloseIdleConnections() { closeIdleConnections(rt.ne
 
 // RoundTrip implements [http.RoundTripper]. On the first call it buffers the
 // request body (if any) so it can be replayed on retries, then delegates retry
-// orchestration to [coreretry.Do].
+// orchestration to [coreretry.Do]. Every call reports exactly one RequestDone
+// to the observer, timed from the start of the call (buffering included).
 func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	start := rt.now()
 	replay := rt.replayable(req)
 	if replay {
 		if err := rt.bufferBody(req); err != nil {
+			rt.requestDone(req, start, "unknown", 0, true)
 			return nil, err
 		}
 	}
 
 	ctx := req.Context()
-	method := req.Method
-	start := rt.now()
 
 	call := &retryCall{
 		rt:  rt,
@@ -302,6 +303,13 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	}
 
 	retryErr := coreretry.Do(ctx, call.try, perRequestOpts...)
+	if !call.bodyHanded && req.Body != nil {
+		// No attempt reached the next round tripper (the context ended before
+		// the first one): the request body — the caller's or the replay copy
+		// installed by bufferBody — is still ours to close, as
+		// http.RoundTripper requires.
+		_ = req.Body.Close()
+	}
 
 	statusClass := "unknown"
 	if call.lastResp != nil {
@@ -309,21 +317,27 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	}
 
 	if retryErr != nil && ctx.Err() == nil && retryable(retryErr) {
-		retryErr = exhausted(req, call.lastResp, retryErr, call.retryAttempts+1)
+		retryErr = exhausted(req, call.lastResp, retryErr, call.attempts)
 	}
 	// A pass-through policy (WithoutRetry) clears retryErr but leaves the
 	// attempt's error in lastErr, which finish returns: still a failure.
 	failed := retryErr != nil || call.lastErr != nil
-	resp, err := rt.finish(call.lastResp, call.lastErr, retryErr)
+	resp, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts)
+	rt.requestDone(req, start, statusClass, call.retryAttempts, failed)
+	return resp, err
+}
+
+// requestDone reports the completion of the round trip of req, started at
+// start, to the observer.
+func (rt *retryRoundTripper) requestDone(req *http.Request, start time.Time, statusClass string, retries int, failed bool) {
 	rt.observer.RequestDone(RequestEvent{
-		Method:      method,
+		Method:      req.Method,
 		Host:        req.URL.Hostname(),
 		StatusClass: statusClass,
-		Retries:     call.retryAttempts,
+		Retries:     retries,
 		Failed:      failed,
 		Duration:    rt.now().Sub(start),
 	})
-	return resp, err
 }
 
 // replayable reports whether the retry layer may send req more than once.
@@ -384,7 +398,12 @@ type retryCall struct {
 	lastErr      error
 	// retryAttempts counts the retries made so far.
 	retryAttempts int
-	firstAttempt  bool
+	// attempts counts the attempts handed to the next round tripper so far.
+	attempts     int
+	firstAttempt bool
+	// bodyHanded reports whether an attempt handed the request body to the
+	// next round tripper, which then owns closing it.
+	bodyHanded bool
 }
 
 // onRetry runs before each retry's backoff sleep.
@@ -434,6 +453,8 @@ func (c *retryCall) try(ctx context.Context) error {
 	c.firstAttempt = false
 
 	attemptReq, cancel := c.rt.attemptRequest(ctx, c.req, c.callerCookie)
+	c.attempts++
+	c.bodyHanded = true
 	resp, err := c.rt.next.RoundTrip(attemptReq) //nolint:bodyclose // resp is stored in lastResp and either closed on next retry or returned to caller
 	// From here on a transport error renders trusted text only: its own
 	// text may embed the request URL with its query string.
@@ -535,13 +556,14 @@ func unexpectedStatus(resp *http.Response) *UnexpectedStatusError {
 	return se
 }
 
-// finish turns the outcome of the retry loop into the round trip result.
-func (rt *retryRoundTripper) finish(lastResp *http.Response, lastErr, retryErr error) (*http.Response, error) {
+// finish turns the outcome of the retry loop, after attempts attempts, into
+// the round trip result.
+func (rt *retryRoundTripper) finish(lastResp *http.Response, lastErr, retryErr error, attempts int) (*http.Response, error) {
 	// Handle retry exhaustion and terminal errors (possibly with a response,
 	// e.g. a non-retryable or exhausted retryable status).
 	if retryErr != nil {
 		if rt.errorHandler != nil {
-			resp, err := rt.errorHandler(lastResp, retryErr, rt.maxAttempts+1)
+			resp, err := rt.errorHandler(lastResp, retryErr, attempts)
 			// The handler's error is returned: it renders trusted text only,
 			// as a transport error does (it may quote resp.Request.URL).
 			err = redactTransportError(err)

@@ -6,8 +6,6 @@ MAKEFLAGS      			+= --warn-undefined-variables
 MAKEFLAGS      			+= --no-builtin-rules
 CHANGELOG_NEXT_VERSION 	?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
 MODULE         			:= github.com/altessa-s/go-atlas-net
-# OPTGEN_DIR is the go-optgen checkout optgen is installed from (go generate).
-OPTGEN_DIR ?= ../go-optgen
 
 # dupl configuration
 # - DUPL_THRESHOLD: token threshold (higher -> fewer matches)
@@ -63,8 +61,8 @@ tidy: ## Run go mod tidy
 	@go mod tidy
 
 .PHONY: generate
-generate: ## Run go generate on all packages (installs optgen from OPTGEN_DIR)
-	@go install -C $(OPTGEN_DIR) ./cmd/optgen
+generate: ## Run go generate on all packages
+	@cd devtools && go install github.com/altessa-s/go-optgen/cmd/optgen
 	@go generate ./...
 
 .PHONY: vet
