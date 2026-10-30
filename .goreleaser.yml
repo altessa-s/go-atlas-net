@@ -10,19 +10,19 @@ changelog:
   format: "{{ .Message }}"
   groups:
     - title: Features
-      regexp: '^.*?feat(\([[:word:]/]+\))??!?:.+$'
+      regexp: '^.*?feat(\([[:word:]/-]+\))??!?:.+$'
       order: 0
     - title: Bug Fixes
-      regexp: '^.*?fix(\([[:word:]/]+\))??!?:.+$'
+      regexp: '^.*?fix(\([[:word:]/-]+\))??!?:.+$'
       order: 1
     - title: Performance
-      regexp: '^.*?perf(\([[:word:]/]+\))??!?:.+$'
+      regexp: '^.*?perf(\([[:word:]/-]+\))??!?:.+$'
       order: 2
     - title: Refactoring
-      regexp: '^.*?refactor(\([[:word:]/]+\))??!?:.+$'
+      regexp: '^.*?refactor(\([[:word:]/-]+\))??!?:.+$'
       order: 3
     - title: Documentation
-      regexp: '^.*?docs(\([[:word:]/]+\))??!?:.+$'
+      regexp: '^.*?docs(\([[:word:]/-]+\))??!?:.+$'
       order: 4
     - title: Other
       order: 999
