@@ -1,5 +1,10 @@
 # go-atlas-net
 
+[![CI](https://github.com/altessa-s/go-atlas-net/actions/workflows/ci.yml/badge.svg)](https://github.com/altessa-s/go-atlas-net/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/altessa-s/go-atlas-net.svg)](https://pkg.go.dev/github.com/altessa-s/go-atlas-net)
+[![Go Report Card](https://goreportcard.com/badge/github.com/altessa-s/go-atlas-net)](https://goreportcard.com/report/github.com/altessa-s/go-atlas-net)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 ```go
 import "github.com/altessa-s/go-atlas-net/<package>"
 ```
