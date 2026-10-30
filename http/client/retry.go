@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sony/gobreaker/v2"
@@ -362,15 +363,32 @@ func (rt *retryRoundTripper) replayable(req *http.Request) bool {
 // GetBody (net/http sets it automatically for bytes/strings readers) and
 // buffers only when retries are possible (maxAttempts counts retries;
 // negative means unlimited) and no replay source exists.
+//
+// Buffering honors the request's context: an ended context closes the body
+// and fails with the context's error without reading; one ending while the
+// read is blocked (a pipe whose writer stays open) closes the body, which
+// unblocks the read, and fails the same way. The body is closed exactly once.
 func (rt *retryRoundTripper) bufferBody(req *http.Request) error {
 	if req.Body == nil || req.GetBody != nil || rt.maxAttempts == 0 {
 		return nil
 	}
+	ctx := req.Context()
+	closeBody := sync.OnceValue(req.Body.Close)
+	if err := ctx.Err(); err != nil {
+		_ = closeBody()
+		return err
+	}
+	stop := context.AfterFunc(ctx, func() { _ = closeBody() })
 	buf := coreio.GetBuffer()
 	_, err := buf.ReadFrom(req.Body)
-	_ = req.Body.Close()
+	stop()
+	_ = closeBody()
 	if err != nil {
 		coreio.PutBuffer(buf)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// The read failed because the context ended and closed the body.
+			return ctxErr
+		}
 		// The body's error text is the caller's: render a trusted one.
 		return coreerrs.Wrapf(redactTransportError(err), "failed to read request body for retry buffering")
 	}
