@@ -8,13 +8,12 @@ import (
 	"io"
 )
 
-// CloseBody closes an HTTP response body. It is a no-op when body is nil and
-// all errors are intentionally discarded — this helper is meant for defer
-// statements in call sites that do not care about the cleanup result.
-//
-// It does not read the body: since Go 1.27 [http.Transport] drains an unread
-// HTTP/1 body after Close in the background, within its own size and time
-// bounds, so the connection is reused without blocking the caller.
+// CloseBody drains up to [maxDiscardDrain] bytes of an HTTP response body
+// and closes it, so the next request reuses the connection right away; a
+// larger body is abandoned together with its connection. It is a no-op when
+// body is nil and all errors are intentionally discarded — this helper is
+// meant for defer statements in call sites that do not care about the
+// cleanup result.
 //
 // Typical usage:
 //
@@ -27,5 +26,6 @@ func CloseBody(body io.ReadCloser) {
 	if body == nil {
 		return
 	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxDiscardDrain))
 	_ = body.Close()
 }
