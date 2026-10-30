@@ -3,7 +3,6 @@
 # Example: fix(http/client): keep the retry budget per request
 
 # Root-level scopes
-root                        # Repository-wide changes (go.mod, Makefile, configs)
 deps                        # Dependency management
 README                      # Root README
 docs                        # Documentation
