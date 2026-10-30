@@ -46,14 +46,12 @@ var defaultRetryableStatuses = DefaultRetryableStatuses()
 // the statuses of the built-in classification, which applies when no
 // [WithRetryPolicyHandler] is set.
 //
-// A reply is classified by its status only, never by the request method: a
-// POST, PUT or PATCH (or any other non-idempotent request) is replayed, body
-// included, on 408, 429, 502, 503 and 504 like a GET, and so is any request
-// after a retryable transport error — even when the server may already have
-// processed it. Where a replay is unsafe, opt out with a policy set by
-// [WithRetryPolicyHandler] that returns false for those methods (see the
-// second example), with [WithoutRetry] for a client that never retries, or
-// with an idempotency key the server deduplicates on.
+// DefaultRetryPolicy classifies by status and error only, never by method:
+// a policy built on it replays a POST like a GET. The built-in classification
+// (no [WithRetryPolicyHandler]) adds the method check itself and replays only
+// idempotent requests (GET, HEAD, OPTIONS, TRACE, PUT, DELETE) and requests
+// with an Idempotency-Key or X-Idempotency-Key header. A custom policy that
+// wants the same guard checks resp.Request.Method (see the second example).
 //
 // Example:
 //

@@ -398,12 +398,12 @@ func TestRedactionRequestBodyError(t *testing.T) {
 		request func(t *testing.T) *http.Request
 	}{
 		{name: "buffer", request: func(t *testing.T) *http.Request {
-			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, secretURL(srv.URL), failingReader{leak})
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, secretURL(srv.URL), failingReader{leak})
 			require.NoError(t, err)
 			return req
 		}},
 		{name: "rewind", request: func(t *testing.T) *http.Request {
-			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, secretURL(srv.URL), strings.NewReader("payload"))
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, secretURL(srv.URL), strings.NewReader("payload"))
 			require.NoError(t, err)
 			calls := 0
 			req.GetBody = func() (io.ReadCloser, error) {

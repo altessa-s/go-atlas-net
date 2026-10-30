@@ -136,7 +136,7 @@ func TestRetryRoundTripper_BodyReplay(t *testing.T) {
 		maxAttempts: 5,
 	}
 
-	req, _ := http.NewRequestWithContext(t.Context(), "POST", "http://example.com", strings.NewReader("payload"))
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPut, "http://example.com", strings.NewReader("payload"))
 	resp, err := rt.RoundTrip(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -313,7 +313,7 @@ func TestRetryRoundTripper_OneRetryReplaysStreamingBody(t *testing.T) {
 	}
 
 	// A plain io.ReadCloser has no GetBody, so only buffering can replay it.
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://example.com",
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, "http://example.com",
 		io.NopCloser(strings.NewReader("payload")))
 	require.NoError(t, err)
 	require.Nil(t, req.GetBody)
@@ -617,4 +617,57 @@ func TestRetryRoundTripper_ErrorHandlerReceivesReadableResponse(t *testing.T) {
 	_, err = rt.RoundTrip(req) //nolint:bodyclose // the round trip fails with ctx canceled
 	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, "body", got)
+}
+
+func TestRetryRoundTripper_ReplaysOnlyIdempotentRequests(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		method   string
+		header   string
+		attempts int
+	}{
+		{name: "GET is replayed", method: http.MethodGet, attempts: 3},
+		{name: "PUT is replayed", method: http.MethodPut, attempts: 3},
+		{name: "DELETE is replayed", method: http.MethodDelete, attempts: 3},
+		{name: "POST is sent once", method: http.MethodPost, attempts: 1},
+		{name: "PATCH is sent once", method: http.MethodPatch, attempts: 1},
+		{name: "POST with Idempotency-Key is replayed", method: http.MethodPost, header: "Idempotency-Key", attempts: 3},
+		{name: "POST with X-Idempotency-Key is replayed", method: http.MethodPost, header: "X-Idempotency-Key", attempts: 3},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var bodies []string
+			rt := &retryRoundTripper{
+				observer:          NoopObserver{},
+				retryableStatuses: DefaultRetryableStatuses(),
+				next: httpx.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					b, err := io.ReadAll(req.Body)
+					require.NoError(t, err)
+					bodies = append(bodies, string(b))
+					return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Request: req}, nil
+				}),
+				retryOpts:   newTestRetryOpts(2),
+				maxAttempts: 2,
+			}
+
+			req, err := http.NewRequestWithContext(t.Context(), tc.method, "http://example.com", strings.NewReader("payload"))
+			require.NoError(t, err)
+			if tc.header != "" {
+				req.Header.Set(tc.header, "key-1")
+			}
+
+			_, err = rt.RoundTrip(req) //nolint:bodyclose // an exhausted round trip returns no response
+			exhaustedErr, ok := errors.AsType[*RetryExhaustedError](err)
+			require.True(t, ok, "error %v", err)
+			require.Equal(t, tc.attempts, exhaustedErr.Attempts)
+			require.Len(t, bodies, tc.attempts)
+			for _, b := range bodies {
+				require.Equal(t, "payload", b)
+			}
+		})
+	}
 }

@@ -25,9 +25,10 @@
 //     [WithoutRetry] sends each request once and returns every reply unclassified. Retries after a 429/503
 //     reply wait at least its Retry-After ([WithRetryAfterMax], [ParseRetryAfter]). The built-in classification retries
 //     [DefaultRetryableStatuses] (change them with [WithRetryableStatuses]) and is exported as [DefaultRetryPolicy] for
-//     custom policies set with [WithRetryPolicyHandler]. Retries are decided by status and transport error only,
-//     never by method: a POST, PUT or PATCH is replayed on 408/429/502/503/504 too (see [DefaultRetryPolicy] to
-//     opt out). [WithClock] sets the time source of the retry layer (a clock.Fake in tests).
+//     custom policies set with [WithRetryPolicyHandler]. The built-in classification replays only requests that are
+//     safe to repeat, as net/http does: an idempotent method (GET, HEAD, OPTIONS, TRACE, PUT, DELETE) or a request
+//     with an Idempotency-Key or X-Idempotency-Key header; a POST or PATCH without one is sent once. A policy set
+//     with [WithRetryPolicyHandler] decides for every method. [WithClock] sets the time source of the retry layer (a clock.Fake in tests).
 //   - Protection: a circuit breaker per destination host, so one failing endpoint never rejects requests to
 //     another; tune hosts with [WithCircuitBreakerSettings] and bound lazily created breakers with [WithMaxHostBreakers].
 //   - Redirects: followed like net/http by default; [WithoutRedirects] returns a 3xx reply to the caller as the
