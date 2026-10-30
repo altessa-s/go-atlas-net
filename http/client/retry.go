@@ -271,8 +271,11 @@ func (rt *retryRoundTripper) CloseIdleConnections() { closeIdleConnections(rt.ne
 // request body (if any) so it can be replayed on retries, then delegates retry
 // orchestration to [coreretry.Do].
 func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if err := rt.bufferBody(req); err != nil {
-		return nil, err
+	replay := rt.replayable(req)
+	if replay {
+		if err := rt.bufferBody(req); err != nil {
+			return nil, err
+		}
 	}
 
 	ctx := req.Context()
@@ -294,6 +297,9 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		coreretry.WithShouldRetry(retryable),
 		coreretry.WithOnRetry(call.onRetry),
 	)
+	if !replay {
+		perRequestOpts = append(perRequestOpts, coreretry.WithMaxAttempts(0))
+	}
 
 	retryErr := coreretry.Do(ctx, call.attempt, perRequestOpts...)
 
@@ -315,6 +321,24 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		Duration:    rt.now().Sub(start),
 	})
 	return resp, err
+}
+
+// replayable reports whether the retry layer may send req more than once.
+// With a [RetryPolicyHandler] the policy decides. The built-in classification
+// replays only requests that are safe to repeat, as [net/http.Transport] does
+// for its own retries: an idempotent method (GET, HEAD, OPTIONS, TRACE, PUT,
+// DELETE) or a request carrying an Idempotency-Key or X-Idempotency-Key header.
+// Any other request (POST, PATCH, ...) is attempted once, so a server that
+// processed it before failing never sees it twice.
+func (rt *retryRoundTripper) replayable(req *http.Request) bool {
+	if rt.retryPolicyHandler != nil {
+		return true
+	}
+	switch req.Method {
+	case "", http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace, http.MethodPut, http.MethodDelete:
+		return true
+	}
+	return req.Header.Get("Idempotency-Key") != "" || req.Header.Get("X-Idempotency-Key") != ""
 }
 
 // bufferBody prepares req's body for replay. It prefers the caller-provided

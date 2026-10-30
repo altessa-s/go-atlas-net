@@ -125,20 +125,13 @@ of 400 and above fails with `UnexpectedStatusError`, and the rest is returned. `
 c := httpclient.New(httpclient.WithRetryableStatuses(408, 429, 500, 502, 503, 504))
 ```
 
-Retries are decided by status and transport error only, never by request method: a POST, PUT or PATCH is replayed (body included) on 408, 429, 502,
-503 and 504, and after a retryable transport error, exactly like a GET, even when the server may already have processed it. Where a replay is unsafe,
-set a `WithRetryPolicyHandler` policy that refuses the retry for those methods (`resp.Request.Method`; see `DefaultRetryPolicy`), build the client for
-non-idempotent requests with `WithoutRetry`, or send an idempotency key the server deduplicates on.
+The built-in classification replays only requests that are safe to repeat, as `net/http.Transport` does for its own retries: an idempotent method
+(GET, HEAD, OPTIONS, TRACE, PUT, DELETE) or a request carrying an `Idempotency-Key` or `X-Idempotency-Key` header. A POST or PATCH without one is sent
+once — a server that processed it before failing never sees it twice — and a retryable failure is returned as a `RetryExhaustedError` after that
+single attempt. A policy set with `WithRetryPolicyHandler` decides for every method, so it can replay a POST the server deduplicates otherwise.
 
 ```go
-noPostReplay := func(ctx context.Context, resp *http.Response, err error) (bool, error) {
-    retry, perr := httpclient.DefaultRetryPolicy(ctx, resp, err)
-    if retry && resp != nil && resp.Request != nil && resp.Request.Method == http.MethodPost {
-        return false, &httpclient.UnexpectedStatusError{Status: resp.StatusCode, Method: http.MethodPost}
-    }
-    return retry, perr
-}
-c := httpclient.New(httpclient.WithRetryPolicyHandler(noPostReplay))
+req.Header.Set("Idempotency-Key", orderID) // the POST is now retried like a GET
 ```
 
 The Content-Length precheck of `WithMaxResponseSize` closes an oversized reply unread and fails with a `ResponseSizeError` that keeps its `Status` and
