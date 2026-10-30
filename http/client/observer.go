@@ -19,9 +19,8 @@ import (
 // other methods from the request path, concurrently, so they must be safe for
 // concurrent use and cheap.
 //
-// The client itself records no metrics and reports no health. The observe
-// subpackage implements an Observer that turns these events into Prometheus
-// metrics and observability health checks.
+// The client itself records no metrics and reports no health: an Observer
+// turns these events into metrics and health checks.
 //
 // Embed [NoopObserver] to implement only the events of interest and stay
 // source-compatible when events are added.

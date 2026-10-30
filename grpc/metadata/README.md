@@ -21,4 +21,4 @@ they read HTTP ones. HTTP counterpart: [`httpx.HTTPHeaderGetter`](../../httpx).
 
 This is the only package of the module that imports a transport framework (`google.golang.org/grpc`). It lives here, next to its HTTP counterpart,
 so that `clientip` and other protocol-neutral consumers never import gRPC themselves: a module that does not import this package does not link gRPC.
-Server-side gRPC wiring (interceptors, health, reflection) belongs to go-atlas, not here.
+Server-side gRPC wiring (interceptors, health, reflection) is out of scope.

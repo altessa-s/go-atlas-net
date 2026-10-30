@@ -10,9 +10,8 @@ import "net/http"
 // (revocation loader, fetcher, sub-resource client, …) implements to
 // opt into receiving a parent's shared *http.Client.
 //
-// It exists so consumers higher up the stack — for example
-// [auth/oidc.Provider] when wiring a [auth/oidc.URLRevocationLoader] —
-// can hand their already-configured client (built via [New] from a
+// It exists so consumers higher up the stack — for example an
+// authentication provider wiring a token revocation loader — can hand their already-configured client (built via [New] from a
 // proxy resolver, retry policy, breaker, etc.) to inner components
 // without each one reimplementing the wiring or duplicating the
 // config-to-options translation.

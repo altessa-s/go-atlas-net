@@ -61,7 +61,7 @@ constructors are available: `New` returns a bare `*http.Client` suitable for any
 | `WithoutRetry`               | --            | One attempt per request; the response for any status (body unread) or the transport error (redacted text, causes intact) is returned; overrides `WithRetryMax` and `WithRetryPolicyHandler` |
 | `WithoutRedirects`           | follow        | Never follow redirects; a 3xx reply is returned as the response (also over a `WithClient` client, left unchanged) |
 | `WithClock`                  | system        | `clock.Clock` of the retry layer: elapsed budget, backoff and Retry-After waits, Retry-After dates, request duration; `clock.NewFake` in tests |
-| `WithObserver`               | no-op         | `Observer` receiving request, retry and circuit breaker events; `observe.New` records metrics and health from them                                   |
+| `WithObserver`               | no-op         | `Observer` receiving request, retry and circuit breaker events, for example to record metrics and health                                            |
 
 With SSRF protection on (the default) environment proxies are ignored (`HTTP_PROXY`/`HTTPS_PROXY` apply only after `WithoutSSRFProtection()`);
 explicit proxy options are allowed and guarded, see [SSRF and proxy policy](#ssrf-and-proxy-policy).
@@ -174,7 +174,7 @@ if err != nil {
 | `VerbClient`       | Verb helpers: `Get`, `Post`, `PostJSON`, `Put`, `PutJSON`, `Patch`, `PatchJSON`, `Delete`, `Head`, `PostForm`                                                                                                        |
 | `OptionsClient`    | Per-call options: `GetWithOptions`, `PostWithOptions`, `PutWithOptions`, `DeleteWithOptions` applying `RequestOption`s                                                                                              |
 | `RequestFactory`   | `NewRequest()` returning a fluent `RequestBuilder` sent through the client; its header keys are interned per client (`NewRequestBuilder(doer)` keeps them as given)                                                 |
-| `HTTPClientSetter` | Optional `SetHTTPClient(*http.Client)` hook a sub-component implements so a parent can hand it the same shared client (proxy, retry, breaker apply once). Used by `auth/oidc.Provider` to wire `URLRevocationLoader` |
+| `HTTPClientSetter` | Optional `SetHTTPClient(*http.Client)` hook a sub-component implements so a parent can hand it the same shared client (proxy, retry, breaker apply once).                                                           |
 
 ## Observer
 
@@ -189,26 +189,24 @@ The client records no metrics and reports no health itself. It delivers its tele
 | `BreakerRejected`     | an attempt was rejected by an open (or saturated half-open) circuit breaker                              |
 | `BreakerStateChanged` | a breaker changed state; runs with the breaker's lock held, so it must not read `Breakers` synchronously |
 
-[observe](https://github.com/altessa-s/go-atlas/tree/develop/net/http/client/observe) implements an `Observer` that records the client's Prometheus
-metrics and registers health checks derived from breaker state and retry rate:
+Embed `NoopObserver` to implement only the events of interest:
 
 ```go
-coord := health.New()
-defer coord.Close()
+type retryCounter struct {
+    client.NoopObserver
+    retries atomic.Int64
+}
 
-c := client.New(
-    client.WithObserver(observe.New(meter, coord, observe.WithPerHostHealthChecks())),
-    client.WithCircuitBreakerSettings("api.example.com", &client.CircuitBreakerSettings{Name: "api"}),
-)
+func (o *retryCounter) Retry(client.AttemptEvent) { o.retries.Add(1) }
+
+c := client.New(client.WithObserver(&retryCounter{}))
 ```
 
 ## Subpackages
 
 | Package                | Description                                                               |
 |------------------------|---------------------------------------------------------------------------|
-| [factory](https://github.com/altessa-s/go-atlas/tree/develop/net/http/client/factory)   | Maps health and SSRF configuration schemas to client and observer options |
-| [limiters](limiters) | Pluggable rate limiting layer for HTTP round-trippers                     |
-| [observe](https://github.com/altessa-s/go-atlas/tree/develop/net/http/client/observe)   | `Observer` recording client metrics and health checks                     |
+| [limiters](limiters)   | Pluggable rate limiting layer for HTTP round-trippers                     |
 
 ## SSRF and proxy policy
 
@@ -240,11 +238,11 @@ match in the ASCII (punycode) form net/http dials: a rule written `bücher.examp
 direct dial and before a proxy; a Unicode label holding a glob metacharacter is rejected, write it in punycode. The Unicode full stops IDNA reads as
 dots (U+3002, U+FF0E, U+FF61) separate labels in rules and hosts alike, a trailing one included.
 
-The rule grammar lives in [`net/egressrule`](../../egressrule/README.md), shared with the `httpconfig.ClientSSRF` schema, so a
-configured rule is validated exactly as the engine compiles it. `ParseEgressPolicy(allow, deny []egressrule.Rule)` compiles rules in their textual
+The rule grammar lives in [`egressrule`](../../egressrule/README.md), so a configuration schema that uses it validates a rule exactly
+as the engine compiles it. `ParseEgressPolicy(allow, deny []egressrule.Rule)` compiles rules in their textual
 form (`name`, `host`, `cidr` string, `port` int), as configured or stored; it also rejects a CIDR that does not parse and a port outside 0 to 65535,
-with errors wrapping `ErrInvalidEgressRule` and naming the rule (`allow[0].cidr`). `net/http/client/factory.SSRFOptions` installs a
-configured policy.
+with errors wrapping `ErrInvalidEgressRule` and naming the rule (`allow[0].cidr`). `WithEgressPolicy` installs the compiled
+policy.
 
 | Install                                 | Where the check runs                                                                                                  |
 |-----------------------------------------|-----------------------------------------------------------------------------------------------------------------------|
