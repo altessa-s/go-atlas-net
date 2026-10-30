@@ -204,3 +204,86 @@ func TestObserver_BufferingFailure(t *testing.T) {
 		Duration:    2 * time.Second,
 	}}, obs.done, "one failed completion, timed with the buffering")
 }
+
+// pipeBody is a request body reading from a pipe whose writer the test keeps
+// open: a read blocks until the body is closed. It counts its Close calls.
+type pipeBody struct {
+	r      *io.PipeReader
+	reads  chan struct{}
+	closed atomic.Int32
+}
+
+func newPipeBody(t *testing.T) *pipeBody {
+	t.Helper()
+	r, w := io.Pipe()
+	t.Cleanup(func() { _ = w.Close() })
+	return &pipeBody{r: r, reads: make(chan struct{}, 1)}
+}
+
+func (b *pipeBody) Read(p []byte) (int, error) {
+	select {
+	case b.reads <- struct{}{}:
+	default:
+	}
+	return b.r.Read(p)
+}
+
+func (b *pipeBody) Close() error {
+	b.closed.Add(1)
+	return b.r.Close()
+}
+
+// TestRetry_BufferingHonorsContext checks that buffering a replayable body
+// that never ends stops when the request's context ends — before the read or
+// while it is blocked — with the context's error, the body closed once and
+// one failed request reported.
+func TestRetry_BufferingHonorsContext(t *testing.T) {
+	t.Parallel()
+
+	for _, during := range []bool{false, true} {
+		name := "ended before buffering"
+		if during {
+			name = "ended during buffering"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			obs := &recordingObserver{}
+			c := httpclient.New(
+				httpclient.WithoutSSRFProtection(),
+				httpclient.WithClient(&http.Client{Transport: unreachable(t)}),
+				httpclient.WithObserver(obs),
+				httpclient.WithRetryMax(3),
+			)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			body := newPipeBody(t)
+			if during {
+				go func() {
+					<-body.reads
+					cancel()
+				}()
+			} else {
+				cancel()
+			}
+			req, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://api.test/x", body)
+			require.NoError(t, err)
+
+			resp, err := c.Do(req)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			require.ErrorIs(t, err, context.Canceled)
+			require.EqualValues(t, 1, body.closed.Load(), "the body is closed once")
+			select {
+			case <-body.reads:
+				require.True(t, during, "no read starts on an ended context")
+			default:
+			}
+
+			obs.mu.Lock()
+			defer obs.mu.Unlock()
+			require.Len(t, obs.done, 1, "one completion")
+			require.True(t, obs.done[0].Failed)
+		})
+	}
+}
