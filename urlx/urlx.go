@@ -125,8 +125,8 @@ func JoinPath(base *url.URL, elem ...string) (string, error) {
 		p.WriteByte('/')
 	}
 
-	u := *base
-	setEscapedPath(&u, p.String())
+	u := base.Clone()
+	setEscapedPath(u, p.String())
 	return u.String(), nil
 }
 
