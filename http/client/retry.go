@@ -301,7 +301,7 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		perRequestOpts = append(perRequestOpts, coreretry.WithMaxAttempts(0))
 	}
 
-	retryErr := coreretry.Do(ctx, call.attempt, perRequestOpts...)
+	retryErr := coreretry.Do(ctx, call.try, perRequestOpts...)
 
 	statusClass := "unknown"
 	if call.lastResp != nil {
@@ -311,13 +311,16 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	if retryErr != nil && ctx.Err() == nil && retryable(retryErr) {
 		retryErr = exhausted(req, call.lastResp, retryErr, call.retryAttempts+1)
 	}
+	// A pass-through policy (WithoutRetry) clears retryErr but leaves the
+	// attempt's error in lastErr, which finish returns: still a failure.
+	failed := retryErr != nil || call.lastErr != nil
 	resp, err := rt.finish(call.lastResp, call.lastErr, retryErr)
 	rt.observer.RequestDone(RequestEvent{
 		Method:      method,
 		Host:        req.URL.Hostname(),
 		StatusClass: statusClass,
 		Retries:     call.retryAttempts,
-		Failed:      retryErr != nil,
+		Failed:      failed,
 		Duration:    rt.now().Sub(start),
 	})
 	return resp, err
@@ -411,17 +414,8 @@ func (c *retryCall) onRetry(attempt int, err error, delay time.Duration) {
 	}
 }
 
-// attempt makes one attempt of the round trip and classifies its outcome
-// for coreretry.Do, reporting a circuit breaker rejection to the observer.
-func (c *retryCall) attempt(ctx context.Context) error {
-	err := c.try(ctx)
-	if _, ok := errors.AsType[*CircuitBreakerError](err); ok {
-		c.rt.observer.BreakerRejected(AttemptEvent{Method: c.req.Method, Host: c.req.URL.Hostname()})
-	}
-	return err
-}
-
-// try makes one attempt of the round trip and classifies its outcome.
+// try makes one attempt of the round trip and classifies its outcome for
+// coreretry.Do.
 func (c *retryCall) try(ctx context.Context) error {
 	// Close previous response body if present from a prior attempt.
 	closeBody(c.lastResp)
@@ -450,6 +444,12 @@ func (c *retryCall) try(ctx context.Context) error {
 	c.rt.storeCookies(c.req, resp)
 	c.lastResp = resp
 	c.lastErr = err
+	// A breaker rejection is reported from the attempt's own outcome, once,
+	// before any classification: a retry policy (WithoutRetry's pass-through
+	// among them) may replace or suppress the error the caller then gets.
+	if IsCircuitBreakerOpen(err) {
+		c.rt.observer.BreakerRejected(AttemptEvent{Method: c.req.Method, Host: c.req.URL.Hostname()})
+	}
 
 	// If user supplied a custom RetryPolicyHandler, delegate to it.
 	if c.rt.retryPolicyHandler != nil {

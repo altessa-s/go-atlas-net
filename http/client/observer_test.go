@@ -5,6 +5,7 @@
 package client_test
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -134,32 +135,110 @@ func TestObserver_RetriesAndFailure(t *testing.T) {
 	require.True(t, obs.done[0].Failed)
 }
 
+// TestObserver_WithoutRetryFailure checks that a request failing under the
+// pass-through policy of WithoutRetry is reported as failed — a transport
+// error and an oversized response alike — while an HTTP error status handed
+// back unchanged is not.
+func TestObserver_WithoutRetryFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		transport http.RoundTripper
+		opts      []httpclient.Option
+		wantErr   bool
+		failed    bool
+	}{
+		{
+			name: "transport error",
+			transport: httpx.RoundTripperFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("connection refused")
+			}),
+			wantErr: true,
+			failed:  true,
+		},
+		{
+			name: "oversized response",
+			transport: httpx.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Body:          io.NopCloser(strings.NewReader(strings.Repeat("x", 64))),
+					ContentLength: 64,
+					Request:       req,
+				}, nil
+			}),
+			opts:    []httpclient.Option{httpclient.WithMaxResponseSize(8)},
+			wantErr: true,
+			failed:  true,
+		},
+		{
+			name:      "error status passed through",
+			transport: statusTransport(http.StatusServiceUnavailable),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			obs := &recordingObserver{}
+			opts := append([]httpclient.Option{
+				httpclient.WithoutSSRFProtection(),
+				httpclient.WithClient(&http.Client{Transport: tt.transport}),
+				httpclient.WithObserver(obs),
+				httpclient.WithoutRetry(),
+			}, tt.opts...)
+			c := httpclient.New(opts...)
+
+			err := observeGet(t, c, "http://api.test/x")
+			require.Equal(t, tt.wantErr, err != nil, "err = %v", err)
+			require.Len(t, obs.done, 1)
+			require.Equal(t, tt.failed, obs.done[0].Failed, "the observer sees what the caller sees")
+			require.Zero(t, obs.done[0].Retries)
+		})
+	}
+}
+
+// TestObserver_BreakerEvents checks that a breaker rejection is reported
+// exactly once whatever the retry policy, including those that pass the
+// error through unclassified (WithoutRetry, a custom pass-through policy).
 func TestObserver_BreakerEvents(t *testing.T) {
 	t.Parallel()
 
-	obs := &recordingObserver{}
-	c := httpclient.New(
-		httpclient.WithoutSSRFProtection(),
-		httpclient.WithClient(&http.Client{Transport: httpx.RoundTripperFunc(func(*http.Request) (*http.Response, error) {
-			return nil, errors.New("connection refused")
-		})}),
-		httpclient.WithObserver(obs),
-		httpclient.WithRetryMax(0),
-		httpclient.WithBreakerTimeout(time.Hour),
-	)
-
-	for range httpclient.DefaultBreakerMinRequests {
-		require.Error(t, observeGet(t, c, "http://down.test/"))
+	passThrough := func(context.Context, *http.Response, error) (bool, error) { return false, nil }
+	policies := map[string]httpclient.Option{
+		"default":      httpclient.WithRetryMax(0),
+		"no retry":     httpclient.WithoutRetry(),
+		"pass-through": httpclient.WithRetryPolicyHandler(passThrough),
 	}
-	err := observeGet(t, c, "http://down.test/")
-	require.True(t, httpclient.IsCircuitBreakerOpen(err))
+	for name, policy := range policies {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			obs := &recordingObserver{}
+			c := httpclient.New(
+				httpclient.WithoutSSRFProtection(),
+				httpclient.WithClient(&http.Client{Transport: httpx.RoundTripperFunc(func(*http.Request) (*http.Response, error) {
+					return nil, errors.New("connection refused")
+				})}),
+				httpclient.WithObserver(obs),
+				policy,
+				httpclient.WithBreakerTimeout(time.Hour),
+			)
 
-	obs.mu.Lock()
-	defer obs.mu.Unlock()
-	require.Equal(t, []httpclient.AttemptEvent{{Method: http.MethodGet, Host: "down.test"}}, obs.rejected)
-	require.Len(t, obs.states, 1)
-	require.Equal(t, "down.test", obs.states[0].Host)
-	require.Equal(t, gobreaker.StateClosed, obs.states[0].From)
-	require.Equal(t, gobreaker.StateOpen, obs.states[0].To)
-	require.Equal(t, []gobreaker.State{gobreaker.StateOpen}, obs.breakers.States())
+			for range httpclient.DefaultBreakerMinRequests {
+				require.Error(t, observeGet(t, c, "http://down.test/"))
+			}
+			err := observeGet(t, c, "http://down.test/")
+			require.True(t, httpclient.IsCircuitBreakerOpen(err), "err = %v", err)
+
+			obs.mu.Lock()
+			defer obs.mu.Unlock()
+			require.Equal(t, []httpclient.AttemptEvent{{Method: http.MethodGet, Host: "down.test"}}, obs.rejected,
+				"one rejection, reported once")
+			require.Len(t, obs.states, 1)
+			require.Equal(t, "down.test", obs.states[0].Host)
+			require.Equal(t, gobreaker.StateClosed, obs.states[0].From)
+			require.Equal(t, gobreaker.StateOpen, obs.states[0].To)
+			require.Equal(t, []gobreaker.State{gobreaker.StateOpen}, obs.breakers.States())
+			require.True(t, obs.done[len(obs.done)-1].Failed, "the rejected request failed")
+		})
+	}
 }
