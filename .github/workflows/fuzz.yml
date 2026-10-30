@@ -51,10 +51,18 @@ jobs:
           key: fuzz-corpus-${{ github.run_id }}
           restore-keys: fuzz-corpus-
 
+      # Dispatch inputs are untrusted text: checked against narrow allowlists
+      # here, and the Makefile reads them from the environment, quoted, after
+      # checking them again.
       - name: Fuzz
         env:
           GOCACHE: ${{ github.workspace }}/.gocache
-        run: make fuzz FUZZTIME=${{ inputs.fuzztime || '2m' }} FUZZPKG=${{ inputs.fuzzpkg || './...' }}
+          FUZZTIME: ${{ inputs.fuzztime || '2m' }}
+          FUZZPKG: ${{ inputs.fuzzpkg || './...' }}
+        run: |
+          [[ "$FUZZTIME" =~ ^[0-9]{1,6}(ms|s|m|h|x)$ ]] || { echo "invalid fuzztime" >&2; exit 2; }
+          [[ "$FUZZPKG" =~ ^\./[A-Za-z0-9_./-]*$ ]] || { echo "invalid fuzzpkg" >&2; exit 2; }
+          make fuzz
 
       # A crash makes Go write the minimized reproducer to the package's
       # testdata/fuzz/<Target>/ directory. Uploading it is what turns a red
