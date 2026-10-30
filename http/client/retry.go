@@ -191,8 +191,8 @@ func filterRedirectCookies(req *http.Request, via []*http.Request) {
 	if !changed {
 		return
 	}
-	slices.Sort(kept) // as net/http, for a deterministic header
-	req.Header.Set("Cookie", strings.Join(kept, "; "))
+	slices.Sort(kept)                                  // as net/http, for a deterministic header
+	req.Header.Set("Cookie", strings.Join(kept, "; ")) // #nosec G119 -- a subset of the Cookie header net/http already forwarded
 }
 
 // addCookieNames adds the names of the cookies resp sets to set.
