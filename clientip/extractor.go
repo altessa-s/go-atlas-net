@@ -252,28 +252,27 @@ func forwardedForIPs(values []string) []string {
 }
 
 func (e *Extractor) parseAndCheckIP(ctx context.Context, ip, header string) (netip.Addr, bool) {
-	// Check cache first if available
-	if e.cache != nil {
-		if cachedAddr, ok := e.cache.Get(ip); ok {
-			if e.debugEnabled(ctx) {
-				e.opts.logger.DebugContext(ctx, "found in cache",
-					slog.String("ip", cachedAddr.String()),
-					slog.Bool("is_private", netipx.IsPrivate(cachedAddr)))
-			}
-
-			if !netipx.IsPrivate(cachedAddr) {
-				return cachedAddr, true
-			}
-
-			return netip.Addr{}, false
+	if cachedAddr, ok := e.cacheGet(ip); ok {
+		if e.debugEnabled(ctx) {
+			e.opts.logger.DebugContext(ctx, "found in cache",
+				slog.String("ip", cachedAddr.String()),
+				slog.Bool("is_private", netipx.IsPrivate(cachedAddr)))
 		}
+		if !netipx.IsPrivate(cachedAddr) {
+			return cachedAddr, true
+		}
+		return netip.Addr{}, false
 	}
 
 	addr, err := parseAddr(ip)
 	if err != nil {
-		e.opts.logger.WarnContext(ctx, "failed to parse IP",
-			slog.String("ip", ip),
-			slog.String("error", err.Error()))
+		// Header values come from clients: logging every malformed one above
+		// debug would let any client flood the logs.
+		if e.debugEnabled(ctx) {
+			e.opts.logger.DebugContext(ctx, "failed to parse IP",
+				slog.String("ip", ip),
+				slog.String("error", err.Error()))
+		}
 		return netip.Addr{}, false
 	}
 
@@ -411,6 +410,14 @@ func (e *Extractor) xffAddr(ip string) (netip.Addr, bool) {
 // client-written substrings of the request's header values, so they are never
 // interned process-wide, and the cache keeps its own copy of the key instead
 // of pinning the whole header for as long as the entry lives.
+// cacheGet returns the cached address of ip, if the extractor has a cache.
+func (e *Extractor) cacheGet(ip string) (netip.Addr, bool) {
+	if e.cache == nil {
+		return netip.Addr{}, false
+	}
+	return e.cache.Get(ip)
+}
+
 func (e *Extractor) cachePut(ip string, addr netip.Addr) {
 	if e.cache != nil {
 		e.cache.Add(strings.Clone(ip), addr)
