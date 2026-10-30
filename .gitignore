@@ -1,0 +1,52 @@
+# IDE
+.idea/
+
+# Local AI tooling & internal docs
+/.mcp.json
+/.claude/
+/.ai-factory*
+/AGENTS.md
+/CLAUDE.md
+/CHANGELOG.md
+*_PLAN.md
+/graphify-out/
+
+# Local automation scripts
+/scripts/
+
+# Test binary, build with `go test -c`
+*.test
+
+.DS_Store
+go.work
+go.work.sum
+
+tools/codegen/goconfig/goconfig
+tools/codegen/optgen/optgen
+/bin/
+/plugin-sign
+build/
+dist/
+
+# Test & coverage
+coverage.out
+coverage.html
+*.coverprofile
+bench.txt
+
+# Vendor (use go mod download)
+vendor/
+
+# Environment & secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Editors
+.vscode/
+*.swp
+*~
+
+tmp/
+/plans/
