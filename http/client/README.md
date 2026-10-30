@@ -149,13 +149,13 @@ arbitrary cause (a `*url.Error`, a custom dialer's error) may embed the full URL
 (it may quote `resp.Request.URL`) and a failure to buffer or rewind the request body are rendered the same way before they are logged, stored or
 returned.
 
-`net/http`'s `Client.Do` wraps every failure in a `*url.Error` that quotes the full request URL, and its nested text may quote a server-supplied URL
-(an unparsable redirect `Location`). `RedactError(err)` never modifies `err` (a transport may share it between requests). A `*url.Error` is returned as a
+`net/http`'s `Client.Do` wraps every failure in a `*url.Error` that quotes the full request URL, and its nested text may quote a server-supplied URL (an
+unparsable redirect `Location`). `RedactError(err)` never modifies `err` (a transport may share it between requests). A `*url.Error` is returned as a
 redacted copy: the URL loses its user info, query string and fragment, and the nested error renders trusted text. A wrapper around `*url.Error`s
 (`fmt.Errorf` with `%w`, `errors.Join`, a caller's type) may have captured a URL in its own text, so it is returned inside an error whose text is the
-redacted `*url.Error`s' only and through which `errors.As` finds the redacted copy; an error whose cause graph is too large to inspect fully gets a fixed
-text and wraps `ErrUninspectableCause` instead of its causes. Otherwise causes stay reachable for `errors.Is`/`errors.As` and the `core/errors` classifiers
-(`IsResourceRedirects`, `IsUnsupportedProtocolScheme`, `IsCertUnknownAuthority`, `IsConnectionRefused`, `IsRequestTimeoutError`). The
+redacted `*url.Error`s' only and through which `errors.As` finds the redacted copy; an error whose cause graph is too large to inspect fully gets a
+fixed text and wraps `ErrUninspectableCause` instead of its causes. Otherwise causes stay reachable for `errors.Is`/`errors.As` and the `core/errors`
+classifiers (`IsResourceRedirects`, `IsUnsupportedProtocolScheme`, `IsCertUnknownAuthority`, `IsConnectionRefused`, `IsRequestTimeoutError`). The
 `HTTPClient` methods and `RequestBuilder.Send` apply it already; a caller of the `*http.Client` that `New` returns applies it before logging or
 returning an error:
 
@@ -189,8 +189,8 @@ The client records no metrics and reports no health itself. It delivers its tele
 | `BreakerRejected`     | an attempt was rejected by an open (or saturated half-open) circuit breaker                              |
 | `BreakerStateChanged` | a breaker changed state; runs with the breaker's lock held, so it must not read `Breakers` synchronously |
 
-[observe](https://github.com/altessa-s/go-atlas/tree/develop/net/http/client/observe) implements an `Observer` that records the client's Prometheus metrics and registers health checks derived from breaker state
-and retry rate:
+[observe](https://github.com/altessa-s/go-atlas/tree/develop/net/http/client/observe) implements an `Observer` that records the client's Prometheus
+metrics and registers health checks derived from breaker state and retry rate:
 
 ```go
 coord := health.New()
@@ -232,13 +232,13 @@ loopback, link-local and reserved resolved addresses with an `SSRFError`, checks
 `NewEgressPolicy(allow, deny []EgressRule)` compiles rules once; an `EgressRule` matches a host glob (`path.Match` syntax, case-insensitive, `*` also
 matches dots), a `netip.Prefix` and a port, ANDed, zero matchers matching anything. A destination is refused when a deny rule matches (deny wins),
 allowed when an allow rule matches, and otherwise refused only when its resolved address is private, loopback, link-local or reserved. Allow rules only
-exempt addresses from that default denial, so each needs a CIDR; host and port narrow it. A deny rule needs at least one matcher. Invalid rules fail with
-`ErrInvalidEgressRule`. An IPv4-mapped address (`::ffff:a.b.c.d`) is decided as the IPv4 address it connects to — net.Dialer and proxydial both
-reach it over IPv4 — so IPv4 rules match it and IPv6 prefixes, `::/0` included, match IPv6 connections only; a policy decides an address alike in
-either form. An IPv4-mapped prefix of length 96 or more is the equivalent IPv4 prefix, a shorter one is rejected; zones are ignored. Internationalized names match in the ASCII
-(punycode) form net/http dials: a rule written `bücher.example` matches `xn--bcher-kva.example` and `bücher.example` alike, on a direct dial and before
-a proxy; a Unicode label holding a glob metacharacter is rejected, write it in punycode. The Unicode full stops IDNA reads as dots (U+3002, U+FF0E,
-U+FF61) separate labels in rules and hosts alike, a trailing one included.
+exempt addresses from that default denial, so each needs a CIDR; host and port narrow it. A deny rule needs at least one matcher. Invalid rules fail
+with `ErrInvalidEgressRule`. An IPv4-mapped address (`::ffff:a.b.c.d`) is decided as the IPv4 address it connects to — net.Dialer and proxydial both
+reach it over IPv4 — so IPv4 rules match it and IPv6 prefixes, `::/0` included, match IPv6 connections only; a policy decides an address alike in either
+form. An IPv4-mapped prefix of length 96 or more is the equivalent IPv4 prefix, a shorter one is rejected; zones are ignored. Internationalized names
+match in the ASCII (punycode) form net/http dials: a rule written `bücher.example` matches `xn--bcher-kva.example` and `bücher.example` alike, on a
+direct dial and before a proxy; a Unicode label holding a glob metacharacter is rejected, write it in punycode. The Unicode full stops IDNA reads as
+dots (U+3002, U+FF0E, U+FF61) separate labels in rules and hosts alike, a trailing one included.
 
 The rule grammar lives in [`net/egressrule`](../../egressrule/README.md), shared with the `httpconfig.ClientSSRF` schema, so a
 configured rule is validated exactly as the engine compiles it. `ParseEgressPolicy(allow, deny []egressrule.Rule)` compiles rules in their textual
@@ -253,18 +253,17 @@ configured policy.
 | `proxydial.WithSSRFGuard(policy.Check)` | Proxied dials: the destination is resolved locally, every address checked, and the proxy asked for the approved IP    |
 
 Every refusal is an `*SSRFError` matching `ErrSSRFBlocked` and is never retried; for a deny rule `SSRFError.Rule` names it (`deny[0] host=*.internal`).
-`EgressRule.Name` replaces the positional name in that label (`deny[7]`, `allowPrivate`), so a caller compiling a subset of its own rules can keep
-its numbering; it is not a matcher, and it must be 1 to 64 characters of `A-Z a-z 0-9 _ . - [ ]`, so the label survives the redaction of client
-errors. `NormalizeEgressHostGlob(glob)` validates a host glob and returns the form the policy matches (lower case, punycode labels, Unicode full
-stops as dots); the normalized form is validated again, so a glob such as `example.` plus a soft hyphen, which IDNA maps to `example.`, is
-rejected. Hand rules on to another enforcer (a proxy, a browser) in this form. `policy.Explain(host, dst)` returns the `EgressDecision` behind `Check`: `Allowed`, a `Reason` (`EgressDenyRule`, `EgressAllowRule`,
-`EgressPrivateDefault`, `EgressPublic`, `EgressInvalidAddress`; `String()` gives `deny_rule`, ...), the matching rule's label for deny and allow
-rules (`allowedCIDRs[i]` for `WithSSRFAllowedCIDRs`), the host and the decided (unmapped) address; `Err()` is the `Check` result.
-`policy.CheckHost(host, port)` decides a destination before its host is resolved: a host name against the deny rules without a CIDR, a literal IP
-host (in any form net/http sends) in full.
-With an explicit client proxy, a target host name is resolved by the proxy and checked only against the deny rules without a CIDR, while a literal IP
-target is checked in full. To also resolve and pin proxied targets, build the transport with [`proxydial`](../../proxydial/README.md) and
-`WithSSRFGuard`.
+`EgressRule.Name` replaces the positional name in that label (`deny[7]`, `allowPrivate`), so a caller compiling a subset of its own rules can keep its
+numbering; it is not a matcher, and it must be 1 to 64 characters of `A-Z a-z 0-9 _ . - [ ]`, so the label survives the redaction of client errors.
+`NormalizeEgressHostGlob(glob)` validates a host glob and returns the form the policy matches (lower case, punycode labels, Unicode full stops as dots);
+the normalized form is validated again, so a glob such as `example.` plus a soft hyphen, which IDNA maps to `example.`, is rejected. Hand rules on to
+another enforcer (a proxy, a browser) in this form. `policy.Explain(host, dst)` returns the `EgressDecision` behind `Check`: `Allowed`, a `Reason`
+(`EgressDenyRule`, `EgressAllowRule`, `EgressPrivateDefault`, `EgressPublic`, `EgressInvalidAddress`; `String()` gives `deny_rule`, ...), the matching
+rule's label for deny and allow rules (`allowedCIDRs[i]` for `WithSSRFAllowedCIDRs`), the host and the decided (unmapped) address; `Err()` is the
+`Check` result. `policy.CheckHost(host, port)` decides a destination before its host is resolved: a host name against the deny rules without a CIDR, a
+literal IP host (in any form net/http sends) in full. With an explicit client proxy, a target host name is resolved by the proxy and checked only
+against the deny rules without a CIDR, while a literal IP target is checked in full. To also resolve and pin proxied targets, build the transport with
+[`proxydial`](../../proxydial/README.md) and `WithSSRFGuard`.
 
 ```go
 policy, err := client.NewEgressPolicy(
