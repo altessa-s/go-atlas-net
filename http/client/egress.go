@@ -32,6 +32,9 @@ const (
 	defaultHTTPSPort = 443
 )
 
+// schemeHTTPS is the URL scheme of HTTP over TLS.
+const schemeHTTPS = "https"
+
 // EgressRule matches an outbound destination. Every matcher that is set must
 // match (AND); a zero matcher matches anything.
 type EgressRule struct {
@@ -444,7 +447,7 @@ func targetPort(u *url.URL) uint16 {
 		}
 		return uint16(n)
 	}
-	if u.Scheme == "https" {
+	if u.Scheme == schemeHTTPS {
 		return defaultHTTPSPort
 	}
 	return defaultHTTPPort

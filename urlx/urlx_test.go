@@ -172,7 +172,8 @@ func TestJoinPath(t *testing.T) {
 
 			base, err := urlx.ParseBaseURL(tc.base, urlx.WithEndpointMode())
 			require.NoError(t, err)
-			got := urlx.JoinPath(base, tc.elem...)
+			got, err := urlx.JoinPath(base, tc.elem...)
+			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 
 			parsed, err := url.Parse(got)
@@ -190,9 +191,81 @@ func TestJoinPathDoesNotMutateBase(t *testing.T) {
 
 	base, err := urlx.ParseBaseURL("https://h/v1")
 	require.NoError(t, err)
-	_ = urlx.JoinPath(base, "chat")
+	_, err = urlx.JoinPath(base, "chat")
+	require.NoError(t, err)
 	require.Equal(t, "https://h/v1", base.String())
-	require.Empty(t, urlx.JoinPath(nil, "x"))
+	got, err := urlx.JoinPath(nil, "x")
+	require.NoError(t, err)
+	require.Empty(t, got)
+}
+
+func TestJoinPathRejectsDotSegments(t *testing.T) {
+	t.Parallel()
+
+	base, err := urlx.ParseBaseURL("https://h/v1")
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name string
+		elem []string
+	}{
+		{name: "dot", elem: []string{"."}},
+		{name: "dot dot", elem: []string{".."}},
+		{name: "leading dot dot", elem: []string{"../admin"}},
+		{name: "inner dot dot", elem: []string{"a/../../admin"}},
+		{name: "trailing dot", elem: []string{"a/."}},
+		{name: "dot dot with slashes", elem: []string{"//..//"}},
+		{name: "later element", elem: []string{"chat", ".."}},
+		{name: "secret element", elem: []string{"botSECRET-TOKEN/.."}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := urlx.JoinPath(base, tc.elem...)
+			require.ErrorIs(t, err, urlx.ErrDotSegment)
+			require.ErrorIs(t, err, coreerrs.ErrInvalidArgument)
+			require.NotContains(t, err.Error(), "SECRET")
+			require.Empty(t, got)
+		})
+	}
+
+	// Segments that merely contain dots, or escaped dots, are literal names.
+	for elem, want := range map[string]string{
+		"...":    "https://h/v1/...",
+		".well":  "https://h/v1/.well",
+		"a..b":   "https://h/v1/a..b",
+		"%2e%2e": "https://h/v1/%252e%252e",
+	} {
+		got, err := urlx.JoinPath(base, elem)
+		require.NoError(t, err)
+		require.Equal(t, want, got)
+	}
+}
+
+// FuzzJoinPath checks that an element either is rejected with ErrDotSegment
+// or yields a URL whose path stays under the base path and has no dot
+// segment, so no server-side resolution can climb above the base.
+func FuzzJoinPath(f *testing.F) {
+	for _, seed := range []string{"chat/completions", "..", "../x", "a/./b", "%2e%2e", "a?b#c", "//", "", "..."} {
+		f.Add(seed)
+	}
+	base, err := urlx.ParseBaseURL("https://h/v1")
+	require.NoError(f, err)
+	f.Fuzz(func(t *testing.T, elem string) {
+		got, err := urlx.JoinPath(base, elem)
+		if err != nil {
+			require.ErrorIs(t, err, urlx.ErrDotSegment)
+			return
+		}
+		u, err := url.Parse(got)
+		require.NoError(t, err)
+		require.Empty(t, u.RawQuery)
+		require.Empty(t, u.Fragment)
+		p := u.EscapedPath()
+		require.True(t, p == "/v1" || strings.HasPrefix(p, "/v1/"), "path %q escapes the base", p)
+		for seg := range strings.SplitSeq(u.Path, "/") {
+			require.NotContains(t, []string{".", ".."}, seg, "path %q has a dot segment", u.Path)
+		}
+	})
 }
 
 func TestCanonical(t *testing.T) {

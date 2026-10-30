@@ -14,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/altessa-s/go-atlas-core/time/clock"
+
 	"github.com/altessa-s/go-atlas-net/http/client/limiters/hostpacer"
 )
 
@@ -41,7 +43,8 @@ func TestNewRejectsNonPositive(t *testing.T) {
 func TestAllowSpacesPerHost(t *testing.T) {
 	t.Parallel()
 
-	p, err := hostpacer.New(time.Hour, 1)
+	fake := clock.NewFake(time.Now())
+	p, err := hostpacer.New(time.Hour, 1, hostpacer.WithClock(fake))
 	require.NoError(t, err)
 	ctx := t.Context()
 	require.NoError(t, p.Allow(ctx, "a.example"))
@@ -49,28 +52,29 @@ func TestAllowSpacesPerHost(t *testing.T) {
 
 	short, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	start := time.Now()
+	start := fake.Now()
 	err = p.Allow(short, "a.example")
 	require.ErrorIs(t, err, context.DeadlineExceeded, "the next slot lies beyond the deadline")
-	require.Less(t, time.Since(start), 500*time.Millisecond, "a slot past the deadline is refused without waiting")
+	require.Equal(t, start, fake.Now(), "a slot past the deadline is refused without waiting")
 }
 
 func TestAllowWaitsForTheSlot(t *testing.T) {
 	t.Parallel()
 
 	const interval = 50 * time.Millisecond
-	p, err := hostpacer.New(interval, 1)
+	fake := clock.NewFake(time.Now())
+	p, err := hostpacer.New(interval, 1, hostpacer.WithClock(fake))
 	require.NoError(t, err)
 	require.NoError(t, p.Allow(t.Context(), "h"))
-	start := time.Now()
+	start := fake.Now()
 	require.NoError(t, p.Allow(t.Context(), "h"))
-	require.GreaterOrEqual(t, time.Since(start), interval-5*time.Millisecond)
+	require.InDelta(t, float64(interval), float64(fake.Now().Sub(start)), float64(time.Millisecond), "the wait runs on the clock")
 }
 
 func TestAllowBurst(t *testing.T) {
 	t.Parallel()
 
-	p, err := hostpacer.New(time.Hour, 3)
+	p, err := hostpacer.New(time.Hour, 3, hostpacer.WithClock(clock.NewFake(time.Now())))
 	require.NoError(t, err)
 	for range 3 {
 		require.NoError(t, p.Allow(t.Context(), "h"))
@@ -83,7 +87,7 @@ func TestAllowBurst(t *testing.T) {
 func TestAllowCanceled(t *testing.T) {
 	t.Parallel()
 
-	p, err := hostpacer.New(time.Hour, 1)
+	p, err := hostpacer.New(time.Hour, 1, hostpacer.WithClock(clock.NewFake(time.Now())))
 	require.NoError(t, err)
 	require.NoError(t, p.Allow(t.Context(), "h"))
 
@@ -92,29 +96,11 @@ func TestAllowCanceled(t *testing.T) {
 	require.ErrorIs(t, p.Allow(ctx, "h"), context.Canceled)
 }
 
-// fakeClock is a settable clock for the sweep.
-type fakeClock struct {
-	mu sync.Mutex
-	t  time.Time
-}
-
-func (c *fakeClock) now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.t
-}
-
-func (c *fakeClock) advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.t = c.t.Add(d)
-}
-
 func TestEvictionDropsOnlyRefilledBuckets(t *testing.T) {
 	t.Parallel()
 
-	clock := &fakeClock{t: time.Now()}
-	p, err := hostpacer.New(time.Hour, 1, hostpacer.WithMaxHosts(2), hostpacer.WithNow(clock.now))
+	fake := clock.NewFake(time.Now())
+	p, err := hostpacer.New(time.Hour, 1, hostpacer.WithMaxHosts(2), hostpacer.WithClock(fake))
 	require.NoError(t, err)
 	ctx := t.Context()
 
@@ -123,7 +109,7 @@ func TestEvictionDropsOnlyRefilledBuckets(t *testing.T) {
 	require.NoError(t, p.Allow(ctx, "c"))
 	require.Equal(t, 3, p.Len(), "buckets still refilling are never dropped")
 
-	clock.advance(2 * time.Hour)
+	fake.Advance(2 * time.Hour)
 	require.NoError(t, p.Allow(ctx, "d"))
 	require.Equal(t, 1, p.Len(), "refilled buckets are dropped when a new host arrives over the cap")
 }
@@ -133,8 +119,8 @@ func TestEvictionDropsOnlyRefilledBuckets(t *testing.T) {
 func TestEvictionKeepsReservedBuckets(t *testing.T) {
 	t.Parallel()
 
-	clock := &fakeClock{t: time.Now()}
-	p, err := hostpacer.New(time.Hour, 1, hostpacer.WithMaxHosts(1), hostpacer.WithNow(clock.now))
+	fake := clock.NewFake(time.Now())
+	p, err := hostpacer.New(time.Hour, 1, hostpacer.WithMaxHosts(1), hostpacer.WithClock(fake))
 	require.NoError(t, err)
 
 	require.NoError(t, p.Allow(t.Context(), "x"))
@@ -152,8 +138,8 @@ func TestEvictionKeepsReservedBuckets(t *testing.T) {
 func TestConcurrentEvictionNeverExceedsBurst(t *testing.T) {
 	t.Parallel()
 
-	clock := &fakeClock{t: time.Now()}
-	p, err := hostpacer.New(time.Hour, 1, hostpacer.WithMaxHosts(1), hostpacer.WithNow(clock.now))
+	fake := clock.NewFake(time.Now())
+	p, err := hostpacer.New(time.Hour, 1, hostpacer.WithMaxHosts(1), hostpacer.WithClock(fake))
 	require.NoError(t, err)
 
 	var (

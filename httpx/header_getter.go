@@ -6,9 +6,11 @@ package httpx
 
 import "net/http"
 
-// HTTPHeaderGetter adapts an [http.Request] to the header getter interfaces
-// used by [clientip.Extractor] and [requestid.Generator]. It is safe for
-// concurrent reads when the underlying request is not mutated.
+// HTTPHeaderGetter is a provider-side adapter over an [http.Request]. It
+// satisfies consumer-side header interfaces implicitly: multi-value getters
+// such as clientip.HeaderGetter through [HTTPHeaderGetter.GetHeader], and
+// single-value getters through [HTTPHeaderGetter.GetSingleHeader]. It is
+// safe for concurrent reads when the underlying request is not mutated.
 type HTTPHeaderGetter struct {
 	request *http.Request
 }

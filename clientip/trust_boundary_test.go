@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/altessa-s/go-atlas-net/clientip"
+	"github.com/altessa-s/go-atlas-net/httpx"
 )
 
 func TestXFFTrustBoundary(t *testing.T) {
@@ -34,10 +35,10 @@ func TestXFFTrustBoundary(t *testing.T) {
 			peer := netip.MustParseAddr("10.0.0.1")
 			extractor, err := clientip.NewExtractor(clientip.WithTrustedProxies(netip.MustParsePrefix("10.0.0.1/32")))
 			require.NoError(t, err)
-			headers := clientip.HTTPHeader(http.Header{
+			headers := httpx.NewHTTPHeaderGetter(&http.Request{Header: http.Header{
 				"X-Forwarded-For": {"8.8.8.8, " + tc.hop + ", 10.0.0.1"},
 				"X-Real-Ip":       {"1.1.1.1"},
-			})
+			}})
 			for range 2 { // Exercise cold and warm address caches.
 				require.Equal(t, peer, extractor.Extract(t.Context(), peer, headers))
 			}
@@ -107,7 +108,7 @@ func TestVendorHeaderSpoofing(t *testing.T) {
 			extractor, err := clientip.NewExtractor(append([]clientip.Option{trusted}, tc.opts...)...)
 			require.NoError(t, err)
 			for range 2 { // Exercise cold and warm address caches.
-				require.Equal(t, tc.want, extractor.Extract(t.Context(), peer, clientip.HTTPHeader(tc.headers)))
+				require.Equal(t, tc.want, extractor.Extract(t.Context(), peer, httpx.NewHTTPHeaderGetter(&http.Request{Header: tc.headers})))
 			}
 		})
 	}

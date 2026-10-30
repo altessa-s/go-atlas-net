@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/altessa-s/go-atlas-core/time/clock"
+
 	"github.com/altessa-s/go-atlas-net/http/client/limiters"
 )
 
@@ -80,6 +82,21 @@ func WithClient(v *http.Client) Option {
 			return
 		}
 		o.client = v
+	}
+}
+
+// WithClock sets the clock option.
+func WithClock(v clock.Clock) Option {
+	return func(o *options) {
+		switch rv := reflect.ValueOf(v); rv.Kind() {
+		case reflect.Invalid:
+			return
+		case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+			if rv.IsNil() {
+				return
+			}
+		}
+		o.clock = v
 	}
 }
 
@@ -325,6 +342,7 @@ func defaultOptions() *options {
 		breakerMaxRequests: DefaultBreakerMaxRequests,
 		breakerTimeout:     DefaultBreakerTimeout,
 		client:             defaultClient(),
+		clock:              clock.Real(),
 		logger:             slog.New(slog.DiscardHandler),
 		maxHostBreakers:    DefaultMaxHostBreakers,
 		observer:           defaultObserver(),

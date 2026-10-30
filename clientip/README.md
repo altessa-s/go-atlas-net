@@ -31,11 +31,11 @@ both use it, and code outside the middleware chain can call it directly.
 |--------------------------------|-------------------------------------------------------------------------|
 | `Extractor`                    | Resolves the client IP; safe for concurrent use                         |
 | `HeaderGetter`                 | Multi-valued header access the extractor reads from                     |
-| `HTTPHeader`                   | Adapts an `http.Header` to `HeaderGetter`                               |
 | `NewContext` / `FromContext`   | Carry the resolved IP through a request context                         |
 | `DefaultHeaders`               | Default proxy header list (`X-Forwarded-For` only)                      |
 
-Address classification (`IsPrivate`, `IsTrusted`, `InList`, `ParsePrefixes`) lives in [`netipx`](../netipx).
+Address classification (`IsPrivate`, `IsTrusted`, `InList`, `ParsePrefixes`) lives in [`netipx`](../netipx). The package ships no transport adapter:
+[`httpx.NewHTTPHeaderGetter`](../httpx) (HTTP) and [`metadata.NewHeaderGetter`](../grpc/metadata) (gRPC) satisfy `HeaderGetter` implicitly.
 
 ## Usage
 
@@ -53,5 +53,5 @@ if err != nil {
     return err
 }
 peer, _ := netip.ParseAddrPort(r.RemoteAddr)
-ip := extractor.Extract(r.Context(), peer.Addr(), clientip.HTTPHeader(r.Header))
+ip := extractor.Extract(r.Context(), peer.Addr(), httpx.NewHTTPHeaderGetter(r))
 ```

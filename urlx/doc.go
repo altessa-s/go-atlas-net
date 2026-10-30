@@ -26,7 +26,9 @@
 //
 // JoinPath appends literal path elements to a parsed base, escaping each
 // segment, so an element never starts a query or fragment and the escaped
-// base path ("%2F" included) is kept byte for byte.
+// base path ("%2F" included) is kept byte for byte. An element with a "." or
+// ".." segment returns ErrDotSegment, so untrusted elements cannot climb out
+// of the base path.
 //
 // # Canonical form
 //
@@ -41,6 +43,9 @@
 //	if err != nil {
 //	    return fmt.Errorf("%w: base URL: %w", ErrConfig, err)
 //	}
-//	endpoint := urlx.JoinPath(base, "bot"+token, "sendMessage")
+//	endpoint, err := urlx.JoinPath(base, "bot"+token, "sendMessage")
+//	if err != nil {
+//	    return err
+//	}
 //	scope := urlx.Canonical(base) // key a stored credential by endpoint
 package urlx

@@ -25,7 +25,7 @@ error never quotes the request URL. `client.WithLimiter` installs this RoundTrip
 
 | Function          | Description                                                                              |
 |-------------------|------------------------------------------------------------------------------------------|
-| `NewRoundTripper` | Wraps an `http.RoundTripper` with per-host rate limiting via `RequestsLimiter`           |
+| `NewRoundTripper` | Wraps an `http.RoundTripper` with per-host rate limiting via `RequestsLimiter`; a nil limiter passes through |
 | `IsRateLimitError`| Extracts a `*RateLimitError` from an error chain (nil otherwise)                         |
 | `Chain`           | Consults limiters in order and stops at the first refusal; skips nil, returns nil or the single limiter as is |
 

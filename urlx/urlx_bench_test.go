@@ -27,7 +27,9 @@ func BenchmarkJoinPath(b *testing.B) {
 
 	b.ReportAllocs()
 	for b.Loop() {
-		_ = urlx.JoinPath(base, "chat/completions")
+		if _, err := urlx.JoinPath(base, "chat/completions"); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

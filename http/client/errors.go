@@ -17,20 +17,21 @@ import (
 //	if errors.Is(err, client.ErrResponseSizeExceeded) { ... }
 var (
 	// ErrCircuitBreakerOpen indicates that the circuit breaker is in open state.
-	// Returned (as a wrapped [CircuitBreakerError]) by [HTTPClient.Do] and all
-	// convenience methods ([HTTPClient.Get], [HTTPClient.Post], etc.) when the
+	// Returned (as a wrapped [CircuitBreakerError]) by the Do method of
+	// [HTTPClient] and all convenience methods ([VerbClient.Get], [VerbClient.Post], etc.) when the
 	// per-host or global circuit breaker has tripped. Use [IsCircuitBreakerError]
 	// or [IsCircuitBreakerOpen] to inspect the error.
 	ErrCircuitBreakerOpen = errors.New("circuit breaker is open")
 
 	// ErrResponseSizeExceeded indicates response size exceeded the configured limit
 	// set via [WithMaxResponseSize]. Returned (as a [ResponseSizeError]) by the
-	// circuit-breaker transport when Content-Length exceeds the threshold.
+	// response-size transport, above the circuit breaker, when Content-Length
+	// exceeds the threshold.
 	// Use [IsResponseSizeError] to extract details.
 	ErrResponseSizeExceeded = errors.New("response size exceeded limit")
 
 	// ErrMaxRetriesExceeded indicates all retry attempts have been exhausted.
-	// Returned (as a [RetryExhaustedError]) by [HTTPClient.Do] and all convenience
+	// Returned (as a [RetryExhaustedError]) by the Do method of [HTTPClient] and all convenience
 	// methods when a retryable failure persists after the configured [WithRetryMax]
 	// limit (or the [WithRetryMaxElapsed] budget) is reached. The underlying
 	// cause — the last transport error, or the last reply's

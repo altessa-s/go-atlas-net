@@ -60,6 +60,7 @@ constructors are available: `New` returns a bare `*http.Client` suitable for any
 | `WithRetryPolicyHandler`     | nil           | Custom retry policy handler; delegate to `DefaultRetryPolicy` for the cases it does not decide                                                      |
 | `WithoutRetry`               | --            | One attempt per request; the response for any status (body unread) or the transport error (redacted text, causes intact) is returned; overrides `WithRetryMax` and `WithRetryPolicyHandler` |
 | `WithoutRedirects`           | follow        | Never follow redirects; a 3xx reply is returned as the response (also over a `WithClient` client, left unchanged) |
+| `WithClock`                  | system        | `clock.Clock` of the retry layer: elapsed budget, backoff and Retry-After waits, Retry-After dates, request duration; `clock.NewFake` in tests |
 | `WithObserver`               | no-op         | `Observer` receiving request, retry and circuit breaker events; `observe.New` records metrics and health from them                                   |
 
 With SSRF protection on (the default) environment proxies are ignored (`HTTP_PROXY`/`HTTPS_PROXY` apply only after `WithoutSSRFProtection()`);
@@ -124,8 +125,25 @@ of 400 and above fails with `UnexpectedStatusError`, and the rest is returned. `
 c := httpclient.New(httpclient.WithRetryableStatuses(408, 429, 500, 502, 503, 504))
 ```
 
+Retries are decided by status and transport error only, never by request method: a POST, PUT or PATCH is replayed (body included) on 408, 429, 502,
+503 and 504, and after a retryable transport error, exactly like a GET, even when the server may already have processed it. Where a replay is unsafe,
+set a `WithRetryPolicyHandler` policy that refuses the retry for those methods (`resp.Request.Method`; see `DefaultRetryPolicy`), build the client for
+non-idempotent requests with `WithoutRetry`, or send an idempotency key the server deduplicates on.
+
+```go
+noPostReplay := func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+    retry, perr := httpclient.DefaultRetryPolicy(ctx, resp, err)
+    if retry && resp != nil && resp.Request != nil && resp.Request.Method == http.MethodPost {
+        return false, &httpclient.UnexpectedStatusError{Status: resp.StatusCode, Method: http.MethodPost}
+    }
+    return retry, perr
+}
+c := httpclient.New(httpclient.WithRetryPolicyHandler(noPostReplay))
+```
+
 The Content-Length precheck of `WithMaxResponseSize` closes an oversized reply unread and fails with a `ResponseSizeError` that keeps its `Status` and
-`Header`, so a caller can tell an oversized success (a POST that was processed) from an oversized rejection.
+`Header`, so a caller can tell an oversized success (a POST that was processed) from an oversized rejection. The limit is its own round tripper
+between the circuit breaker and the retry layer, so an oversized reply counts as a breaker success.
 
 ## Redaction
 
@@ -159,6 +177,10 @@ if err != nil {
 
 | Interface          | Description                                                                                                                                                                                                          |
 |--------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `HTTPClient`       | What `NewHTTPClient` returns: the composition of `httpx.Doer`, `VerbClient`, `OptionsClient` and `RequestFactory`. Accept the narrowest of them a consumer needs, usually `httpx.Doer`                                |
+| `VerbClient`       | Verb helpers: `Get`, `Post`, `PostJSON`, `Put`, `PutJSON`, `Patch`, `PatchJSON`, `Delete`, `Head`, `PostForm`                                                                                                        |
+| `OptionsClient`    | Per-call options: `GetWithOptions`, `PostWithOptions`, `PutWithOptions`, `DeleteWithOptions` applying `RequestOption`s                                                                                              |
+| `RequestFactory`   | `NewRequest()` returning a fluent `RequestBuilder` sent through the client; its header keys are interned per client (`NewRequestBuilder(doer)` keeps them as given)                                                 |
 | `HTTPClientSetter` | Optional `SetHTTPClient(*http.Client)` hook a sub-component implements so a parent can hand it the same shared client (proxy, retry, breaker apply once). Used by `auth/oidc.Provider` to wire `URLRevocationLoader` |
 
 ## Observer

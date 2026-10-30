@@ -23,6 +23,7 @@ import (
 	"github.com/sony/gobreaker/v2"
 
 	"github.com/altessa-s/go-atlas-core/errors/network"
+	"github.com/altessa-s/go-atlas-core/time/clock"
 
 	"github.com/altessa-s/go-atlas-net/http/client/limiters"
 
@@ -85,6 +86,18 @@ type retryRoundTripper struct {
 	// retryableStatuses are the reply statuses the built-in classification
 	// retries (see WithRetryableStatuses).
 	retryableStatuses []int
+	// clock is the time source of the round tripper: the Retry-After of an
+	// HTTP date is relative to its Now, and the request duration reported to
+	// the observer is measured with it. Nil means the system clock.
+	clock clock.Clock
+}
+
+// now returns the current time of the round tripper's clock.
+func (rt *retryRoundTripper) now() time.Time {
+	if rt.clock == nil {
+		return clock.Real().Now()
+	}
+	return rt.clock.Now()
 }
 
 // retryableStatus builds the retryable error of resp, carrying its
@@ -92,7 +105,7 @@ type retryRoundTripper struct {
 func (rt *retryRoundTripper) retryableStatus(resp *http.Response) *retryableStatusError {
 	e := &retryableStatusError{status: resp.StatusCode}
 	if rt.retryAfterMax > 0 && honorsRetryAfter(rt.retryAfterStatuses, resp.StatusCode) {
-		e.retryAfter, _ = ParseRetryAfter(resp.Header, time.Now(), rt.retryAfterMax)
+		e.retryAfter, _ = ParseRetryAfter(resp.Header, rt.now(), rt.retryAfterMax)
 	}
 	return e
 }
@@ -268,7 +281,7 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 
 	ctx := req.Context()
 	method := req.Method
-	start := time.Now()
+	start := rt.now()
 
 	call := &retryCall{
 		rt:  rt,
@@ -303,7 +316,7 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		StatusClass: statusClass,
 		Retries:     call.retryAttempts,
 		Failed:      retryErr != nil,
-		Duration:    time.Since(start),
+		Duration:    rt.now().Sub(start),
 	})
 	return resp, err
 }

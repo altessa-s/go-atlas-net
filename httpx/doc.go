@@ -2,17 +2,26 @@
 // Use of this source code is governed by license that can be found in
 // the LICENSE file.
 
-// Package httpx provides foundational HTTP utilities and types.
-// It complements the standard net/http package with reusable components
-// for building resilient HTTP clients and servers.
+// Package httpx holds small net/http extensions shared across the module:
+// function adapters (Doer, DoerFunc, RoundTripperFunc), header name
+// constants, status classes and the request header adapter
+// (HTTPHeaderGetter).
+//
+// # Scope
+//
+// The package deliberately holds no client, IP or policy logic: the outbound
+// client lives in http/client, client IP resolution in clientip and address
+// policy in netipx and egressrule. Keep additions to stateless helpers that
+// several of those packages need.
 //
 // # Header names
 //
 // ContentType, Accept, RetryAfter, RateLimitLimit and the other header name
 // variables are interned at package init so the same string is shared by
 // every request; the Header* constants hold the raw values. HTTPHeaderGetter
-// adapts an [*net/http.Request] to the header getter interface of
-// net/clientip; its gRPC counterpart is net/grpc/metadata.HeaderGetter.
+// adapts an [*net/http.Request] to consumer-side header getter interfaces
+// such as clientip.HeaderGetter; its gRPC counterpart is
+// grpc/metadata.HeaderGetter.
 //
 // # Adapters
 //

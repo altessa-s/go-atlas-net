@@ -26,6 +26,12 @@ var ErrInvalidURL = fmt.Errorf("%w: invalid URL", coreerrs.ErrInvalidArgument)
 // example "must be an https URL") classify it with errors.Is.
 var ErrSchemeNotAllowed = fmt.Errorf("%w: scheme is not allowed", ErrInvalidURL)
 
+// ErrDotSegment reports a path element rejected by [JoinPath] because one of
+// its segments is "." or "..", which a server or proxy may resolve to escape
+// the base path. It wraps [coreerrs.ErrInvalidArgument]. The error text never
+// contains the element, which may carry a credential.
+var ErrDotSegment = fmt.Errorf("%w: dot segment in path element", coreerrs.ErrInvalidArgument)
+
 // ParseBaseURL parses raw as the absolute URL of a service a client sends
 // requests to, and rejects every form that would let a path appended later
 // end up somewhere other than the path:
@@ -87,12 +93,15 @@ func ParseBaseURL(raw string, opts ...Option) (*url.URL, error) {
 // Each element is literal path text: it is split on "/", empty segments are
 // dropped and every segment is escaped with [url.PathEscape], so "?", "#" and
 // "%" in an element stay in the path and never start a query or fragment. A
-// trailing slash on the last element is kept. Dot segments ("." and "..") are
-// not resolved; pass only trusted elements. A query or fragment already on
+// trailing slash on the last element is kept. A query or fragment already on
 // base is kept unchanged (a URL returned by [ParseBaseURL] has none).
-func JoinPath(base *url.URL, elem ...string) string {
+//
+// An element containing a "." or ".." segment (after the split on "/", so
+// "a/../b" and "./x" count) returns [ErrDotSegment], so untrusted elements
+// cannot climb out of the base path. A nil base yields "" and no error.
+func JoinPath(base *url.URL, elem ...string) (string, error) {
 	if base == nil {
-		return ""
+		return "", nil
 	}
 	var p strings.Builder
 	p.WriteString(strings.TrimRight(base.EscapedPath(), "/"))
@@ -101,6 +110,9 @@ func JoinPath(base *url.URL, elem ...string) string {
 		for seg := range strings.SplitSeq(e, "/") {
 			if seg == "" {
 				continue
+			}
+			if seg == "." || seg == ".." {
+				return "", ErrDotSegment
 			}
 			p.WriteByte('/')
 			p.WriteString(url.PathEscape(seg))
@@ -115,7 +127,7 @@ func JoinPath(base *url.URL, elem ...string) string {
 
 	u := *base
 	setEscapedPath(&u, p.String())
-	return u.String()
+	return u.String(), nil
 }
 
 // Canonical renders u in a form suitable for comparing endpoints, for

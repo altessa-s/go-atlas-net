@@ -12,7 +12,7 @@ API path (and a credential in it) into the query or fragment — a bare `?` or `
 | Function       | Description                                                                                                                   |
 |----------------|-------------------------------------------------------------------------------------------------------------------------------|
 | `ParseBaseURL` | Parses an absolute URL with an allowed scheme and a host; rejects userinfo, query (bare `?` too) and fragment (bare `#` too)  |
-| `JoinPath`     | Appends literal path elements to a parsed base, escaping each segment; the escaped base path is kept byte for byte            |
+| `JoinPath`     | Appends literal path elements to a parsed base, escaping each segment; rejects `.` / `..` segments with `ErrDotSegment`       |
 | `Canonical`    | Lower-case scheme and host, escaped path without trailing slashes, no userinfo, query or fragment — for comparing endpoints   |
 
 ## Options
@@ -24,10 +24,11 @@ API path (and a credential in it) into the query or fragment — a bare `?` or `
 
 ## Errors
 
-| Error           | Description                                                                                                 |
-|-----------------|-------------------------------------------------------------------------------------------------------------|
-| `ErrInvalidURL` | Every `ParseBaseURL` failure; wraps `coreerrs.ErrInvalidArgument`; the text names the rule, never the URL   |
-| `ErrSchemeNotAllowed` | A URL valid except for its scheme (the scheme is checked last); wraps `ErrInvalidURL`                |
+| Error                 | Description                                                                                               |
+|-----------------------|-----------------------------------------------------------------------------------------------------------|
+| `ErrInvalidURL`       | Every `ParseBaseURL` failure; wraps `coreerrs.ErrInvalidArgument`; the text names the rule, never the URL |
+| `ErrSchemeNotAllowed` | A URL valid except for its scheme (the scheme is checked last); wraps `ErrInvalidURL`                     |
+| `ErrDotSegment`       | A `JoinPath` element with a `.` or `..` segment; wraps `coreerrs.ErrInvalidArgument`; never names it      |
 
 ## Usage
 
@@ -36,7 +37,10 @@ base, err := urlx.ParseBaseURL(cfg.BaseURL)
 if err != nil {
     return fmt.Errorf("%w: base URL: %w", ErrConfig, err)
 }
-endpoint := urlx.JoinPath(base, "bot"+token, "sendMessage")
+endpoint, err := urlx.JoinPath(base, "bot"+token, "sendMessage")
+if err != nil {
+    return err
+}
 
 // A full endpoint such as https://host/custom/recognize keeps its path.
 ocr, err := urlx.ParseBaseURL(cfg.Endpoint, urlx.WithEndpointMode())
@@ -49,5 +53,7 @@ scope := urlx.Canonical(base)
 
 - `ParseBaseURL` does not trim whitespace and does not lower-case the host; compare URLs with `Canonical`.
 - The escaped path is never decoded: `/a%2Fb` and `/a/b` stay distinct in all three functions.
-- `JoinPath` does not resolve dot segments (`.`, `..`); pass only trusted elements. A trailing slash on the last element is kept.
+- `JoinPath` rejects any element with a `.` or `..` segment (`../x`, `a/./b`) with `ErrDotSegment`, so untrusted elements cannot climb out of the
+  base path; names that merely contain dots (`...`, `.well-known`) and escaped dots (`%2e`, escaped to `%252e`) are literal. A trailing slash on
+  the last element is kept.
 - `Canonical` keeps an explicit port, default or not, because it changes the `Host` header a gateway may route on.
