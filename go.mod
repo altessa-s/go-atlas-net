@@ -2,6 +2,8 @@ module github.com/altessa-s/go-atlas-net
 
 go 1.27.0
 
+toolchain go1.27.3
+
 require (
 	github.com/altessa-s/go-atlas-core v0.1.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7

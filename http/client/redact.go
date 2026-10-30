@@ -468,8 +468,8 @@ func hostOnly(s string) string {
 	if i := strings.IndexAny(s, "/?#"); i >= 0 {
 		s = s[:i]
 	}
-	if i := strings.LastIndexByte(s, '@'); i >= 0 {
-		s = s[i+1:]
+	if _, host, ok := strings.CutLast(s, "@"); ok {
+		s = host
 	}
 	return s
 }
