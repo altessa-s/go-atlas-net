@@ -236,7 +236,8 @@ func (b *pipeBody) Close() error {
 // TestRetry_BufferingHonorsContext checks that buffering a replayable body
 // that never ends stops when the request's context ends — before the read or
 // while it is blocked — with the context's error, the body closed once and
-// one failed request reported.
+// one failed request reported; an ErrorHandler sees the failure once, with
+// zero attempts.
 func TestRetry_BufferingHonorsContext(t *testing.T) {
 	t.Parallel()
 
@@ -248,11 +249,20 @@ func TestRetry_BufferingHonorsContext(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			obs := &recordingObserver{}
+			var handled, tries atomic.Int32
 			c := httpclient.New(
 				httpclient.WithoutSSRFProtection(),
 				httpclient.WithClient(&http.Client{Transport: unreachable(t)}),
 				httpclient.WithObserver(obs),
 				httpclient.WithRetryMax(3),
+				httpclient.WithErrorHandler(func(resp *http.Response, err error, numTries int) (*http.Response, error) {
+					handled.Add(1)
+					tries.Store(int32(numTries)) //nolint:gosec // a small count
+					if resp != nil {
+						return nil, errors.New("the handler received a response")
+					}
+					return nil, err
+				}),
 			)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
@@ -274,6 +284,8 @@ func TestRetry_BufferingHonorsContext(t *testing.T) {
 			}
 			require.ErrorIs(t, err, context.Canceled)
 			require.EqualValues(t, 1, body.closed.Load(), "the body is closed once")
+			require.EqualValues(t, 1, handled.Load(), "the ErrorHandler sees the failure once")
+			require.Zero(t, tries.Load(), "no attempt was sent")
 			select {
 			case <-body.reads:
 				require.True(t, during, "no read starts on an ended context")
