@@ -276,9 +276,15 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	start := rt.now()
 	replay := rt.replayable(req)
 	if replay {
-		if err := rt.bufferBody(req); err != nil {
+		if bufErr := rt.bufferBody(req); bufErr != nil {
+			// A buffering failure (an ended context, a failing body) ends the
+			// call before any attempt: it takes the common terminal path, so
+			// the ErrorHandler sees it with zero attempts, as it does when the
+			// context ended before the first attempt of a body it need not
+			// buffer.
+			resp, err := rt.finish(nil, nil, bufErr, 0)
 			rt.requestDone(req, start, "unknown", 0, true)
-			return nil, err
+			return resp, err
 		}
 	}
 
