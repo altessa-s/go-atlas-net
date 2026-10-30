@@ -1,0 +1,141 @@
+name: CI
+
+on:
+  workflow_call:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+
+      - name: Install golangci-lint
+        # Build the linter from devtools/go.mod, as make lint does: its module
+        # graph pins a golang.org/x/tools that reads Go 1.27 export data. The
+        # golangci-lint-action goinstall mode builds against the linter's own
+        # go.mod and fails typecheck ("export data version 5 is greater than
+        # maximum supported version 2").
+        run: go -C devtools install github.com/golangci/golangci-lint/v2/cmd/golangci-lint
+
+      - name: Run golangci-lint
+        run: golangci-lint run ./...
+
+      - name: Check go fix modernizers
+        # go fix -diff exits non-zero when any modernizer would rewrite code.
+        run: |
+          go fix -diff ./... || { echo "::error::go fix -diff is not empty"; exit 1; }
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+
+      - name: Run tests
+        run: go test -race -shuffle=on -coverprofile=coverage.out ./...
+
+      - name: Report coverage
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep '^total:' | awk '{print $3}' | tr -d '%')
+          echo "Total coverage: ${COVERAGE}%"
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 7
+
+  cross-compile:
+    name: Cross-compile (${{ matrix.goos }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        # linux is covered by the main build; guard the platform-gated
+        # code (*_linux.go / *_other.go) against build-tag rot on the
+        # other supported targets.
+        goos: [darwin, windows]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+        run: go build ./...
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+
+      - name: Run govulncheck
+        run: |
+          (cd devtools && go install golang.org/x/vuln/cmd/govulncheck)
+          govulncheck ./...
+
+      - name: Run gosec
+        run: make gosec
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # gitleaks scans the full commit history, not just the checkout.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+
+      - name: Install gitleaks
+        run: go install github.com/zricethezav/gitleaks/v8@v8.30.1
+
+      - name: Run gitleaks (full history)
+        run: gitleaks detect --redact --source . --config .gitleaks.toml
