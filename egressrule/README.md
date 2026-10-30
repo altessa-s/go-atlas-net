@@ -4,9 +4,9 @@
 import "github.com/altessa-s/go-atlas-net/egressrule"
 ```
 
-Package `egressrule` is the grammar of outbound (egress) allow and deny rules, shared by the configuration schema (`httpconfig.EgressRule` is an
-alias of `egressrule.Rule`) and the egress engine (`httpclient.EgressPolicy`), so a rule is validated the same way wherever it is written. It
-uses `golang.org/x/net/idna`, an explicit exception of the `core` boundary (see `docs/architecture.md`).
+Package `egressrule` is the grammar of outbound (egress) allow and deny rules, shared by configuration schemas (which can alias `egressrule.Rule`)
+and the egress engine (`httpclient.EgressPolicy`), so a rule is validated the same way wherever it is written. It uses `golang.org/x/net/idna` for
+internationalized host names.
 
 ## Types
 

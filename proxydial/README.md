@@ -11,24 +11,17 @@ tunnel through a corporate or egress proxy.
 
 | Layer        | Symbol                                                | Use when…                                                                  |
 |--------------|-------------------------------------------------------|----------------------------------------------------------------------------|
-| **High**     | `factory.New(cfg).Use*().Build()`                     | Your service already loads `proxyconfig.Config` from YAML/env                    |
-| **Middle**   | `proxydial.FromURL(u, opts...)`                       | Proxy comes from a `*url.URL` (env, runtime override, custom resolver)     |
+| **High**     | `proxydial.FromURL(u, opts...)`                       | Proxy comes from a `*url.URL` (config, env, runtime override, resolver)    |
 | **Low**      | `proxydial.HTTPConnect` / `proxydial.SOCKS5Dialer`    | One-shot persistent connection, custom retry policy, custom TLS handshake  |
 
 ## Quick example: SMTP via go-mail
 
 ```go
-import proxydialfactory "github.com/altessa-s/go-atlas-net/proxydial/factory"
-
-dialFunc, err := proxydialfactory.New(cfg.Proxy).
-    UseLogger(logger).
-    Build()
+dialFunc, err := proxydial.FromURL(proxyURL)
 if err != nil {
     return nil, fmt.Errorf("build smtp proxy dialer: %w", err)
 }
-if dialFunc != nil {
-    mailOpts = append(mailOpts, mail.WithDialContextFunc(dialFunc))
-}
+mailOpts = append(mailOpts, mail.WithDialContextFunc(dialFunc))
 client, err := mail.NewClient(host, mailOpts...)
 ```
 
@@ -55,8 +48,7 @@ client := &http.Client{Transport: tr}
 
 | Symbol                                    | Description                                                                                    |
 |-------------------------------------------|------------------------------------------------------------------------------------------------|
-| `factory.DialerBuilder`                   | High-level — fluent builder that folds a `proxyconfig.Config` into a `DialContextFunc`               |
-| `FromURL`                                 | Middle-level — build a `DialContextFunc` from a parsed `*url.URL`                              |
+| `FromURL`                                 | High-level — build a `DialContextFunc` from a parsed `*url.URL`                                |
 | `HTTPConnect`                             | Low-level — open TCP+TLS to the proxy and send a `CONNECT` for `addr`                          |
 | `MaxConnectResponseHeaderBytes`           | Bound of the CONNECT response status line and headers (64 KiB); beyond it `ErrConnectResponseTooLarge` |
 | `SOCKS5Dialer`                            | Low-level — construct a SOCKS5 dialer for `proxyURL`                                           |

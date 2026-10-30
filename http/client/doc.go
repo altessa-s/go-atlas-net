@@ -83,10 +83,9 @@
 // attempt rejected by a breaker and every breaker state transition. [Observer.BreakerStateChanged] runs with
 // the breaker's lock held: it must not read [Breakers] synchronously.
 //
-// The observe subpackage implements an Observer that records the client's Prometheus metrics and derives
-// health checks from breaker state and retry rate:
+// Embed [NoopObserver] to implement only the events of interest:
 //
-//	c := client.New(client.WithObserver(observe.New(meter, coord)))
+//	c := client.New(client.WithObserver(myObserver))
 //
 // # Usage
 //

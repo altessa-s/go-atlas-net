@@ -11,13 +11,13 @@
 import "github.com/altessa-s/go-atlas-net/<package>"
 ```
 
-Network primitives and the outbound HTTP client of the [go-atlas](https://github.com/altessa-s/go-atlas) toolkit: egress rules, HTTP helpers, base
-URLs, forward-proxy dialers, IP helpers, real client IP extraction, the incoming gRPC metadata getter and a resilient HTTP client with retries,
-circuit breaker, SSRF guard and egress policy.
+Network primitives and an outbound HTTP client for Go services and libraries: egress rules, HTTP helpers, base URLs, forward-proxy dialers, IP
+helpers, real client IP extraction, the incoming gRPC metadata getter and a resilient HTTP client with retries, circuit breaker, SSRF guard and
+egress policy.
 
 Each package can be imported independently without pulling in the rest of the module. The packages read no configuration schema and report no
-metrics themselves: the HTTP client publishes events through its `Observer`, and go-atlas maps them to metrics and health
-(`net/http/client/observe`) and configuration to options (`net/http/client/factory`, `net/proxydial/factory`).
+metrics themselves: they are configured through options, and the HTTP client publishes request, retry and circuit breaker events through its
+`Observer` for the caller to turn into metrics and health checks.
 
 ## Requirements
 
@@ -29,7 +29,7 @@ build it.
 | Package                          | Description                                                                                      |
 |----------------------------------|--------------------------------------------------------------------------------------------------|
 | [clientip](./clientip)           | Real client IP behind trusted proxies, for HTTP and gRPC                                         |
-| [egressrule](./egressrule)       | Egress allow/deny rule grammar shared by go-atlas `httpconfig` and the HTTP client egress engine |
+| [egressrule](./egressrule)       | Egress allow/deny rule grammar shared by configuration schemas and the HTTP client egress engine    |
 | [grpc/metadata](./grpc/metadata) | Adapts incoming gRPC metadata to the shared header getter                                        |
 | [http/client](./http/client)     | Resilient outbound HTTP client: retries, circuit breaker, SSRF guard, egress policy, proxies     |
 | [httpx](./httpx)                 | `RoundTripperFunc`, `Doer`, `IsSuccess` / `IsRedirect`, shared header names, `HTTPHeaderGetter`  |
@@ -41,7 +41,6 @@ build it.
 
 - **Minimal dependencies** — the Go standard library, [go-atlas-core](https://github.com/altessa-s/go-atlas-core) and `golang.org/x/net`, plus
   package-scoped exceptions: gRPC (`grpc/metadata`), gobreaker and `golang.org/x/time` (`http/client`), `hashicorp/golang-lru` (`clientip`).
-- **No dependency on go-atlas** — go-atlas depends on this module; observability and configuration adapters live there.
 - **Transport-agnostic core** — `clientip`, `netipx` and `egressrule` take consumer-side interfaces and import no transport framework; `httpx`
   and `grpc/metadata` adapt HTTP and gRPC to them.
 - **Safe by default** — the HTTP client blocks private destinations after DNS resolution, redacts URL secrets from errors and replays only

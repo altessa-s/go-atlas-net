@@ -35,8 +35,8 @@ type options struct {
 	// contacted. The proxy is then asked for an approved IP address instead
 	// of the host name, so it cannot resolve the name to another address.
 	// Without a guard the proxy resolves the destination. Pass
-	// httpclient.EgressPolicy.Check for the go-atlas private-address and
-	// egress-rule checks.
+	// httpclient.EgressPolicy.Check for the private-address and egress-rule
+	// checks.
 	ssrfGuard AddrGuard `opt:"SSRFGuard"`
 
 	// resolver looks up destination host names for ssrfGuard. Defaults to

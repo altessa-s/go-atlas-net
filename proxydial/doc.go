@@ -9,15 +9,9 @@
 //
 // # Layered API
 //
-//   - [github.com/altessa-s/go-atlas-net/proxydial/factory] —
-//     high-level: a fluent builder that turns a
-//     [github.com/altessa-s/go-atlas/config.Proxy] into a
-//     [DialContextFunc]. The intended entry point for service code
-//     that already loads proxyconfig.Config from YAML/env.
-//
-//   - [FromURL] — middle-level: build a [DialContextFunc] from a
-//     parsed *url.URL. Use when the proxy comes from somewhere other
-//     than proxyconfig.Config (env, runtime override, custom resolver).
+//   - [FromURL] — high-level: build a [DialContextFunc] from a
+//     parsed *url.URL. Use when the proxy comes from configuration,
+//     the environment, a runtime override or a custom resolver.
 //
 //   - [HTTPConnect] / [SOCKS5Dialer] — low-level escape hatches: open
 //     a single tunneled connection. Use when you control the
@@ -53,15 +47,12 @@
 //
 // # Why this exists
 //
-// [github.com/altessa-s/go-atlas-net/http/client] and
-// [github.com/altessa-s/go-atlas/transport/grpc/client] each accept a
-// proxy configuration via their option pattern (`WithProxyURL`,
-// `WithProxy`, `WithProxyTLSConfig`). Both internally delegate the
-// "open TCP, optionally wrap with TLS, send CONNECT" wire flow to
-// this package. Public consumers that need raw-TCP-through-proxy
-// (SMTP, SOAP, etc.) use
-// [github.com/altessa-s/go-atlas-net/proxydial/factory] or
-// [FromURL] directly.
+// [github.com/altessa-s/go-atlas-net/http/client] accepts a proxy
+// configuration via its options (`WithProxyURL`, `WithProxy`,
+// `WithProxyTLSConfig`) and delegates the "open TCP, optionally wrap
+// with TLS, send CONNECT" wire flow to this package. Consumers that
+// need raw-TCP-through-proxy (SMTP, SOAP, gRPC, etc.) use [FromURL]
+// directly.
 //
 // # Out of scope
 //
