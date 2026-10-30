@@ -13,6 +13,10 @@
 //   - [NewHTTPClient] returns an [HTTPClient] with convenience methods (Get, PostJSON,
 //     fluent [RequestBuilder], etc.) layered on top.
 //
+// [HTTPClient] composes small interfaces — [httpx.Doer] (Do), [VerbClient] (Get, Post, PostJSON, ...),
+// [OptionsClient] (the *WithOptions methods) and [RequestFactory] (NewRequest) — so consumers accept the
+// narrowest one they need, usually an [httpx.Doer].
+//
 // # Features
 //
 //   - Connection Management: automatic TCP connection pooling and keep-alive configuration; [DefaultPooledTransport]
@@ -21,7 +25,9 @@
 //     [WithoutRetry] sends each request once and returns every reply unclassified. Retries after a 429/503
 //     reply wait at least its Retry-After ([WithRetryAfterMax], [ParseRetryAfter]). The built-in classification retries
 //     [DefaultRetryableStatuses] (change them with [WithRetryableStatuses]) and is exported as [DefaultRetryPolicy] for
-//     custom policies set with [WithRetryPolicyHandler].
+//     custom policies set with [WithRetryPolicyHandler]. Retries are decided by status and transport error only,
+//     never by method: a POST, PUT or PATCH is replayed on 408/429/502/503/504 too (see [DefaultRetryPolicy] to
+//     opt out). [WithClock] sets the time source of the retry layer (a clock.Fake in tests).
 //   - Protection: a circuit breaker per destination host, so one failing endpoint never rejects requests to
 //     another; tune hosts with [WithCircuitBreakerSettings] and bound lazily created breakers with [WithMaxHostBreakers].
 //   - Redirects: followed like net/http by default; [WithoutRedirects] returns a 3xx reply to the caller as the

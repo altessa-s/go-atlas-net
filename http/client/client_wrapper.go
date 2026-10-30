@@ -15,8 +15,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/altessa-s/go-atlas-core/text/strings/intern"
+
 	"github.com/altessa-s/go-atlas-net/httpx"
 
+	corecontext "github.com/altessa-s/go-atlas-core/context"
 	coreerrs "github.com/altessa-s/go-atlas-core/errors"
 	coreio "github.com/altessa-s/go-atlas-core/io"
 	corestrings "github.com/altessa-s/go-atlas-core/text/strings"
@@ -55,18 +58,25 @@ import (
 //	        Timeout:     30 * time.Second,
 //	    }),
 //	)
+//
+// HTTPClient is the composition of small interfaces: [httpx.Doer] (Do, the
+// core method every other one builds upon: it sends a prepared request
+// through the retry, circuit breaker and other configured layers),
+// [VerbClient], [OptionsClient] and [RequestFactory]. Consumers should accept
+// the narrowest of them they need — most code only sends requests and takes an
+// [httpx.Doer] — so a test double implements one or a few methods, not all.
 type HTTPClient interface {
-	// Do executes an HTTP request using the resilient HTTP client.
-	// This is the core method that all other methods build upon.
-	// The request will be subject to retry logic, circuit breaker protection,
-	// and other configured resilience features.
-	//
-	// Example:
-	//	req, _ := http.NewRequestWithContext(ctx, "GET", "https://api.example.com/users", nil)
-	//	req.Header.Set("Authorization", "Bearer token")
-	//	resp, err := client.Do(req)
-	Do(req *http.Request) (*http.Response, error)
+	httpx.Doer
+	VerbClient
+	OptionsClient
+	RequestFactory
+}
 
+// VerbClient sends a request per HTTP method from its URL and, for the methods
+// that carry one, its body: the verb helpers of [HTTPClient]. Each request goes
+// through the client's resilient stack like [httpx.Doer.Do]; a failure is
+// passed through [RedactError].
+type VerbClient interface {
 	// Get performs an HTTP GET request to the specified URL.
 	// The request will automatically retry on transient failures and respect
 	// circuit breaker state for the target host.
@@ -186,7 +196,13 @@ type HTTPClient interface {
 	//	data.Set("password", "secret")
 	//	resp, err := client.PostForm(ctx, "https://api.example.com/login", data)
 	PostForm(ctx context.Context, url string, data url.Values) (*http.Response, error)
+}
 
+// OptionsClient sends a request per HTTP method like [VerbClient], applying
+// each [RequestOption] (headers, authentication, query parameters, a
+// per-request timeout or deadline) to it before it is sent: the *WithOptions
+// methods of [HTTPClient].
+type OptionsClient interface {
 	// GetWithOptions performs an HTTP GET request with additional request options.
 	// Options can modify headers, authentication, query parameters, timeouts, etc.
 	//
@@ -239,7 +255,12 @@ type HTTPClient interface {
 	//	    httpclient.WithHeader("X-Reason", "user-requested"),
 	//	)
 	DeleteWithOptions(ctx context.Context, url string, opts ...RequestOption) (*http.Response, error)
+}
 
+// RequestFactory creates fluent [RequestBuilder] values whose
+// [RequestBuilder.Send] goes through the factory's client: the NewRequest
+// method of [HTTPClient].
+type RequestFactory interface {
 	// NewRequest creates a new RequestBuilder for fluent API request building.
 	// This allows chaining method calls to configure all aspects of an HTTP request
 	// in a readable, expressive manner.
@@ -280,6 +301,9 @@ type HTTPClient interface {
 // httpClient wraps the standard http.Client to provide helper methods.
 type httpClient struct {
 	*http.Client
+	// headerKeys interns the header keys of the request builders this
+	// client creates; it is owned by the client, never shared between clients.
+	headerKeys *intern.Interner
 }
 
 // Do sends req like [net/http.Client.Do] and passes a failure through
@@ -393,7 +417,7 @@ func doJSONRequest(ctx context.Context, client httpx.Doer, method, url string, b
 //	}
 //	defer resp.Body.Close()
 func NewHTTPClient(opt ...Option) HTTPClient {
-	return &httpClient{Client: New(opt...)}
+	return &httpClient{Client: New(opt...), headerKeys: intern.New(HeaderInternerSize)}
 }
 
 // Get performs an HTTP GET request to the specified URL.
@@ -539,12 +563,12 @@ func (c *httpClient) DeleteWithOptions(ctx context.Context, url string, opts ...
 //	    Timeout(30 * time.Second).
 //	    Send(ctx)
 func (c *httpClient) NewRequest() RequestBuilder {
-	return NewRequestBuilder(c)
+	return newRequestBuilder(c, c.headerKeys)
 }
 
 // RequestOption is a function that mutates an [net/http.Request] before it is
 // sent. Options are applied in order by the *WithOptions methods on [HTTPClient]
-// (e.g., [HTTPClient.GetWithOptions]). See [WithHeader], [WithBearerToken],
+// (e.g., [OptionsClient.GetWithOptions]). See [WithHeader], [WithBearerToken],
 // [WithQueryParams], [WithRequestTimeout], and [WithRequestDeadline] for
 // commonly used options.
 type RequestOption func(*http.Request)
@@ -623,11 +647,10 @@ func WithQueryParams(params url.Values) RequestOption {
 //	)
 func WithRequestTimeout(timeout time.Duration) RequestOption {
 	return func(req *http.Request) {
-		ctx, cancel := context.WithTimeout(req.Context(), timeout)
-		// Store the cancel function in the request context; the request
-		// helpers call it when the response body is closed.
-		ctx = context.WithValue(ctx, cancelContextKey, cancel)
-		*req = *req.WithContext(ctx)
+		// As context.WithTimeout: a deadline timeout from now, so a zero or
+		// negative timeout ends the request at once.
+		deadline := time.Now().Add(timeout)
+		*req = *req.WithContext(boundRequestContext(req.Context(), nil, &deadline))
 	}
 }
 
@@ -637,9 +660,7 @@ func WithRequestTimeout(timeout time.Duration) RequestOption {
 // (or immediately when the request fails).
 func WithRequestDeadline(deadline time.Time) RequestOption {
 	return func(req *http.Request) {
-		ctx, cancel := context.WithDeadline(req.Context(), deadline)
-		ctx = context.WithValue(ctx, cancelContextKey, cancel)
-		*req = *req.WithContext(ctx)
+		*req = *req.WithContext(boundRequestContext(req.Context(), nil, &deadline))
 	}
 }
 
@@ -647,6 +668,27 @@ func WithRequestDeadline(deadline time.Time) RequestOption {
 type cancelContextKeyType struct{}
 
 var cancelContextKey = cancelContextKeyType{}
+
+// boundRequestContext is the per-request time bound shared by
+// [WithRequestTimeout], [WithRequestDeadline] and [RequestBuilder.Timeout] /
+// [RequestBuilder.Deadline]. A non-nil timeout wins over deadline: it caps
+// ctx at timeout from now without extending an earlier deadline of ctx, and a
+// zero timeout leaves ctx unbounded. Otherwise a non-nil deadline bounds ctx;
+// with neither ctx is returned as is. The bound's cancel func is stored under
+// cancelContextKey, so the request helpers call it when the response body is
+// closed (or at once when the request fails).
+func boundRequestContext(ctx context.Context, timeout *time.Duration, deadline *time.Time) context.Context {
+	var cancel context.CancelFunc
+	switch {
+	case timeout != nil:
+		ctx, cancel = corecontext.WithMaxTimeout(ctx, *timeout)
+	case deadline != nil:
+		ctx, cancel = context.WithDeadline(ctx, *deadline)
+	default:
+		return ctx
+	}
+	return context.WithValue(ctx, cancelContextKey, cancel)
+}
 
 func cancelFromContext(ctx context.Context) context.CancelFunc {
 	if cancel, ok := ctx.Value(cancelContextKey).(context.CancelFunc); ok {

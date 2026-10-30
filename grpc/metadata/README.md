@@ -4,8 +4,9 @@
 import "github.com/altessa-s/go-atlas-net/grpc/metadata"
 ```
 
-Adapts incoming gRPC metadata to the header-access interface shared across transports, so protocol-neutral packages such as
-[`net/clientip`](../../clientip) read gRPC headers the same way they read HTTP ones. HTTP counterpart: [`httpx.HTTPHeaderGetter`](../../httpx).
+Provider-side adapter over incoming gRPC metadata. It satisfies consumer-side header interfaces implicitly (`GetHeader` for multi-value getters such
+as [`clientip.HeaderGetter`](../../clientip), `GetSingleHeader` for single-value getters), so protocol-neutral packages read gRPC headers the same way
+they read HTTP ones. HTTP counterpart: [`httpx.HTTPHeaderGetter`](../../httpx).
 
 ## Key types
 

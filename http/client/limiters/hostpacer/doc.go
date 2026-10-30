@@ -8,8 +8,12 @@
 // request, so a crawl fan-out is spaced rather than failed.
 //
 // The buckets live in memory. Hosts whose bucket has refilled completely are
-// dropped once more than [DefaultMaxHosts] (see WithMaxHosts) are tracked,
-// which never loses pacing state.
+// dropped once [DefaultMaxHosts] (see [WithMaxHosts]) are tracked, which never
+// loses pacing state. The bound is soft: buckets still refilling are kept, so
+// it can be exceeded by the hosts used within one burst × interval window.
+// LRU eviction is deliberately not used, as dropping a refilling bucket would
+// let its host exceed its pace. Time is read and waits run through an
+// injected clock.Clock ([WithClock]).
 //
 // # Usage
 //

@@ -10,9 +10,12 @@ import (
 	grpcmd "google.golang.org/grpc/metadata"
 )
 
-// HeaderGetter reads incoming gRPC metadata from a [context.Context],
-// adapting it to the same header getter interfaces used by HTTP adapters.
-// Header names are automatically lowercased by gRPC metadata conventions.
+// HeaderGetter is a provider-side adapter over the incoming gRPC metadata of
+// a [context.Context]. It satisfies consumer-side header interfaces
+// implicitly: multi-value getters such as clientip.HeaderGetter through
+// [HeaderGetter.GetHeader], and single-value getters through
+// [HeaderGetter.GetSingleHeader]. Header names are automatically lowercased
+// by gRPC metadata conventions.
 type HeaderGetter struct {
 	ctx context.Context
 }

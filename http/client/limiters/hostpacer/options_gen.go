@@ -4,11 +4,18 @@
 package hostpacer
 
 import (
-	"time"
+	"github.com/altessa-s/go-atlas-core/time/clock"
 )
 
 // Option is a functional option for configuring options.
 type Option func(o *options)
+
+// WithClock sets the clock option.
+func WithClock(v clock.Clock) Option {
+	return func(o *options) {
+		o.clock = v
+	}
+}
 
 // WithMaxHosts sets the maxHosts option.
 func WithMaxHosts(v int) Option {
@@ -17,18 +24,11 @@ func WithMaxHosts(v int) Option {
 	}
 }
 
-// WithNow sets the now option.
-func WithNow(v func() time.Time) Option {
-	return func(o *options) {
-		o.now = v
-	}
-}
-
 // defaultOptions returns the default values for options.
 func defaultOptions() *options {
 	return &options{
+		clock:    clock.Real(),
 		maxHosts: DefaultMaxHosts,
-		now:      time.Now,
 	}
 }
 

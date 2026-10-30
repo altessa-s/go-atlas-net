@@ -112,6 +112,7 @@ func (c *Client) retractableClient() *http.Client {
 	}
 
 	retryOpts := []coreretry.Option{
+		coreretry.WithClock(c.options.clock),
 		coreretry.WithMaxAttempts(retryMax),
 		coreretry.WithMaxElapsedTime(c.options.retryMaxElapsed),
 		coreretry.WithNextDelay(retryAfterDelay(coreretry.Exponential(
@@ -122,9 +123,11 @@ func (c *Client) retractableClient() *http.Client {
 		))),
 	}
 
-	// With WithLimiterPerAttempt the limiter sits under the retry layer, so
-	// every attempt passes it; otherwise it wraps the whole retry loop.
-	next := stdClient.Transport
+	// The response size limit sits between the circuit breaker and the
+	// retry layer: an oversized reply is a breaker success and is never
+	// retried. With WithLimiterPerAttempt the limiter sits under the retry
+	// layer, so every attempt passes it; otherwise it wraps the whole retry loop.
+	next := newResponseSizeRoundTripper(stdClient.Transport, c.options.maxResponseSize)
 	perAttempt := c.options.limiter != nil && c.options.limiterPerAttempt
 	if perAttempt {
 		next = limiters.NewRoundTripper(next, c.options.limiter)
@@ -143,6 +146,7 @@ func (c *Client) retractableClient() *http.Client {
 		jar:                jar,
 		retryAfterStatuses: c.options.retryAfterStatuses,
 		retryableStatuses:  c.options.retryableStatuses,
+		clock:              c.options.clock,
 	}
 
 	stdClient.Transport = rt

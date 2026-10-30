@@ -69,6 +69,35 @@ func TestRoundTripper_RoundTrip_HostnameExtracted(t *testing.T) {
 	require.Equal(t, "api.example.com", capturedKey)
 }
 
+func TestRoundTripper_RoundTrip_NilLimiterPassesThrough(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		limiter RequestsLimiter
+	}{
+		{name: "nil", limiter: nil},
+		{name: "empty chain", limiter: Chain()},
+		{name: "typed nil", limiter: (*mockLimiter)(nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			next := httpx.RoundTripperFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: http.StatusOK}, nil
+			})
+			rt := NewRoundTripper(next, tc.limiter)
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com/test", http.NoBody)
+			require.NoError(t, err)
+			resp, err := rt.RoundTrip(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			require.Equal(t, 1, calls)
+		})
+	}
+}
+
 type capturingLimiter struct {
 	capturedKey *string
 }

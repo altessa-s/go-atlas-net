@@ -14,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/altessa-s/go-atlas-core/time/clock"
+
 	httpclient "github.com/altessa-s/go-atlas-net/http/client"
 )
 
@@ -170,4 +172,24 @@ func TestWithRetryAfterStatuses(t *testing.T) {
 		require.Equal(t, int32(2), hits.Load())
 		require.Less(t, elapsed, 5*time.Second, "503 is no longer in the set")
 	})
+}
+
+// TestRetryAfterDateUsesClock pins that an HTTP-date Retry-After is read
+// relative to the WithClock clock, and that the retry wait sleeps on it: the
+// fake clock advances by exactly the asked pause, without real waiting.
+func TestRetryAfterDateUsesClock(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	fake := clock.NewFake(now)
+	srv, hits := retryAfterServer(t, http.StatusServiceUnavailable, now.Add(30*time.Second).Format(http.TimeFormat))
+	c := httpclient.New(loopback, httpclient.WithRetryMax(1),
+		httpclient.WithRetryWait(time.Millisecond, time.Millisecond),
+		httpclient.WithRetryJitter(0),
+		httpclient.WithClock(fake))
+
+	elapsed := timedGet(t, c, srv.URL)
+	require.Equal(t, int32(2), hits.Load())
+	require.Equal(t, 30*time.Second, fake.Now().Sub(now), "the retry waits the Retry-After date on the fake clock")
+	require.Less(t, elapsed, 5*time.Second, "the fake clock sleeps without waiting")
 }

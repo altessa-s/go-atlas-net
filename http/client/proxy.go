@@ -36,7 +36,7 @@ func proxyAwareDialer(proxyFn ProxyFunc, proxyTLSCfg *tls.Config) func(context.C
 		// the placeholder scheme is harmless for the typical
 		// gated-https case; it only narrows the path when callers
 		// wired a custom ProxyFunc that branches on req.URL.Scheme.
-		req := &http.Request{URL: &url.URL{Scheme: "https", Host: addr}}
+		req := &http.Request{URL: &url.URL{Scheme: schemeHTTPS, Host: addr}}
 		proxyURL, err := proxyFn(req)
 		if err != nil {
 			return nil, fmt.Errorf("resolve proxy for %s: %w", addr, err)
@@ -45,7 +45,7 @@ func proxyAwareDialer(proxyFn ProxyFunc, proxyTLSCfg *tls.Config) func(context.C
 			return base.DialContext(ctx, network, addr)
 		}
 		switch proxyURL.Scheme {
-		case "http", "https":
+		case "http", schemeHTTPS:
 			return proxydial.HTTPConnect(ctx, base, proxyURL, proxyTLSCfg, addr)
 		case "socks5", "socks5h":
 			contextDial, err := proxydial.SOCKS5Dialer(proxyURL, base)

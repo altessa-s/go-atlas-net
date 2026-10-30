@@ -4,8 +4,10 @@
 import "github.com/altessa-s/go-atlas-net/httpx"
 ```
 
-Package `httpx` provides foundational HTTP utilities that complement `net/http`: function adapters for `http.RoundTripper` and for the
-`Doer` interface satisfied by `*http.Client`, status-class predicates, shared header names and the `*http.Request` header getter.
+Package `httpx` holds small `net/http` extensions shared across the module: function adapters (`Doer`, `DoerFunc`, `RoundTripperFunc`), header
+name constants, status classes and the `*http.Request` header adapter (`HTTPHeaderGetter`). It holds no client, IP or policy logic: the outbound client
+lives in [`http/client`](../http/client), client IP resolution in [`clientip`](../clientip) and address policy in [`netipx`](../netipx) and
+[`egressrule`](../egressrule).
 
 ## Key types
 
@@ -55,4 +57,4 @@ doer := httpx.DoerFunc(func(*http.Request) (*http.Response, error) {
 | `RateLimitLimit`, `RateLimitRemaining`, `RateLimitReset`    | Interned rate-limit response headers                                          |
 | `RetryAfter`                                                | Interned `Retry-After` header name                                            |
 | `Header*` constants                                         | Raw (non-interned) values of the same names                                   |
-| `HTTPHeaderGetter` / `NewHTTPHeaderGetter`                  | Adapts an `*http.Request` to [`clientip`](../clientip)'s header getter        |
+| `HTTPHeaderGetter` / `NewHTTPHeaderGetter`                  | Adapts an `*http.Request` to header getters such as `clientip.HeaderGetter`   |

@@ -5,7 +5,6 @@
 package clientip
 
 import (
-	"net/http"
 	"net/netip"
 	"testing"
 
@@ -100,19 +99,4 @@ func TestFromContext_Empty(t *testing.T) {
 	t.Parallel()
 	got := FromContext(t.Context())
 	require.False(t, got.IsValid(), "FromContext(empty) = %v, want invalid", got)
-}
-
-func TestHTTPHeader(t *testing.T) {
-	t.Parallel()
-
-	h := http.Header{}
-	h.Add("X-Forwarded-For", "1.1.1.1")
-	h.Add("x-forwarded-for", "8.8.8.8")
-	require.Equal(t, []string{"1.1.1.1", "8.8.8.8"}, HTTPHeader(h).GetHeader("X-Forwarded-For"))
-	require.Empty(t, HTTPHeader(h).GetHeader("X-Real-IP"))
-
-	e, err := NewExtractor(WithTrustedPeers(netip.MustParsePrefix("10.0.0.0/8")))
-	require.NoError(t, err)
-	got := e.Extract(t.Context(), netip.MustParseAddr("10.0.0.1"), HTTPHeader(h))
-	require.Equal(t, "8.8.8.8", got.String())
 }

@@ -20,7 +20,6 @@ import (
 	"github.com/altessa-s/go-atlas-net/httpx"
 
 	coreerrs "github.com/altessa-s/go-atlas-core/errors"
-	coreio "github.com/altessa-s/go-atlas-core/io"
 )
 
 const (
@@ -63,11 +62,11 @@ var (
 
 type circuitBreakerClient struct {
 	*gobreaker.CircuitBreaker[*http.Response]
-	client          *http.Client
-	logger          *slog.Logger
-	observer        Observer
-	maxResponseSize int64
-	// hostBreakers maps hostnames to their circuit breakers
+	client   *http.Client
+	logger   *slog.Logger
+	observer Observer
+	// hostBreakers maps hostnames to their circuit breakers; it is the only
+	// per-host breaker cache
 	hostBreakers map[string]*gobreaker.CircuitBreaker[*http.Response]
 	// hostBreakerSettings contains per-host circuit breaker settings
 	hostBreakerSettings map[string]*CircuitBreakerSettings
@@ -84,8 +83,6 @@ type circuitBreakerClient struct {
 	breakerMaxRequests uint32
 	breakerInterval    time.Duration
 	breakerTimeout     time.Duration
-	// breakerCache provides thread-safe caching for circuit breakers
-	breakerCache sync.Map // map[string]*gobreaker.CircuitBreaker[*http.Response]
 	// stringInterner provides efficient string interning for hostnames
 	stringInterner *intern.Interner
 }
@@ -214,7 +211,6 @@ func newCircuitBreakerClient(opts options) *circuitBreakerClient {
 		client:              httpClient,
 		logger:              opts.logger,
 		observer:            opts.observer,
-		maxResponseSize:     opts.maxResponseSize,
 		hostBreakers:        make(map[string]*gobreaker.CircuitBreaker[*http.Response]),
 		hostBreakerSettings: opts.hostBreakerSettings,
 		maxHostBreakers:     opts.maxHostBreakers,
@@ -259,23 +255,15 @@ func (c *circuitBreakerClient) getBreakerForHost(hostname string) *gobreaker.Cir
 	// Intern hostname for memory optimization
 	hostname = c.internHostname(hostname)
 
-	// Fast path: thread-safe lookup of an already created breaker
-	if breaker, ok := c.breakerCache.Load(hostname); ok {
-		if cb, ok := breaker.(*gobreaker.CircuitBreaker[*http.Response]); ok {
-			return cb
-		}
-	}
-
 	settings, explicit := c.hostBreakerSettings[hostname]
 
+	// Fast path: an already created breaker, under the read lock
 	c.mu.RLock()
 	breaker, exists := c.hostBreakers[hostname]
 	full := !explicit && c.lazyBreakers >= c.maxHostBreakers
 	c.mu.RUnlock()
 
 	if exists {
-		// Cache the existing breaker for future requests
-		c.breakerCache.Store(hostname, breaker)
 		return breaker
 	}
 	if full {
@@ -290,8 +278,6 @@ func (c *circuitBreakerClient) getBreakerForHost(hostname string) *gobreaker.Cir
 	// Double-check in case another goroutine created it
 	breaker, exists = c.hostBreakers[hostname]
 	if exists {
-		// Cache the breaker created by another goroutine
-		c.breakerCache.Store(hostname, breaker)
 		return breaker
 	}
 	if !explicit && c.lazyBreakers >= c.maxHostBreakers {
@@ -340,8 +326,6 @@ func (c *circuitBreakerClient) getBreakerForHost(hostname string) *gobreaker.Cir
 	if !explicit {
 		c.lazyBreakers++
 	}
-	// Cache the newly created breaker
-	c.breakerCache.Store(hostname, breaker)
 	return breaker
 }
 
@@ -394,24 +378,6 @@ func (c *circuitBreakerClient) newCircuitBreakerRoundTripper(next http.RoundTrip
 			// The URL omits user info and the query string: both may carry
 			// credentials.
 			return nil, coreerrs.Wrapf(err, "circuit breaker execution failed for %s %s", req.Method, redactedURL(req.URL))
-		}
-
-		// Apply response size limit if configured. The reply's status and
-		// header travel with the error for status-specific policies; its body
-		// is closed unread.
-		if c.maxResponseSize > 0 && res.ContentLength > c.maxResponseSize {
-			_ = res.Body.Close() //nolint:errcheck
-			return nil, &ResponseSizeError{
-				Limit:  c.maxResponseSize,
-				Size:   res.ContentLength,
-				Status: res.StatusCode,
-				Header: res.Header,
-			}
-		}
-
-		// If the content length is unknown, wrap the body with a limiting reader
-		if c.maxResponseSize > 0 && res.ContentLength < 0 {
-			res.Body = coreio.NewLimitedReadCloser(res.Body, c.maxResponseSize)
 		}
 
 		return res, nil

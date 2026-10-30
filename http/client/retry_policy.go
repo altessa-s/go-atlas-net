@@ -46,6 +46,15 @@ var defaultRetryableStatuses = DefaultRetryableStatuses()
 // the statuses of the built-in classification, which applies when no
 // [WithRetryPolicyHandler] is set.
 //
+// A reply is classified by its status only, never by the request method: a
+// POST, PUT or PATCH (or any other non-idempotent request) is replayed, body
+// included, on 408, 429, 502, 503 and 504 like a GET, and so is any request
+// after a retryable transport error — even when the server may already have
+// processed it. Where a replay is unsafe, opt out with a policy set by
+// [WithRetryPolicyHandler] that returns false for those methods (see the
+// second example), with [WithoutRetry] for a client that never retries, or
+// with an idempotency key the server deduplicates on.
+//
 // Example:
 //
 //	policy := func(ctx context.Context, resp *http.Response, err error) (bool, error) {
@@ -55,6 +64,19 @@ var defaultRetryableStatuses = DefaultRetryableStatuses()
 //	    return httpclient.DefaultRetryPolicy(ctx, resp, err)
 //	}
 //	c := httpclient.New(httpclient.WithRetryPolicyHandler(policy))
+//
+// Never replaying a POST on a retryable status (resp.Request is the attempt's
+// request). A transport error comes without a response, so a policy cannot see
+// the method there: a separate client built with [WithoutRetry] for
+// non-idempotent requests avoids every replay.
+//
+//	noPostReplay := func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+//	    retry, perr := httpclient.DefaultRetryPolicy(ctx, resp, err)
+//	    if retry && resp != nil && resp.Request != nil && resp.Request.Method == http.MethodPost {
+//	        return false, &httpclient.UnexpectedStatusError{Status: resp.StatusCode, Method: http.MethodPost}
+//	    }
+//	    return retry, perr
+//	}
 func DefaultRetryPolicy(ctx context.Context, resp *http.Response, err error) (bool, error) {
 	if err != nil {
 		classified := classifyTransportError(ctx, err)

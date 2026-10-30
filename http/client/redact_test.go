@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/altessa-s/go-atlas-core/errors/network"
+
 	"github.com/altessa-s/go-atlas-net/http/client/limiters"
 	"github.com/altessa-s/go-atlas-net/httpx"
 

@@ -27,12 +27,18 @@
 // Use [NewContext] and [FromContext] to propagate the resolved IP through
 // request contexts.
 //
+// The package is transport-agnostic: [Extractor] reads headers through the
+// consumer-side [HeaderGetter] interface. HTTP callers pass
+// httpx.NewHTTPHeaderGetter(r) and gRPC callers pass
+// metadata.NewHeaderGetter(ctx) from the grpc/metadata package; both
+// satisfy [HeaderGetter] implicitly.
+//
 // Example:
 //
 //	extractor, _ := clientip.NewExtractor(
 //	    clientip.WithTrustedProxies(netip.MustParsePrefix("10.0.0.0/8")),
 //	    clientip.WithHeaders("CF-Connecting-IP", "X-Forwarded-For"),
 //	)
-//	ip := extractor.Extract(ctx, peerIP, headers)
-//	ctx = clientip.NewContext(ctx, ip)
+//	ip := extractor.Extract(r.Context(), peerIP, httpx.NewHTTPHeaderGetter(r))
+//	ctx = clientip.NewContext(r.Context(), ip)
 package clientip

@@ -17,19 +17,20 @@ and `Allow` blocks until the host's next slot instead of rejecting the request, 
 
 ## Options
 
-| Option         | Default            | Description                                                                         |
-|----------------|--------------------|-------------------------------------------------------------------------------------|
-| `WithMaxHosts` | `DefaultMaxHosts` (1024) | Tracked hosts above which a new host first drops the fully refilled buckets   |
-| `WithNow`      | `time.Now`         | Clock the sweep reads bucket levels at (tests)                                      |
+| Option         | Default                  | Description                                                                                            |
+|----------------|--------------------------|--------------------------------------------------------------------------------------------------------|
+| `WithMaxHosts` | `DefaultMaxHosts` (1024) | Soft bound on tracked hosts; reaching it makes a new host first drop the fully refilled buckets        |
+| `WithClock`    | `clock.Real()`           | go-atlas-core `clock.Clock` bucket levels are read at and slot waits run on (`clock.NewFake` in tests) |
 
 ## Semantics
 
 - `Allow` returns `ctx.Err()` when the wait is cut short, and an error wrapping `context.DeadlineExceeded` without waiting when the next slot lies
   beyond the context deadline.
 - The bucket lookup and the slot reservation happen under one lock, then the wait runs outside it; a wait cut short releases its slot.
-- Buckets live in memory and are created on first use. Over `WithMaxHosts` tracked hosts a new host first drops every bucket that has refilled
-  completely — lossless, a new bucket starts full. Buckets still refilling are never dropped, so memory is bounded by the hosts used within one
-  burst × interval window. Pacing is per process: replicas do not share slots.
+- Buckets live in memory and are created on first use. Once `WithMaxHosts` hosts are tracked, a new host first drops every bucket that has refilled
+  completely — lossless, a new bucket starts full. Buckets still refilling are never dropped, so `WithMaxHosts` is a soft bound: the pacer can exceed
+  it by the hosts used within one burst × interval window, which also bounds memory. LRU eviction is deliberately not used: dropping a bucket that is
+  still refilling would give its host a fresh full bucket and let it exceed its pace. Pacing is per process: replicas do not share slots.
 
 ## Usage
 

@@ -19,6 +19,8 @@ import (
 	"github.com/altessa-s/go-atlas-core/text/strings/intern"
 	"github.com/altessa-s/go-atlas-core/text/strings/secure"
 
+	"github.com/altessa-s/go-atlas-net/httpx"
+
 	coremaps "github.com/altessa-s/go-atlas-core/collections/maps"
 	corecontext "github.com/altessa-s/go-atlas-core/context"
 	coreerrs "github.com/altessa-s/go-atlas-core/errors"
@@ -35,33 +37,10 @@ const (
 	BearerPrefixLength = 7
 	// DefaultJSONBufferCapacity is the starting capacity for JSON buffers (512 bytes)
 	DefaultJSONBufferCapacity = 512
-	// HeaderInternerSize is the size of the string interner for header keys
+	// HeaderInternerSize is the size of the header-key string interner each
+	// [HTTPClient] created by [NewHTTPClient] owns for its request builders.
 	HeaderInternerSize = 256
 )
-
-var (
-	// internedHeaderKeys contains pre-interned common header keys for memory optimization
-	internedHeaderKeys = coremaps.NewImmutableMap(map[string]string{
-		"Content-Type":  internHeaderKey("Content-Type"),
-		"Accept":        internHeaderKey("Accept"),
-		"User-Agent":    internHeaderKey("User-Agent"),
-		"Authorization": internHeaderKey("Authorization"),
-	})
-)
-
-// internedHeader returns the pre-interned key for a common header name.
-func internedHeader(name string) string {
-	key, _ := internedHeaderKeys.Get(name)
-	return key
-}
-
-// internHeaderKey returns an interned version of the header key for memory optimization.
-// Uses a dedicated string interner for HTTP headers to ensure identical header keys share the same memory location.
-// Provides LRU eviction and hot caching specifically for HTTP header keys.
-// This is especially useful for common headers like "Content-Type", "Authorization", "User-Agent".
-func internHeaderKey(key string) string {
-	return headerInterner.String(key)
-}
 
 // RequestBuilder provides a fluent interface for building HTTP requests.
 // It allows chaining method calls to configure all aspects of an HTTP request
@@ -166,7 +145,10 @@ type RequestBuilder interface {
 
 // requestBuilder implements the RequestBuilder interface.
 type requestBuilder struct {
-	client        HTTPClient
+	client httpx.Doer
+	// headerKeys interns header keys; nil (a builder of [NewRequestBuilder])
+	// keeps every key as given.
+	headerKeys    *intern.Interner
 	method        string
 	url           string
 	body          io.Reader
@@ -197,13 +179,18 @@ var requestBuilderPool = sync.Pool{
 // headerPool provides pooled header maps to reduce allocations
 var headerPool = coremaps.NewPool[string, string](DefaultHeadersCapacity)
 
-// headerInterner provides efficient string interning for HTTP header keys
-var headerInterner = intern.New(HeaderInternerSize) // Small size for common headers
+// NewRequestBuilder creates a new RequestBuilder whose [RequestBuilder.Send]
+// sends the request with client. It is typically called through
+// [RequestFactory.NewRequest], whose builders also intern their header keys
+// with the client's own interner; a builder created here keeps the keys as
+// given. Uses object pooling to reduce allocations.
+func NewRequestBuilder(client httpx.Doer) RequestBuilder {
+	return newRequestBuilder(client, nil)
+}
 
-// NewRequestBuilder creates a new RequestBuilder instance.
-// This is typically called through the HTTPClient.NewRequest() method.
-// Uses object pooling to reduce allocations.
-func NewRequestBuilder(client HTTPClient) RequestBuilder {
+// newRequestBuilder returns a pooled builder sending with client and
+// interning header keys with headerKeys (none when nil).
+func newRequestBuilder(client httpx.Doer, headerKeys *intern.Interner) RequestBuilder {
 	rb, ok := requestBuilderPool.Get().(*requestBuilder)
 	if !ok {
 		// Fallback: create new instance if pool returns unexpected type
@@ -216,13 +203,14 @@ func NewRequestBuilder(client HTTPClient) RequestBuilder {
 
 	// The builder should already be cleared by reset() before being put into the pool,
 	// but we perform a safety reset here just in case.
-	rb.reset(client)
+	rb.reset(client, headerKeys)
 
 	return rb
 }
 
-func (rb *requestBuilder) reset(client HTTPClient) {
+func (rb *requestBuilder) reset(client httpx.Doer, headerKeys *intern.Interner) {
 	rb.client = client
+	rb.headerKeys = headerKeys
 	rb.method = ""
 	rb.url = ""
 	rb.body = nil
@@ -336,7 +324,7 @@ func (rb *requestBuilder) JSONBody(body any) RequestBuilder {
 	coreio.PutBuffer(buf)
 
 	rb.body = bytes.NewReader(data)
-	rb.headers[internedHeader("Content-Type")] = "application/json"
+	rb.headers["Content-Type"] = "application/json"
 	return rb
 }
 
@@ -344,7 +332,7 @@ func (rb *requestBuilder) JSONBody(body any) RequestBuilder {
 // Also, automatically sets Content-Type to "application/x-www-form-urlencoded".
 func (rb *requestBuilder) FormBody(data url.Values) RequestBuilder {
 	rb.body = strings.NewReader(data.Encode())
-	rb.headers[internedHeader("Content-Type")] = "application/x-www-form-urlencoded"
+	rb.headers["Content-Type"] = "application/x-www-form-urlencoded"
 	return rb
 }
 
@@ -360,35 +348,44 @@ func (rb *requestBuilder) BytesBody(body []byte) RequestBuilder {
 	return rb
 }
 
+// headerKey returns key interned with the builder's interner, or key itself
+// when the builder has none.
+func (rb *requestBuilder) headerKey(key string) string {
+	if rb.headerKeys == nil {
+		return key
+	}
+	return rb.headerKeys.String(key)
+}
+
 // Header sets a single header.
 func (rb *requestBuilder) Header(key, value string) RequestBuilder {
-	rb.headers[internHeaderKey(key)] = value
+	rb.headers[rb.headerKey(key)] = value
 	return rb
 }
 
 // Headers sets multiple headers from an iterator.
 func (rb *requestBuilder) Headers(seq iter.Seq2[string, string]) RequestBuilder {
 	for k, v := range seq {
-		rb.headers[internHeaderKey(k)] = v
+		rb.headers[rb.headerKey(k)] = v
 	}
 	return rb
 }
 
 // ContentType sets the Content-Type header.
 func (rb *requestBuilder) ContentType(contentType string) RequestBuilder {
-	rb.headers[internedHeader("Content-Type")] = contentType
+	rb.headers["Content-Type"] = contentType
 	return rb
 }
 
 // Accept sets the Accept header.
 func (rb *requestBuilder) Accept(accept string) RequestBuilder {
-	rb.headers[internedHeader("Accept")] = accept
+	rb.headers["Accept"] = accept
 	return rb
 }
 
 // UserAgent sets the User-Agent header.
 func (rb *requestBuilder) UserAgent(userAgent string) RequestBuilder {
-	rb.headers[internedHeader("User-Agent")] = userAgent
+	rb.headers["User-Agent"] = userAgent
 	return rb
 }
 
@@ -479,7 +476,7 @@ func (rb *requestBuilder) Send(ctx context.Context) (*http.Response, error) {
 
 // Release returns the builder to the pool and clears any sensitive data.
 func (rb *requestBuilder) Release() {
-	rb.reset(nil)
+	rb.reset(nil, nil)
 	requestBuilderPool.Put(rb)
 }
 
@@ -538,8 +535,8 @@ func (rb *requestBuilder) BuildWithContext(ctx context.Context) (*http.Request, 
 
 // requestContext returns the context of the built request: ctx, or the
 // builder's context when ctx is nil, or the background context, bounded by
-// the per-request timeout or deadline. The bound's cancel func is stored in
-// the context (cancelContextKey) so Send can release it.
+// the per-request timeout or deadline (see boundRequestContext). The bound's
+// cancel func is stored in the context (cancelContextKey) so Send can release it.
 func (rb *requestBuilder) requestContext(ctx context.Context) context.Context { //nolint:contextcheck
 	// Use provided context or builder's context or background
 	// If a builder has a context set, use it unless overridden by parameter
@@ -549,19 +546,7 @@ func (rb *requestBuilder) requestContext(ctx context.Context) context.Context { 
 		ctx = corecontext.OrBackground(ctx)
 	}
 
-	// Apply timeout or deadline to context
-	if rb.timeout != nil {
-		var cancel context.CancelFunc
-		ctx, cancel = corecontext.WithMaxTimeout(ctx, *rb.timeout)
-		// Store the cancel function in the context so it can be retrieved later if needed
-		ctx = context.WithValue(ctx, cancelContextKey, cancel)
-	} else if rb.deadline != nil {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(ctx, *rb.deadline)
-		// Store the cancel function in the context so it can be retrieved later if needed
-		ctx = context.WithValue(ctx, cancelContextKey, cancel)
-	}
-	return ctx
+	return boundRequestContext(ctx, rb.timeout, rb.deadline)
 }
 
 // applyAuth sets the configured basic, bearer and API key credentials.
@@ -573,7 +558,7 @@ func (rb *requestBuilder) applyAuth(req *http.Request) {
 
 	if rb.bearerToken != nil {
 		token := rb.bearerToken.String()
-		req.Header.Set(internedHeader("Authorization"), corestrings.BuildString(func(builder *strings.Builder) {
+		req.Header.Set("Authorization", corestrings.BuildString(func(builder *strings.Builder) {
 			builder.Grow(BearerPrefixLength + len(token))
 			builder.WriteString("Bearer ")
 			builder.WriteString(token)

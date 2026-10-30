@@ -5,11 +5,14 @@
 package hostpacer
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/altessa-s/go-atlas-core/time/clock"
 
 	"github.com/altessa-s/go-atlas-net/http/client/limiters"
 
@@ -26,16 +29,19 @@ var ErrInvalidRate = errors.New("hostpacer: interval and burst must be positive"
 // [Pacer.Allow] waits for the key's next slot, so a fan-out over one host is
 // throttled rather than failed. It is safe for concurrent use.
 //
-// Buckets are created on first use. When more than the configured maximum of
-// keys are tracked, a new key first drops the buckets that have refilled
-// completely; that is lossless, as a new bucket starts full. Buckets still
-// refilling are never dropped, so memory is bounded by the keys used within
-// one burst × interval window.
+// Buckets are created on first use. The configured maximum of keys
+// ([WithMaxHosts]) is a soft bound: once it is reached, a new key first drops
+// the buckets that have refilled completely; that is lossless, as a new
+// bucket starts full. Buckets still refilling are never dropped, so the
+// number of tracked keys can exceed the maximum by the keys used within one
+// burst × interval window, which also bounds memory. LRU eviction is
+// deliberately not used: dropping a bucket still refilling would give its key
+// a fresh full bucket and let it exceed its pace.
 type Pacer struct {
 	every    rate.Limit
 	burst    int
 	maxHosts int
-	now      func() time.Time
+	clock    clock.Clock
 
 	mu    sync.Mutex
 	hosts map[string]*rate.Limiter
@@ -52,7 +58,7 @@ func New(interval time.Duration, burst int, opts ...Option) (*Pacer, error) {
 		every:    rate.Every(interval),
 		burst:    burst,
 		maxHosts: o.maxHosts,
-		now:      o.now,
+		clock:    cmp.Or(o.clock, clock.Real()),
 		hosts:    make(map[string]*rate.Limiter),
 	}, nil
 }
@@ -76,15 +82,11 @@ func (p *Pacer) Allow(ctx context.Context, key string) error {
 		r.CancelAt(now)
 		return fmt.Errorf("%w: next slot for %q in %s", context.DeadlineExceeded, key, delay)
 	}
-	t := time.NewTimer(delay)
-	defer t.Stop()
-	select {
-	case <-t.C:
-		return nil
-	case <-ctx.Done():
-		r.CancelAt(p.now())
-		return ctx.Err()
+	if err := p.clock.Sleep(ctx, delay); err != nil {
+		r.CancelAt(p.clock.Now())
+		return err
 	}
+	return nil
 }
 
 // Len returns the number of keys currently tracked.
@@ -101,7 +103,7 @@ func (p *Pacer) Len() int {
 func (p *Pacer) reserve(key string) (*rate.Reservation, time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	now := p.now()
+	now := p.clock.Now()
 	lim, ok := p.hosts[key]
 	if !ok {
 		if p.maxHosts > 0 && len(p.hosts) >= p.maxHosts {

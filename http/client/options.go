@@ -21,6 +21,8 @@ import (
 
 	"github.com/sony/gobreaker/v2"
 
+	"github.com/altessa-s/go-atlas-core/time/clock"
+
 	"github.com/altessa-s/go-atlas-net/http/client/limiters"
 )
 
@@ -164,6 +166,13 @@ type options struct {
 	// replies included. When unset, the jar of a WithClient client is used
 	// the same way; the returned *http.Client has no Jar either way.
 	cookieJar http.CookieJar
+	// clock is the time source of the retry layer: the elapsed-time budget
+	// of retryMaxElapsed, the backoff and Retry-After waits between attempts,
+	// a Retry-After HTTP date and the request duration reported to the
+	// observer. Defaults to the system clock; pass a clock.Fake in tests.
+	// Context deadlines (attemptTimeout, per-request timeouts) and the
+	// circuit breaker keep the system clock.
+	clock clock.Clock `optgen:"default=clock.Real(),notnil"`
 }
 
 // WithRetryWait configures the minimum and maximum wait times between retry attempts.
