@@ -32,8 +32,10 @@ const (
 
 // ErrorHandler defines the callback for intercepting and handling errors during the retry process.
 // Set it via [WithErrorHandler]. The handler receives the HTTP response (may be nil), the error
-// that occurred, and the number of retry attempts made. It can modify or wrap the error before
-// returning, allowing for custom error handling logic. When the retries are exhausted the error
+// that occurred, and numTries: the number of attempts actually sent to the underlying transport
+// (the first attempt plus its retries), not the configured limit. It is zero when no attempt was
+// sent, for instance when the request context had already ended. It can modify or wrap the error
+// before returning, allowing for custom error handling logic. When the retries are exhausted the error
 // is a [RetryExhaustedError]. The returned error renders trusted text only (see the package
 // documentation on redaction), as it may quote resp.Request.URL; its causes stay reachable.
 //
