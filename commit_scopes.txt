@@ -1,0 +1,24 @@
+# Commit Scopes for go-atlas-net
+# Use these scopes in conventional commits: type(scope): description
+# Example: fix(http/client): keep the retry budget per request
+
+# Root-level scopes
+root                        # Repository-wide changes (go.mod, Makefile, configs)
+deps                        # Dependency management
+README                      # Root README
+docs                        # Documentation
+
+# Packages
+clientip                    # Real client IP extraction
+egressrule                  # Egress rule grammar
+grpc/metadata               # Incoming gRPC metadata getter
+http/client                 # Outbound HTTP client
+http/client/limiters        # Client-side rate limiters
+httpx                       # HTTP helpers and header names
+netipx                      # IP address helpers
+proxydial                   # Forward-proxy dialers
+urlx                        # Base URL parsing and joining
+
+# Tooling
+devtools                    # Development tool dependencies
+ci                          # GitHub Actions workflows and scripts
