@@ -19,29 +19,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Fetch enough history to validate all commits in PR
           fetch-depth: 0
-      
+
+      - name: Test commit validation
+        run: bash .github/scripts/test-commit-validation.sh
+
       - name: Validate commit messages
-        run: |
-          echo "Event: ${{ github.event_name }}"
-          echo "Ref: ${{ github.ref }}"
-          echo "SHA: ${{ github.sha }}"
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "Base ref: ${{ github.base_ref }}"
-            echo "Head ref: ${{ github.head_ref }}"
-          fi
-          
-          echo "Git log (last 10 commits):"
-          git log --oneline -10
-          
-          echo "Running validation script..."
-          chmod +x .github/scripts/validate-commits.sh
-          .github/scripts/validate-commits.sh || {
-            echo "Validation script failed with exit code $?"
-            echo "Checking what commits were processed..."
-            exit 1
-          }
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: bash .github/scripts/validate-commits.sh
 
   validate-pr-title:
     name: Validate PR Title
@@ -54,66 +41,8 @@ jobs:
           sparse-checkout: |
             commit_scopes.txt
             .github/scripts
-      
+
       - name: Validate PR title
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          set -e
-          
-          # Colors
-          RED='\033[0;31m'
-          GREEN='\033[0;32m'
-          YELLOW='\033[1;33m'
-          NC='\033[0m'
-          
-          echo "Validating PR title: $PR_TITLE"
-          
-          # Valid types
-          VALID_TYPES="feat fix docs style refactor test chore ci perf build"
-          
-          # Check Conventional Commits format. The regex must live in a
-          # variable rather than appear literally on the RHS of [[ =~ ]] —
-          # bash 5.2 (Ubuntu 24.04 runner default) tightened parsing and
-          # rejects bare regex with parens/escapes as a syntax error.
-          TITLE_PATTERN='^([a-z]+)(\(([^)]+)\))?:[[:space:]](.+)'
-          if [[ "$PR_TITLE" =~ $TITLE_PATTERN ]]; then
-              TYPE="${BASH_REMATCH[1]}"
-              SCOPE="${BASH_REMATCH[3]}"
-              DESC="${BASH_REMATCH[4]}"
-              
-              # Check type
-              if ! echo "$VALID_TYPES" | grep -wq "$TYPE"; then
-                  echo -e "${RED}✗ Invalid type '$TYPE'${NC}"
-                  echo "Valid types: $VALID_TYPES"
-                  exit 1
-              fi
-              
-              # Check scope if present
-              if [[ -n "$SCOPE" ]]; then
-                  # Extract valid scopes from commit_scopes.txt
-                  if ! grep -E "^[a-zA-Z0-9/_-]+" commit_scopes.txt | awk '{print $1}' | grep -v '^#' | grep -Fxq "$SCOPE"; then
-                      echo -e "${RED}✗ Invalid scope '$SCOPE'${NC}"
-                      echo "Check commit_scopes.txt for valid scopes"
-                      exit 1
-                  fi
-              fi
-              
-              # Check description
-              if [[ -z "$DESC" ]]; then
-                  echo -e "${RED}✗ Missing description${NC}"
-                  exit 1
-              elif [[ "${DESC:0:1}" =~ [A-Z] ]]; then
-                  echo -e "${YELLOW}⚠ Description should start with lowercase${NC}"
-              fi
-              
-              echo -e "${GREEN}✓ Valid PR title${NC}"
-          else
-              echo -e "${RED}✗ PR title doesn't follow Conventional Commits format${NC}"
-              echo "Expected: type(scope): description"
-              echo "Examples:"
-              echo "  feat(data/mongo): add cursor pagination"
-              echo "  fix(transport/http): resolve retry bug"
-              echo "  docs(README): update examples"
-              exit 1
-          fi
+        run: printf '%s\n' "$PR_TITLE" | bash .github/scripts/validate-commit-message.sh
