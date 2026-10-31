@@ -46,3 +46,12 @@ build: pin the options generator
 ```
 
 Exit status is zero only when every message is valid (or the selected range is empty).
+
+## Benchmark regressions
+
+`bench-regression.sh BASE_REF` checks the base out into a temporary worktree, runs every benchmark of both trees `BENCH_COUNT` times with
+`-benchtime` `BENCH_TIME` and compares them with the `benchstat` pinned in [`devtools`](../../devtools). It fails when a benchmark shows a
+statistically significant increase in `sec/op` or `allocs/op` above `BENCH_THRESHOLD` percent; changes benchstat marks as insignificant (`~`) and
+benchmarks present on one side only never fail. `BENCH_REPORT` names a file that also receives the report. The defaults of these variables are set
+and documented in the script's header. The [`bench.yml`](../workflows/bench.yml) workflow runs it on pull requests against the base branch; locally
+use `make bench-compare BASE=<ref>`.
