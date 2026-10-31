@@ -31,7 +31,8 @@ if [[ ! "$subject" =~ $merge ]]; then
     if [[ -n "$scope" ]]; then
         [[ "$scope" != root ]] || fail 'omit the scope for repository-wide changes'
         [[ -f "$scopes_file" ]] || fail 'commit_scopes.txt is missing'
-        awk '{print $1}' "$scopes_file" | grep -Fxq -- "$scope" || fail "unknown scope '$scope'"
+        # Only scope lines count: comment and blank lines name no scope.
+        awk '!/^[[:space:]]*#/ && NF {print $1}' "$scopes_file" | grep -Fxq -- "$scope" || fail "unknown scope '$scope'"
     fi
     [[ "$description" =~ [^[:space:]] ]] || fail 'description is empty'
     [[ ! "$description" =~ ^[A-Z] ]] || fail 'description must start with lowercase'
@@ -39,8 +40,15 @@ fi
 
 # Reject report sections and common assistant signatures. Whether a message
 # explains a concrete change without filler remains a review requirement.
+# Agent names match as whole words only (start, end or a non-alphanumeric
+# neighbor), so ordinary words such as "retained" or "Maida" never match "ai";
+# at most three words may separate "by"/"with"/"using" from the name.
 report='^[[:space:]]*((tests?|testing|validation|verification|coverage|test results|проверки|тесты|покрытие)[[:space:]]*:|all tests (pass|passed)|tests? (pass|passed)|coverage[[:space:]]+[0-9])'
-attribution='(generated|written|created|assisted|implemented)[[:space:]-]+(by|with|using)[[:space:]]+.*(claude|codex|chatgpt|copilot|gemini|agent|ai)|co-authored-by:.*(claude|codex|chatgpt|copilot|gemini|agent|bot|anthropic)|^[[:space:]]*(agent|ai assistance)[[:space:]]*:'
+agent='(claude|codex|chatgpt|copilot|gemini|anthropic|openai|ai|agent|llm)'
+word_end='([^[:alnum:]_]|$)'
+attribution="(^|[^[:alnum:]_])(generated|written|created|assisted|implemented)[[:space:]-]+(by|with|using)[[:space:]]+([^[:space:]]+[[:space:]]+){0,3}$agent$word_end"
+attribution+="|co-authored-by:([^<]*[^[:alnum:]_])?$agent$word_end"
+attribution+='|noreply@anthropic\.com|^[[:space:]]*(agent|ai assistance)[[:space:]]*:'
 if grep -Eiq "$report" <<< "$message"; then
     fail 'omit test results, coverage figures and validation reports'
 fi

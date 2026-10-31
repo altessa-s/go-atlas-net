@@ -28,9 +28,7 @@ changelog:
       order: 999
   filters:
     exclude:
-      - '^ci:'
-      - '^chore:'
-      - '^test:'
+      - '^(ci|chore|test)(\([^)]*\))?!?:'
       - Merge pull request
       - Merge branch
 

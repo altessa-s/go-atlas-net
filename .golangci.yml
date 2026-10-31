@@ -71,17 +71,6 @@ linters:
       always: false
     misspell:
       locale: US
-    varnamelen:
-      ignore-type-assert-ok: true
-      ignore-map-index-ok: true
-      ignore-chan-recv-ok: true
-      ignore-names:
-        - err
-        - ch
-        - ok
-      ignore-decls:
-        - i int
-        - ch chan
   exclusions:
     generated: lax
     paths:
