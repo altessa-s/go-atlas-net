@@ -1,12 +1,14 @@
 # Dependency updates. Messages read `build(deps): bump …`: the `deps` scope is
 # listed in commit_scopes.txt, so these commits and PR titles pass the same
-# validator as every other commit.
+# validator as every other commit. Pull requests target develop (gitflow); main
+# only receives releases.
 version: 2
 updates:
   - package-ecosystem: gomod
     directories:
       - /
       - /devtools
+    target-branch: develop
     schedule:
       interval: weekly
     commit-message:
@@ -15,8 +17,14 @@ updates:
 
   - package-ecosystem: github-actions
     directory: /
+    target-branch: develop
     schedule:
       interval: weekly
     commit-message:
       prefix: build
       include: scope
+    # Every codeql-action step must run the same version.
+    groups:
+      codeql-action:
+        patterns:
+          - github/codeql-action*
