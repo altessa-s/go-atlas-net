@@ -108,8 +108,8 @@ github.com/alingse/asasalint v0.0.11 h1:SFwnQXJ49Kx/1GghOFz1XGqHYKp21Kq1nHad/0WQ
 github.com/alingse/asasalint v0.0.11/go.mod h1:nCaoMhw7a9kSJObvQyVzNTPBDbNpdocqrSP7t/cW5+I=
 github.com/alingse/nilnesserr v0.2.0 h1:raLem5KG7EFVb4UIDAXgrv3N2JIaffeKNtcEXkEWd/w=
 github.com/alingse/nilnesserr v0.2.0/go.mod h1:1xJPrXonEtX7wyTq8Dytns5P2hNzoWymVUIaKm4HNFg=
-github.com/altessa-s/go-copyright-checker v1.0.0 h1:kaY5AHnnOwf8scEKh1fHts/Ve4WwQ0pZchVsPuqvD1E=
-github.com/altessa-s/go-copyright-checker v1.0.0/go.mod h1:H9F7wcU0vlEXKnIdiRtPqM8eUn8Z5H7usvuHMtrev6w=
+github.com/altessa-s/go-copyright-checker v1.1.0 h1:/+zRuLBm9Lyjs6Rnsp8RPyyqciDJnuzkl6qM0FM4i+0=
+github.com/altessa-s/go-copyright-checker v1.1.0/go.mod h1:H9F7wcU0vlEXKnIdiRtPqM8eUn8Z5H7usvuHMtrev6w=
 github.com/altessa-s/go-optgen v0.1.0 h1:cxmm3gZJGfFZ6Y9zu3uavw5HyXk/88qXfHu8o6rJiL0=
 github.com/altessa-s/go-optgen v0.1.0/go.mod h1:auhUDBCuw1JNzB4c1PE32xyhcEUaghvFMZj1NxLICy8=
 github.com/anthropics/anthropic-sdk-go v1.66.0 h1:/CKwgscn0Pe1q4U8aFInSOt/v06JeMc9Aq4vIlctCFw=
