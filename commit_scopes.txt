@@ -1,9 +1,11 @@
 # Commit Scopes for go-atlas-net
 # Use these scopes in conventional commits: type(scope): description
+# The scope is optional: omit it for repository-wide changes. Never use `root`.
+# Only the first word of a non-comment line is a scope.
 # Example: fix(http/client): keep the retry budget per request
 
-# Root-level scopes
-deps                        # Dependency management
+# Repository scopes
+deps                        # Dependency updates (Dependabot writes build(deps): bump ...)
 README                      # Root README
 docs                        # Documentation
 
