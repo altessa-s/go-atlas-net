@@ -28,20 +28,19 @@ body:
     id: package
     attributes:
       label: Affected Package
-      description: Which top-level package would this feature belong to?
+      description: Which package would this feature belong to?
       options:
-        - auth
-        - config
-        - core
-        - data
-        - domain
-        - infrastructure
-        - observability
-        - proto
-        - security
-        - service
-        - tools
-        - transport
+        - clientip
+        - egressrule
+        - grpc/metadata
+        - http/client
+        - http/client/limiters
+        - httpx
+        - netipx
+        - proxydial
+        - urlx
+        - devtools
+        - ci
         - new package
         - not sure
     validations:

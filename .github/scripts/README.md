@@ -4,15 +4,17 @@
 
 `validate-commit-message.sh` reads a complete message from stdin. The local `commit-msg` hook and CI use this same validator. It checks
 Conventional Commits (`type[(scope)][!]: description`), types, lowercase descriptions and scopes from [`commit_scopes.txt`](../../commit_scopes.txt).
-The `root` scope is forbidden; omit the scope for repository-wide changes. Breaking changes may use `!` before the colon.
+Only the scope lines of that file count; comment and blank lines name no scope. The `root` scope is forbidden; omit the scope for repository-wide
+changes. Breaking changes may use `!` before the colon.
 
 Messages must describe the concrete change without filler, test results, coverage figures or validation summaries. Agent attribution, generation
-signatures and agent co-author trailers are forbidden. The validator rejects common report headings and attribution patterns; reviewers check
-meaning and concision. Human co-author trailers and `BREAKING CHANGE:` explanations remain allowed.
+signatures and agent co-author trailers are forbidden. The validator rejects common report headings and attribution patterns, matching agent names
+as whole words only; reviewers check meaning and concision. Human co-author trailers and `BREAKING CHANGE:` explanations remain allowed.
 
 `validate-commits.sh` validates the complete message of every commit in a range. All failures fail CI. The only exemption is the subject of a
 merge git generates itself (`Merge branch|tag|remote-tracking branch '…'`, `Merge pull request #N from …`), as git flow merges releases and
-hotfixes; its body is checked like any other. Automated and revert commits use a conventional subject. PR titles use the same validator.
+hotfixes; its body is checked like any other. Automated and revert commits use a conventional subject: Dependabot writes `build(deps): bump …`
+(see [`dependabot.yml`](../dependabot.yml)), which the `deps` scope covers, so it needs no exemption. PR titles use the same validator.
 
 ## Usage
 
@@ -37,8 +39,9 @@ implicitly or replaced with a shorter range.
 ## Examples
 
 ```text
-fix(http/client): preserve token usage on provider errors
-feat(urlx)!: reject recursive definitions
+fix(http/client): keep the retry budget per request
+feat(urlx): reject base URLs with a fragment
+build(deps): bump golang.org/x/sys from 0.48.0 to 0.49.0
 build: pin the options generator
 ```
 

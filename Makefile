@@ -42,8 +42,8 @@ all: help
 
 .PHONY: fmt
 fmt: tidy  ## Run go fmt on all go files
-	@cd devtools && go install github.com/daixiang0/gci
-	@gci write \
+	@go -C devtools build -o $(CURDIR)/bin/gci github.com/daixiang0/gci
+	@$(CURDIR)/bin/gci write \
 	    -s standard \
 	    -s default \
 	    -s "prefix(google.golang.org)" \
@@ -64,10 +64,10 @@ tidy: ## Run go mod tidy
 	@go mod tidy
 
 .PHONY: generate
-generate: ## Run go generate on all packages (installs pinned optgen and gci, its formatter)
-	@go -C devtools install github.com/altessa-s/go-optgen/cmd/optgen
-	@go -C devtools install github.com/daixiang0/gci
-	@go generate ./...
+generate: ## Build the pinned optgen and gci into bin/ and run go generate
+	@go -C devtools build -o $(CURDIR)/bin/optgen github.com/altessa-s/go-optgen/cmd/optgen
+	@go -C devtools build -o $(CURDIR)/bin/gci github.com/daixiang0/gci
+	@PATH="$(CURDIR)/bin:$(PATH)" go generate ./...
 
 .PHONY: vet
 vet: ## Run go vet on all packages

@@ -1,5 +1,5 @@
 # optgen configuration file
-# See: https://github.com/altessa-s/go-optgen (installed by `make generate`)
+# See: https://github.com/altessa-s/go-optgen (built into bin/ by `make generate`)
 defaults:
   # Process all struct fields, not just those with opt tags
   all-fields: true
@@ -12,7 +12,7 @@ defaults:
 
   # Format generated files with gci (import sorting)
   # Use {file} placeholder for the file path, or it will be appended automatically
-  # Complex commands with quotes are executed via "sh -c"
+  # The command runs without a shell: quotes group arguments, shell operators are rejected
   formatter: >-
     gci write
     -s standard

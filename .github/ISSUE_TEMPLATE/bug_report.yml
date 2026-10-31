@@ -12,12 +12,12 @@ body:
     attributes:
       label: Go Version
       description: Output of `go version`
-      placeholder: "go1.26.0 linux/amd64"
+      placeholder: "go1.27.0 linux/amd64"
     validations:
       required: true
 
   - type: input
-    id: core-version
+    id: module-version
     attributes:
       label: go-atlas-net Version
       description: The version or commit SHA of go-atlas-net you are using.
@@ -29,20 +29,19 @@ body:
     id: package
     attributes:
       label: Affected Package
-      description: Which top-level package is affected?
+      description: Which package is affected?
       options:
-        - auth
-        - config
-        - core
-        - data
-        - domain
-        - infrastructure
-        - observability
-        - proto
-        - security
-        - service
-        - tools
-        - transport
+        - clientip
+        - egressrule
+        - grpc/metadata
+        - http/client
+        - http/client/limiters
+        - httpx
+        - netipx
+        - proxydial
+        - urlx
+        - devtools
+        - ci
         - other
     validations:
       required: true
