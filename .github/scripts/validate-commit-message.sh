@@ -49,7 +49,11 @@ word_end='([^[:alnum:]_]|$)'
 attribution="(^|[^[:alnum:]_])(generated|written|created|assisted|implemented)[[:space:]-]+(by|with|using)[[:space:]]+([^[:space:]]+[[:space:]]+){0,3}$agent$word_end"
 attribution+="|co-authored-by:([^<]*[^[:alnum:]_])?$agent$word_end"
 attribution+='|noreply@anthropic\.com|^[[:space:]]*(agent|ai assistance)[[:space:]]*:'
-if grep -Eiq "$report" <<< "$message"; then
+# Reports are looked for in the body only: a subject such as "test: add
+# benchmarks" is a commit type, not a report heading.
+body=""
+[[ "$message" == *$'\n'* ]] && body=${message#*$'\n'}
+if grep -Eiq "$report" <<< "$body"; then
     fail 'omit test results, coverage figures and validation reports'
 fi
 if grep -Eiq "$attribution" <<< "$message"; then
