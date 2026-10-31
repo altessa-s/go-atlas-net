@@ -3,7 +3,7 @@
 // the LICENSE file.
 
 // Package devtools pins the development tools of go-atlas-net in a module of
-// their own, so their dependencies never reach the library's go.mod. No code
+// their own, so their dependencies never reach the main go.mod. No code
 // imports it.
 //
 // # Pinned tools
