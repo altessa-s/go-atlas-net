@@ -1,0 +1,48 @@
+name: Benchmarks
+
+on:
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    name: Benchmark regression
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The base branch is checked out into a worktree for comparison.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Compare benchmarks against the base branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          # Shared runners are noisy: only a significant increase above
+          # BENCH_THRESHOLD fails. The script's header documents its defaults.
+          BENCH_REPORT: benchstat.txt
+        run: bash .github/scripts/bench-regression.sh "origin/${BASE_REF}"
+
+      - name: Upload benchstat report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: benchstat
+          path: benchstat.txt
+          if-no-files-found: ignore
+          retention-days: 14

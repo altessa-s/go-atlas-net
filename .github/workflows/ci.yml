@@ -64,7 +64,7 @@ jobs:
 
       - name: Enforce coverage floor
         env:
-          COVERAGE_MIN: "89"
+          COVERAGE_MIN: "94"
         run: |
           COVERAGE=$(go tool cover -func=coverage.out | grep '^total:' | awk '{print $3}' | tr -d '%')
           echo "Total coverage: ${COVERAGE}% (minimum ${COVERAGE_MIN}%)"
@@ -76,6 +76,25 @@ jobs:
           name: coverage
           path: coverage.out
           retention-days: 7
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run integration tests
+        run: make test-integration
 
   cross-compile:
     name: Cross-compile (${{ matrix.goos }})
