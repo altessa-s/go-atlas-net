@@ -132,13 +132,18 @@ All `.go` files must include the copyright header. Run `make copyright` to add i
 | Target | Description |
 |--------|-------------|
 | `make fmt` | Format code and sort imports |
-| `make lint` | Run golangci-lint with the repo config (`.golangci.yml`) |
+| `make lint` | Tidy, format and run golangci-lint with the repo config (`.golangci.yml`) |
+| `make golangci` | Run golangci-lint without rewriting files (as CI does) |
+| `make vet` | Run go vet and the go fix modernizer check |
+| `make build` | Build all packages (honors `GOOS`/`GOARCH`) |
 | `make test` | Run all tests |
 | `make test-verbose` | Run tests with verbose output |
 | `make test-race` | Run tests with race detector |
 | `make test-shuffle` | Run tests with randomized order |
 | `make test-coverage` | Run tests with coverage report |
 | `make test-all` | Run tests with race, shuffle, and coverage |
+| `make coverage` | Run tests with race and shuffle, writing the profile to `coverage.out` |
+| `make coverage-total` | Print the total statement coverage of `coverage.out` |
 | `make test-coverage-func` | Per-package coverage breakdown |
 | `make test-integration` | Run unit and integration tests (`-tags integration`) with race detector and shuffle |
 | `make bench` | Run all benchmarks |
@@ -152,6 +157,8 @@ All `.go` files must include the copyright header. Run `make copyright` to add i
 | `make copyright` | Add copyright headers |
 | `make generate` | Build pinned optgen and gci into `bin/` and regenerate options |
 | `make tidy` | Run go mod tidy |
+| `make govulncheck` | Run govulncheck |
+| `make gosec` | Run gosec |
 | `make security-scan` | Run govulncheck and gosec |
 
 ## Generated options
