@@ -29,12 +29,12 @@ import (
 	"github.com/sony/gobreaker/v2"
 	"github.com/stretchr/testify/require"
 
-	coreio "github.com/altessa-s/go-atlas-core/io"
 	"github.com/altessa-s/go-atlas-core/time/clock"
 
 	"github.com/altessa-s/go-atlas-net/http/client/limiters"
 	"github.com/altessa-s/go-atlas-net/http/client/limiters/hostpacer"
 
+	coreio "github.com/altessa-s/go-atlas-core/io"
 	httpclient "github.com/altessa-s/go-atlas-net/http/client"
 )
 
