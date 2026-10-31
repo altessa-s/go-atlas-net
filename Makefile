@@ -6,6 +6,8 @@ MAKEFLAGS      			+= --warn-undefined-variables
 MAKEFLAGS      			+= --no-builtin-rules
 CHANGELOG_NEXT_VERSION 	?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
 MODULE         			:= github.com/altessa-s/go-atlas-net
+# Directories holding a go.mod, root first. Every Go target runs in each one.
+MODULES        			:= .
 
 # dupl configuration
 # - DUPL_THRESHOLD: token threshold (higher -> fewer matches)
@@ -45,8 +47,11 @@ fmt: tidy  ## Run go fmt on all go files
 	@go -C devtools build -o $(CURDIR)/bin/gci github.com/daixiang0/gci
 	@# go list prints nothing when any package fails to load (a half-written
 	@# file is enough); stop there instead of running gci without paths.
-	@dirs=$$(go list -f '{{.Dir}}' ./...) || { echo "fmt: go list failed, see the errors above" >&2; exit 1; }; \
-	if [ -z "$$dirs" ]; then echo "fmt: go list found no packages" >&2; exit 1; fi; \
+	@dirs=""; for m in $(MODULES); do \
+	  d=$$(cd $$m && go list -f '{{.Dir}}' ./...) || { echo "fmt: go list failed in $$m, see the errors above" >&2; exit 1; }; \
+	  dirs="$$dirs $$d"; \
+	done; \
+	if [ -z "$${dirs// /}" ]; then echo "fmt: go list found no packages" >&2; exit 1; fi; \
 	$(CURDIR)/bin/gci write \
 	    -s standard \
 	    -s default \
@@ -59,28 +64,35 @@ fmt: tidy  ## Run go fmt on all go files
 	    $$dirs
 
 .PHONY: lint
-lint: tidy fmt ## Run linter
+lint: tidy fmt golangci ## Tidy, format and run the linter
+
+.PHONY: golangci
+golangci: ## Run golangci-lint without rewriting files (as CI does)
 	@cd devtools && go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint
-	golangci-lint run ./...
+	@for m in $(MODULES); do (cd $$m && golangci-lint run ./...) || exit 1; done
 
 .PHONY: tidy
 tidy: ## Run go mod tidy
-	@go mod tidy
+	@for m in $(MODULES); do (cd $$m && go mod tidy) || exit 1; done
 
 .PHONY: generate
 generate: ## Build the pinned optgen and gci into bin/ and run go generate
 	@go -C devtools build -o $(CURDIR)/bin/optgen github.com/altessa-s/go-optgen/cmd/optgen
 	@go -C devtools build -o $(CURDIR)/bin/gci github.com/daixiang0/gci
-	@PATH="$(CURDIR)/bin:$(PATH)" go generate ./...
+	@for m in $(MODULES); do (cd $$m && PATH="$(CURDIR)/bin:$(PATH)" go generate ./...) || exit 1; done
 
 .PHONY: vet
 vet: ## Run go vet and fail when a go fix modernizer would rewrite code (as CI does)
-	@go vet ./...
-	@go fix -diff ./... || { echo "go fix -diff is not empty: run go fix ./..."; exit 1; }
+	@for m in $(MODULES); do (cd $$m && go vet ./...) || exit 1; done
+	@for m in $(MODULES); do (cd $$m && go fix -diff ./...) || { echo "go fix -diff is not empty in $$m: run go fix ./..."; exit 1; }; done
+
+.PHONY: build
+build: ## Build all packages (honors GOOS/GOARCH)
+	@for m in $(MODULES); do (cd $$m && go build ./...) || exit 1; done
 
 .PHONY: test
 test: ## Run all tests
-	@go test ./... 2>&1 | awk -F'\t' '\
+	@for m in $(MODULES); do (cd $$m && go test ./...) || exit 1; done 2>&1 | awk -F'\t' '\
 	  function pad(s,w, _l,_p) { gsub(/^[ \t]+|[ \t]+$$/, "", s); _l=length(s); _p=""; while(_l++<w) _p=_p" "; return s _p } \
 	  function color(s,c) { return "\033[" c "m" s "\033[0m" } \
 	  { \
@@ -92,23 +104,23 @@ test: ## Run all tests
 
 .PHONY: test-verbose
 test-verbose: ## Run all tests with verbose output
-	@go test -v ./...
+	@for m in $(MODULES); do (cd $$m && go test -v ./...) || exit 1; done
 
 .PHONY: test-race
 test-race: ## Run all tests with the race detector (slower)
-	@go test -race ./...
+	@for m in $(MODULES); do (cd $$m && go test -race ./...) || exit 1; done
 
 .PHONY: test-shuffle
 test-shuffle: ## Run all tests with randomized order (helps catch order-dependence)
-	@go test -shuffle=on ./...
+	@for m in $(MODULES); do (cd $$m && go test -shuffle=on ./...) || exit 1; done
 
 .PHONY: test-coverage
 test-coverage: ## Run tests with coverage report
-	@go test -cover ./...
+	@for m in $(MODULES); do (cd $$m && go test -cover ./...) || exit 1; done
 
 .PHONY: test-coverage-func
 test-coverage-func: ## Run tests and show formatted per-package coverage
-	@go test -cover ./... 2>&1 | awk -F'\t' '\
+	@for m in $(MODULES); do (cd $$m && go test -cover ./...) || exit 1; done 2>&1 | awk -F'\t' '\
 	  function pad(s,w, _l,_p) { gsub(/^[ \t]+|[ \t]+$$/, "", s); _l=length(s); _p=""; while(_l++<w) _p=_p" "; return s _p } \
 	  function color(s,c) { return "\033[" c "m" s "\033[0m" } \
 	  { \
@@ -121,19 +133,35 @@ test-coverage-func: ## Run tests and show formatted per-package coverage
 	    printf "| %s | %s | %s | %s |\n", color(pad(st,4),cs), pad(pkg,56), pad($$3,15), color(pad(cov,30),cc) \
 	  }'
 
+.PHONY: coverage
+coverage: ## Run tests with race detector and shuffle, writing the profile to coverage.out
+	@echo "mode: atomic" > coverage.out
+	@for m in $(MODULES); do \
+	  (cd $$m && go test -race -shuffle=on -covermode=atomic -coverprofile="$(CURDIR)/coverage.part" ./...) || { rm -f coverage.part; exit 1; }; \
+	  if [ -f coverage.part ]; then tail -n +2 coverage.part >> coverage.out; rm -f coverage.part; fi; \
+	done
+
+# go tool cover cannot resolve packages of other modules from the root, so the
+# total is computed from the profile: covered statements over all statements,
+# printed in go tool cover's "total:" format.
+.PHONY: coverage-total
+coverage-total: ## Print the total statement coverage of coverage.out
+	@awk 'NR > 1 { stmts += $$2; if ($$3 > 0) covered += $$2 } \
+	  END { if (stmts == 0) { print "coverage-total: no statements in coverage.out" > "/dev/stderr"; exit 1 } \
+	        printf "total:\t(statements)\t%.1f%%\n", covered * 100 / stmts }' coverage.out
+
 .PHONY: test-all
-test-all: ## Run tests with race detector, shuffle, and coverage
-	@go test -race -shuffle=on -coverprofile=coverage.out ./...
-	@go tool cover -func=coverage.out | tail -1
+test-all: coverage ## Run tests with race detector, shuffle, and coverage
+	@$(MAKE) --no-print-directory coverage-total
 	@rm -f coverage.out
 
 .PHONY: test-integration
 test-integration: ## Run unit and integration tests (-tags integration) with race detector and shuffle
-	@go test -race -shuffle=on -tags=integration ./...
+	@for m in $(MODULES); do (cd $$m && go test -race -shuffle=on -tags=integration ./...) || exit 1; done
 
 .PHONY: bench
 bench: ## Run all benchmarks
-	@go test -bench=. -benchmem -run=^$$ ./... 2>&1 | awk -F'\t' '\
+	@for m in $(MODULES); do (cd $$m && go test -bench=. -benchmem -run=^$$ ./...) || exit 1; done 2>&1 | awk -F'\t' '\
 	  function pad(s,w, _l,_p) { gsub(/^[ \t]+|[ \t]+$$/, "", s); _l=length(s); _p=""; while(_l++<w) _p=_p" "; return s _p } \
 	  function color(s,c) { return "\033[" c "m" s "\033[0m" } \
 	  /^(ok|FAIL|\?)/ { \
@@ -146,7 +174,7 @@ bench: ## Run all benchmarks
 
 .PHONY: bench-count
 bench-count: ## Run benchmarks multiple times for benchstat (COUNT=5)
-	@go test -bench=. -benchmem -run=^$$ -count=$${COUNT:-5} ./... | tee bench.txt
+	@for m in $(MODULES); do (cd $$m && go test -bench=. -benchmem -run=^$$ -count=$${COUNT:-5} ./...) || exit 1; done | tee bench.txt
 	@echo "Results saved to bench.txt (use benchstat bench.txt)"
 
 .PHONY: bench-compare
@@ -158,32 +186,52 @@ fuzz-inputs: # Refuse FUZZTIME and FUZZPKG outside their allowlists
 	@[[ "$$FUZZTIME" =~ ^[0-9]{1,6}(ms|s|m|h|x)$$ ]] || { printf 'invalid FUZZTIME %q (a count of ms, s, m, h or x)\n' "$$FUZZTIME" >&2; exit 2; }
 	@[[ "$$FUZZPKG" =~ ^\./[A-Za-z0-9_./-]*$$ ]] || { printf 'invalid FUZZPKG %q (one ./ package pattern)\n' "$$FUZZPKG" >&2; exit 2; }
 
+# fuzz-dirs sets $$fdirs to the package directories of every module that
+# FUZZPKG selects. FUZZPKG is a path relative to the repository root; a
+# trailing /... selects the directory and everything below it, across module
+# boundaries. Packages run from their own directory, so each uses its module.
+define fuzz-dirs
+want="$(CURDIR)/$${FUZZPKG#./}"; recursive=0; \
+case "$$want" in */...) recursive=1; want="$${want%/...}";; esac; want="$${want%/}"; \
+fdirs=""; \
+for m in $(MODULES); do \
+  dirs=$$(cd $$m && go list -f '{{.Dir}}' ./...) || { printf '\033[31mcannot list the packages of %s\033[0m\n' "$$m" >&2; exit 1; }; \
+  for d in $$dirs; do \
+    if [ "$$d" = "$$want" ]; then fdirs="$$fdirs $$d"; \
+    elif [ $$recursive = 1 ]; then case "$$d/" in "$$want"/*) fdirs="$$fdirs $$d";; esac; fi; \
+  done; \
+done
+endef
+
 .PHONY: fuzz-list
 fuzz-list: fuzz-inputs ## List every fuzz target (package and name)
-	@pkgs=$$(go list "$$FUZZPKG") || exit 1; \
-	for pkg in $$pkgs; do \
-	  list=$$(go test -list '^Fuzz' "$$pkg") || exit 1; \
+	@$(fuzz-dirs); \
+	for d in $$fdirs; do \
+	  list=$$(cd "$$d" && go test -list '^Fuzz' .) || exit 1; \
+	  rel="$${d#$(CURDIR)}"; rel="$${rel#/}"; rel="$${rel:-.}"; \
 	  for t in $$(printf '%s\n' "$$list" | grep '^Fuzz' || true); do \
-	    printf '%s\t%s\n' "$${pkg#$(MODULE)/}" "$$t"; \
+	    printf '%s\t%s\n' "$$rel" "$$t"; \
 	  done; \
 	done
 
 .PHONY: fuzz-seed
 fuzz-seed: fuzz-inputs ## Run every fuzz target over its seed corpus only (no mutation, fast)
-	@go test -run '^Fuzz' "$$FUZZPKG"
+	@$(fuzz-dirs); \
+	for d in $$fdirs; do (cd "$$d" && go test -run '^Fuzz' .) || exit 1; done
 
 .PHONY: fuzz
 fuzz: fuzz-inputs ## Fuzz every target for FUZZTIME each (FUZZTIME=30s FUZZPKG=./...)
-	@pkgs=$$(go list "$$FUZZPKG") || { printf '\033[31mcannot list the packages %s\033[0m\n' "$$FUZZPKG"; exit 1; }; \
+	@$(fuzz-dirs); \
 	failed=""; \
-	for pkg in $$pkgs; do \
-	  if ! list=$$(go test -list '^Fuzz' "$$pkg"); then \
-	    failed="$$failed $${pkg#$(MODULE)/}:(target discovery)"; \
+	for d in $$fdirs; do \
+	  rel="$${d#$(CURDIR)}"; rel="$${rel#/}"; rel="$${rel:-.}"; \
+	  if ! list=$$(cd "$$d" && go test -list '^Fuzz' .); then \
+	    failed="$$failed $$rel:(target discovery)"; \
 	    continue; \
 	  fi; \
 	  for t in $$(printf '%s\n' "$$list" | grep '^Fuzz' || true); do \
-	    printf '\033[36m==> %s %s (%s)\033[0m\n' "$${pkg#$(MODULE)/}" "$$t" "$$FUZZTIME"; \
-	    go test -run '^$$' -fuzz "^$$t$$" -fuzztime "$$FUZZTIME" "$$pkg" || failed="$$failed $${pkg#$(MODULE)/}:$$t"; \
+	    printf '\033[36m==> %s %s (%s)\033[0m\n' "$$rel" "$$t" "$$FUZZTIME"; \
+	    (cd "$$d" && go test -run '^$$' -fuzz "^$$t$$" -fuzztime "$$FUZZTIME" .) || failed="$$failed $$rel:$$t"; \
 	  done; \
 	done; \
 	if [ -n "$$failed" ]; then \
@@ -256,7 +304,12 @@ release: ## Semantic versioning - create and push a new release tag
 .PHONY: gosec
 gosec: ## Run gosec static security scanner (see GOSEC_EXCLUDED_RULES)
 	@cd devtools && go install github.com/securego/gosec/v2/cmd/gosec
-	@gosec -quiet -exclude-generated -exclude=$(GOSEC_EXCLUDED_RULES) ./...
+	@for m in $(MODULES); do (cd $$m && gosec -quiet -exclude-generated -exclude=$(GOSEC_EXCLUDED_RULES) ./...) || exit 1; done
+
+.PHONY: govulncheck
+govulncheck: ## Run govulncheck
+	@cd devtools && go install golang.org/x/vuln/cmd/govulncheck
+	@for m in $(MODULES); do (cd $$m && govulncheck ./...) || exit 1; done
 
 .PHONY: security-scan
 security-scan: ## Security checks - run vulnerability and security scanners
@@ -266,10 +319,10 @@ security-scan: ## Security checks - run vulnerability and security scanners
 	@# if any did, so one report never hides the other.
 	@status=0; \
 	echo "Running Go vulnerability check ($$(go env GOVERSION))..."; \
-	govulncheck ./... || status=1; \
+	for m in $(MODULES); do (cd $$m && govulncheck ./...) || status=1; done; \
 	echo ""; \
 	echo "Running gosec security scanner..."; \
-	gosec -quiet -exclude-generated -exclude=$(GOSEC_EXCLUDED_RULES) ./... || status=1; \
+	for m in $(MODULES); do (cd $$m && gosec -quiet -exclude-generated -exclude=$(GOSEC_EXCLUDED_RULES) ./...) || status=1; done; \
 	echo ""; \
 	if [ $$status -ne 0 ]; then echo "Security scan found issues"; exit 1; fi; \
 	echo "Security scan completed"
