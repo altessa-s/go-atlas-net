@@ -29,15 +29,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# run_benchmarks DIR OUT runs every benchmark of the tree at DIR and writes the
-# lines benchstat reads to OUT. A failing run prints its output and fails; a
-# tree without benchmarks yields an empty OUT.
+# run_benchmarks DIR OUT runs every benchmark of every module of the tree at
+# DIR (each tracked go.mod outside devtools) and writes the lines benchstat
+# reads to OUT. A failing run prints its output and fails; a tree without
+# benchmarks yields an empty OUT.
 run_benchmarks() {
-    if ! go -C "$1" test -run='^$' -bench=. -benchmem -count="$count" -benchtime="$benchtime" ./... >"$2.raw" 2>&1; then
-        cat "$2.raw" >&2
-        return 1
-    fi
-    grep -E '^(goos|goarch|pkg|cpu|Benchmark)' "$2.raw" >"$2" || [[ $? -eq 1 ]]
+    local modules m
+    modules=$(git -C "$1" ls-files -- go.mod '*/go.mod' | grep -v '^devtools/' | xargs -n1 dirname)
+    : >"$2"
+    for m in $modules; do
+        if ! go -C "$1/$m" test -run='^$' -bench=. -benchmem -count="$count" -benchtime="$benchtime" ./... >"$2.raw" 2>&1; then
+            cat "$2.raw" >&2
+            return 1
+        fi
+        grep -E '^(goos|goarch|pkg|cpu|Benchmark)' "$2.raw" >>"$2" || [[ $? -eq 1 ]]
+    done
 }
 
 git -C "$repo_dir" worktree add --detach "$work/base" "$base_ref" >/dev/null

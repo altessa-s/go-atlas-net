@@ -116,8 +116,8 @@ github.com/alingse/nilnesserr v0.2.0 h1:raLem5KG7EFVb4UIDAXgrv3N2JIaffeKNtcEXkEW
 github.com/alingse/nilnesserr v0.2.0/go.mod h1:1xJPrXonEtX7wyTq8Dytns5P2hNzoWymVUIaKm4HNFg=
 github.com/altessa-s/go-copyright-checker v1.1.0 h1:/+zRuLBm9Lyjs6Rnsp8RPyyqciDJnuzkl6qM0FM4i+0=
 github.com/altessa-s/go-copyright-checker v1.1.0/go.mod h1:H9F7wcU0vlEXKnIdiRtPqM8eUn8Z5H7usvuHMtrev6w=
-github.com/altessa-s/go-optgen v0.2.0 h1:v8t3PDoJiA11mPW1EkADCqQDb1/g+K5TeZ4CGNVwjcA=
-github.com/altessa-s/go-optgen v0.2.0/go.mod h1:xcBN5YVRSFDaQfDdVcNZV8Ac75TN1IlBWbfcvIWMdgE=
+github.com/altessa-s/go-optgen v0.2.1 h1:zmkFoDeCberuS4gK17uvwP5DUzSu9mQz3Ccnch7KtsY=
+github.com/altessa-s/go-optgen v0.2.1/go.mod h1:xcBN5YVRSFDaQfDdVcNZV8Ac75TN1IlBWbfcvIWMdgE=
 github.com/anthropics/anthropic-sdk-go v1.82.0 h1:A82J+yHEMbQ3+7ObCagOX4tVm1uyBhELCHd2dDYZYuo=
 github.com/anthropics/anthropic-sdk-go v1.82.0/go.mod h1:GThfYqPJoaQ/6pmibCI98Cr4y5su2FXMUHn3NrSSnIc=
 github.com/ashanbrown/forbidigo/v2 v2.3.1 h1:KAZijvQ7zeIBKbhikT4jCm0TLYXC4u78bTiLh/8JROI=
