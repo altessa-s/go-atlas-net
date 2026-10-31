@@ -82,7 +82,10 @@ check 1 'Merge branch develop'
 check 1 'Merge the release'
 check 1 $'Merge branch \'develop\'\n\nGenerated with Claude Code'
 
-# Reports.
+# Reports, in the body only: a scopeless test subject is a commit type.
+check 0 'test: add unit, integration and benchmark tests'
+check 0 'test: cover retry cancellation'
+check 1 $'test: cover retry cancellation\n\nTests: go test ./... passed'
 check 1 "fix($scope_a): preserve provider usage"$'\n\nTests: go test ./... passed'
 check 1 "fix($scope_a): preserve provider usage"$'\n\nCoverage: 95%'
 check 1 "fix($scope_a): preserve provider usage"$'\n\nAll tests passed'
