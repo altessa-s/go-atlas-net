@@ -232,9 +232,9 @@ func WithRetryAfterStatuses(v ...int) Option {
 		if len(v) == 0 {
 			return
 		}
+		deduped := make([]int, 0, len(v))
 		{
 			seen := make(map[int]struct{}, len(v))
-			deduped := make([]int, 0, len(v))
 			for _, item := range v {
 				if _, ok := seen[item]; ok {
 					continue
@@ -242,9 +242,8 @@ func WithRetryAfterStatuses(v ...int) Option {
 				seen[item] = struct{}{}
 				deduped = append(deduped, item)
 			}
-			v = deduped
 		}
-		o.retryAfterStatuses = v
+		o.retryAfterStatuses = deduped
 	}
 }
 
@@ -309,9 +308,9 @@ func WithRetryableStatuses(v ...int) Option {
 		if len(v) == 0 {
 			return
 		}
+		deduped := make([]int, 0, len(v))
 		{
 			seen := make(map[int]struct{}, len(v))
-			deduped := make([]int, 0, len(v))
 			for _, item := range v {
 				if _, ok := seen[item]; ok {
 					continue
@@ -319,9 +318,8 @@ func WithRetryableStatuses(v ...int) Option {
 				seen[item] = struct{}{}
 				deduped = append(deduped, item)
 			}
-			v = deduped
 		}
-		o.retryableStatuses = v
+		o.retryableStatuses = deduped
 	}
 }
 

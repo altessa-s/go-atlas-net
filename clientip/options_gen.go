@@ -37,9 +37,9 @@ func WithHeaders(v ...string) Option {
 		for i, element := range v {
 			transformed[i] = strings.TrimSpace(element)
 		}
+		deduped := make([]string, 0, len(transformed))
 		{
 			seen := make(map[string]struct{}, len(transformed))
-			deduped := make([]string, 0, len(transformed))
 			for _, item := range transformed {
 				if _, ok := seen[item]; ok {
 					continue
@@ -47,9 +47,8 @@ func WithHeaders(v ...string) Option {
 				seen[item] = struct{}{}
 				deduped = append(deduped, item)
 			}
-			transformed = deduped
 		}
-		o.headers = transformed
+		o.headers = deduped
 	}
 }
 
@@ -85,7 +84,18 @@ func WithTrustedPeers(v ...netip.Prefix) Option {
 		if len(v) == 0 {
 			return
 		}
-		o.trustedPeers = v
+		deduped := make([]netip.Prefix, 0, len(v))
+		{
+			seen := make(map[netip.Prefix]struct{}, len(v))
+			for _, item := range v {
+				if _, ok := seen[item]; ok {
+					continue
+				}
+				seen[item] = struct{}{}
+				deduped = append(deduped, item)
+			}
+		}
+		o.trustedPeers = deduped
 	}
 }
 
@@ -95,7 +105,18 @@ func WithTrustedProxies(v ...netip.Prefix) Option {
 		if len(v) == 0 {
 			return
 		}
-		o.trustedProxies = v
+		deduped := make([]netip.Prefix, 0, len(v))
+		{
+			seen := make(map[netip.Prefix]struct{}, len(v))
+			for _, item := range v {
+				if _, ok := seen[item]; ok {
+					continue
+				}
+				seen[item] = struct{}{}
+				deduped = append(deduped, item)
+			}
+		}
+		o.trustedProxies = deduped
 	}
 }
 
