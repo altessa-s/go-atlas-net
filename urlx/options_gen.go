@@ -20,9 +20,9 @@ func WithAllowedSchemes(v ...string) Option {
 		for i, element := range v {
 			transformed[i] = strings.ToLower(strings.TrimSpace(element))
 		}
+		deduped := make([]string, 0, len(transformed))
 		{
 			seen := make(map[string]struct{}, len(transformed))
-			deduped := make([]string, 0, len(transformed))
 			for _, item := range transformed {
 				if _, ok := seen[item]; ok {
 					continue
@@ -30,16 +30,14 @@ func WithAllowedSchemes(v ...string) Option {
 				seen[item] = struct{}{}
 				deduped = append(deduped, item)
 			}
-			transformed = deduped
 		}
-		nonEmpty := make([]string, 0, len(transformed))
-		for _, x := range transformed {
+		nonEmpty := make([]string, 0, len(deduped))
+		for _, x := range deduped {
 			if x != "" {
 				nonEmpty = append(nonEmpty, x)
 			}
 		}
-		transformed = nonEmpty
-		o.allowedSchemes = transformed
+		o.allowedSchemes = nonEmpty
 	}
 }
 

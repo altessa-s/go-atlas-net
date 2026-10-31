@@ -13,7 +13,7 @@ on:
         description: "Per-target fuzz budget (Go duration, e.g. 2m)"
         default: "2m"
       fuzzpkg:
-        description: "Package pattern to fuzz (e.g. ./io/wal)"
+        description: "Package pattern to fuzz (e.g. ./urlx)"
         default: "./..."
 
 permissions:
@@ -28,12 +28,14 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27"
+          go-version-file: go.mod
           # This job manages its own cache: the interesting artifact is the
           # generated corpus under GOCACHE/fuzz, and two actions writing
           # overlapping paths would race to save it.
@@ -45,23 +47,31 @@ jobs:
       # run_id in the key makes every run save a fresh entry, and the prefix
       # restore-key picks up the most recent one.
       - name: Restore fuzz corpus
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}/.gocache/fuzz
           key: fuzz-corpus-${{ github.run_id }}
           restore-keys: fuzz-corpus-
 
+      # Dispatch inputs are untrusted text: checked against narrow allowlists
+      # here, and the Makefile reads them from the environment, quoted, after
+      # checking them again.
       - name: Fuzz
         env:
           GOCACHE: ${{ github.workspace }}/.gocache
-        run: make fuzz FUZZTIME=${{ inputs.fuzztime || '2m' }} FUZZPKG=${{ inputs.fuzzpkg || './...' }}
+          FUZZTIME: ${{ inputs.fuzztime || '2m' }}
+          FUZZPKG: ${{ inputs.fuzzpkg || './...' }}
+        run: |
+          [[ "$FUZZTIME" =~ ^[0-9]{1,6}(ms|s|m|h|x)$ ]] || { echo "invalid fuzztime" >&2; exit 2; }
+          [[ "$FUZZPKG" =~ ^\./[A-Za-z0-9_./-]*$ ]] || { echo "invalid fuzzpkg" >&2; exit 2; }
+          make fuzz
 
       # A crash makes Go write the minimized reproducer to the package's
       # testdata/fuzz/<Target>/ directory. Uploading it is what turns a red
       # nightly into a file someone can commit as a permanent regression seed.
       - name: Upload crashers
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-crashers
           path: "**/testdata/fuzz/**"

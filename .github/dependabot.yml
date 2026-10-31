@@ -1,0 +1,22 @@
+# Dependency updates. Messages read `build(deps): bump …`: the `deps` scope is
+# listed in commit_scopes.txt, so these commits and PR titles pass the same
+# validator as every other commit.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directories:
+      - /
+      - /devtools
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+      include: scope
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+      include: scope

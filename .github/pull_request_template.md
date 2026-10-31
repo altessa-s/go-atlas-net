@@ -18,7 +18,7 @@
 - [ ] All new and existing tests pass (`make test-all`)
 - [ ] I have run `make fmt` to format my code
 - [ ] I have updated the copyright headers (`make copyright`)
-- [ ] My commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
+- [ ] My commits follow [the message rules](../CONTRIBUTING.md#commit-messages): concrete changes; no `root` scope, test reports or agent attribution
 
 ## Related Issues
 
