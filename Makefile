@@ -64,7 +64,8 @@ fmt: tidy  ## Run go fmt on all go files
 	    $$dirs
 
 .PHONY: lint
-lint: tidy fmt golangci ## Tidy, format and run the linter
+lint: tidy fmt ## Tidy, format and run the linter
+	@$(MAKE) --no-print-directory golangci
 
 .PHONY: golangci
 golangci: ## Run golangci-lint without rewriting files (as CI does)
@@ -191,8 +192,9 @@ fuzz-inputs: # Refuse FUZZTIME and FUZZPKG outside their allowlists
 # trailing /... selects the directory and everything below it, across module
 # boundaries. Packages run from their own directory, so each uses its module.
 define fuzz-dirs
-want="$(CURDIR)/$${FUZZPKG#./}"; recursive=0; \
-case "$$want" in */...) recursive=1; want="$${want%/...}";; esac; want="$${want%/}"; \
+want="$${FUZZPKG#./}"; recursive=0; \
+case "$$want" in ...) recursive=1; want=.;; */...) recursive=1; want="$${want%/...}";; esac; \
+want=$$(cd "$(CURDIR)/$${want:-.}" 2>/dev/null && pwd) || { printf '\033[31mFUZZPKG %s names no directory\033[0m\n' "$$FUZZPKG" >&2; exit 2; }; \
 fdirs=""; \
 for m in $(MODULES); do \
   dirs=$$(cd $$m && go list -f '{{.Dir}}' ./...) || { printf '\033[31mcannot list the packages of %s\033[0m\n' "$$m" >&2; exit 1; }; \
@@ -200,7 +202,8 @@ for m in $(MODULES); do \
     if [ "$$d" = "$$want" ]; then fdirs="$$fdirs $$d"; \
     elif [ $$recursive = 1 ]; then case "$$d/" in "$$want"/*) fdirs="$$fdirs $$d";; esac; fi; \
   done; \
-done
+done; \
+[ -n "$$fdirs" ] || { printf '\033[31mFUZZPKG %s matches no package\033[0m\n' "$$FUZZPKG" >&2; exit 2; }
 endef
 
 .PHONY: fuzz-list
