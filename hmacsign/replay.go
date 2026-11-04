@@ -22,7 +22,7 @@ type ReplayCache interface {
 }
 
 // MemoryReplayCache is an in-process [ReplayCache]. Expired entries are swept
-// on insertion. It is safe for concurrent use.
+// on insertion once the earliest one has expired. It is safe for concurrent use.
 type MemoryReplayCache struct {
 	mu        sync.Mutex
 	entries   map[string]time.Time
@@ -39,17 +39,26 @@ func (c *MemoryReplayCache) CheckAndStore(key string, ttl time.Duration) (bool, 
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if now.After(c.nextSweep) {
+	if !c.nextSweep.IsZero() && !now.Before(c.nextSweep) {
+		// Sweep once the earliest entry has expired and reschedule for the
+		// earliest survivor, so short-TTL entries are not kept alive by the
+		// arrival of long-TTL ones.
+		c.nextSweep = time.Time{}
 		for k, exp := range c.entries {
 			if !now.Before(exp) {
 				delete(c.entries, k)
+			} else if c.nextSweep.IsZero() || exp.Before(c.nextSweep) {
+				c.nextSweep = exp
 			}
 		}
-		c.nextSweep = now.Add(ttl)
 	}
 	if exp, ok := c.entries[key]; ok && now.Before(exp) {
 		return true, nil
 	}
-	c.entries[key] = now.Add(ttl)
+	exp := now.Add(ttl)
+	c.entries[key] = exp
+	if c.nextSweep.IsZero() || exp.Before(c.nextSweep) {
+		c.nextSweep = exp
+	}
 	return false, nil
 }

@@ -8,8 +8,8 @@ Signs and verifies HTTP request bodies with a shared-secret HMAC — the scheme 
 from them and was not tampered with. It is the body-signing counterpart to the token packages ([`auth/oidc`](https://github.com/altessa-s/go-atlas/tree/develop/auth/oidc),
 [`auth/jwt`](https://github.com/altessa-s/go-atlas/tree/develop/auth/jwt)): those authenticate a bearer *token*, this authenticates the *payload*.
 
-A `Verifier` authenticates an inbound webhook; a `Signer` produces the header for an outbound one. Both compare in constant time (`hmac.Equal`) and use
-HMAC-SHA256.
+A `Verifier` authenticates an inbound webhook; a `Signer` produces the header for an outbound one. Both use
+HMAC-SHA256; the `Verifier` compares signatures in constant time (`hmac.Equal`).
 
 `NewSigner` and `NewVerifier` return `ErrSecretTooShort` when the primary secret or any rotation secret is shorter than `MinSecretLength` (16 bytes):
 an empty or short key — usually a secret reference that never resolved — would let anyone forge a signature, so construction fails closed.
