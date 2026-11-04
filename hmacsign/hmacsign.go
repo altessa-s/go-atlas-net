@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -130,6 +131,16 @@ func (v *Verifier) Verify(header string, body []byte) error {
 // accepted from tolerance before to tolerance after its timestamp.
 const replayWindowSpan = 2
 
+// replayTTL is the replay-cache TTL for tolerance, saturating at the largest
+// time.Duration instead of overflowing to a negative TTL that the cache would
+// forget at once.
+func replayTTL(tolerance time.Duration) time.Duration {
+	if tolerance > math.MaxInt64/replayWindowSpan {
+		return math.MaxInt64
+	}
+	return replayWindowSpan * tolerance
+}
+
 // checkReplay records the accepted signed message in the replay cache for the
 // full width of the tolerance window and rejects one already recorded. A cache
 // error fails closed.
@@ -140,7 +151,7 @@ const replayWindowSpan = 2
 // for every other secret it verifies under.
 func (v *Verifier) checkReplay(msg []byte) error {
 	key := sha256.Sum256(msg)
-	seen, err := v.opts.replayCache.CheckAndStore(hex.EncodeToString(key[:]), replayWindowSpan*v.opts.tolerance)
+	seen, err := v.opts.replayCache.CheckAndStore(hex.EncodeToString(key[:]), replayTTL(v.opts.tolerance))
 	if err != nil {
 		return fmt.Errorf("hmacsign: replay cache: %w", err)
 	}

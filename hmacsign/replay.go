@@ -36,9 +36,11 @@ func NewMemoryReplayCache() *MemoryReplayCache {
 
 // CheckAndStore implements [ReplayCache].
 func (c *MemoryReplayCache) CheckAndStore(key string, ttl time.Duration) (bool, error) {
-	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Read the clock under the lock so a call delayed on the mutex does not
+	// judge expiry, or store a deadline, from a stale instant.
+	now := time.Now()
 	if !c.nextSweep.IsZero() && !now.Before(c.nextSweep) {
 		// Sweep once the earliest entry has expired and reschedule for the
 		// earliest survivor, so short-TTL entries are not kept alive by the
