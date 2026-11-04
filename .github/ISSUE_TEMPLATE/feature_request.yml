@@ -35,6 +35,7 @@ body:
         - grpc/metadata
         - http/client
         - http/client/limiters
+        - http/client/limiters/hostpacer
         - httpx
         - netipx
         - proxydial

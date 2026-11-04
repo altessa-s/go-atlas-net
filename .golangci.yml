@@ -2,7 +2,7 @@ version: "2"
 
 run:
   timeout: 5m
-  # Lint the integration tests too; they build only with this tag.
+  # Lint the tests behind these tags too; they build only with them.
   build-tags:
     - integration
 
@@ -40,6 +40,8 @@ linters:
     - dupl
     - gocyclo
     - gocognit
+    - wsl_v5
+    - godoclint
   settings:
     lll:
       line-length: 156
@@ -74,23 +76,59 @@ linters:
       always: false
     misspell:
       locale: US
+    godoclint:
+      default: basic
+      enable:
+        - require-doc
   exclusions:
     generated: lax
-    paths:
-      - ".*_test\\.go"
+    rules:
+      # Tests run only the formatting, dead-code and simple correctness
+      # linters (see CONTRIBUTING "Formatting"); every other linter skips them.
+      - path: _test\.go
+        linters:
+          - bidichk
+          - bodyclose
+          - contextcheck
+          - dogsled
+          - errcheck
+          - prealloc
+          - mnd
+          - unconvert
+          - exhaustive
+          - goconst
+          - gocritic
+          - godox
+          - govet
+          - lll
+          - makezero
+          - nilnil
+          - noctx
+          - staticcheck
+          - unparam
+          - dupl
+          - gocyclo
+          - gocognit
+          - godoclint
 
 formatters:
   enable:
     - gci
+  exclusions:
+    # make generate formats optgen's output with these formatters, so the
+    # generated files are held to them too.
+    generated: disable
   settings:
     gci:
+      # Keep the sections in the order listed here; by default gci sorts
+      # prefix sections lexically.
+      custom-order: true
       sections:
         - standard
         - default
         - prefix(google.golang.org)
         - prefix(golang.org)
-        - prefix(github.com/altessa-s/go-atlas-core)
-        - prefix(github.com/altessa-s/go-atlas-net)
         - prefix(github.com/altessa-s)
+        - prefix(github.com/altessa-s/go-atlas-net)
         - blank
         - alias
