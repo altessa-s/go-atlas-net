@@ -39,6 +39,31 @@ func TestReplayCacheRejectsSecondDelivery(t *testing.T) {
 	require.NoError(t, v.Verify(later, body))
 }
 
+func TestReplayNamespaceScopesSharedCache(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_000, 0)
+	body := []byte("event")
+	header := mustSigner(t, hmacsign.Stripe(), []byte(replaySecret), hmacsign.WithClock(fixedClock(now))).Sign(body)
+	cache := hmacsign.NewMemoryReplayCache()
+	receiver := func(namespace string) *hmacsign.Verifier {
+		return mustVerifier(t, hmacsign.Stripe(), []byte(replaySecret),
+			hmacsign.WithClock(fixedClock(now)),
+			hmacsign.WithReplayCache(cache),
+			hmacsign.WithReplayNamespace(namespace))
+	}
+
+	orders, invoices := receiver("orders"), receiver("invoices")
+	require.NoError(t, orders.Verify(header, body))
+	require.NoError(t, invoices.Verify(header, body), "another namespace is not a replay")
+	require.ErrorIs(t, orders.Verify(header, body), hmacsign.ErrReplayed)
+	require.ErrorIs(t, receiver("orders").Verify(header, body), hmacsign.ErrReplayed,
+		"receivers with the same namespace share their replays")
+
+	unscoped := receiver("")
+	require.NoError(t, unscoped.Verify(header, body), "the empty namespace is a scope of its own")
+}
+
 func TestReplayCacheRejectsReplayUnderRotatedSecret(t *testing.T) {
 	t.Parallel()
 

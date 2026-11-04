@@ -31,7 +31,8 @@ The tolerance window alone still admits a captured Stripe request replayed withi
 recorded for twice the tolerance (the full `±tolerance` window) and a second delivery fails with `ErrReplayed`. The cache key is the SHA-256 of the
 signed message (timestamp and body), not the matched digest, so during a secret rotation a resend carrying only the old secret's digest is still a
 replay. `NewMemoryReplayCache()` covers a single process; several receivers need a shared `ReplayCache` (Redis `SET NX` with a TTL, for example). A
-cache error fails closed.
+cache error fails closed. Receivers that share one cache but verify different endpoints or secrets set distinct `WithReplayNamespace` values;
+without one, the same body and timestamp delivered to two of them would be rejected as a replay by the second.
 
 The GitHub scheme signs no timestamp, so it is **integrity-only**: a captured request verifies forever and the replay cache is not consulted.
 Deduplicate GitHub deliveries by the `X-GitHub-Delivery` id in the application.
@@ -48,6 +49,7 @@ owned by the signer/verifier, so a custom scheme only describes the wire format.
 | `WithTolerance(time.Duration)` | `Verifier`      | Replay window for a timestamped scheme. Default 5m; `0` disables the timestamp check.    |
 | `WithClock(Clock)`           | both              | Override the time source (tests pin it; signing stamps it). Default `time.Now`.          |
 | `WithReplayCache(ReplayCache)` | `Verifier`      | Reject a second delivery of an accepted signature (`ErrReplayed`). Timestamped schemes only. Default off. With a cache, a tolerance above half the largest `time.Duration` fails with `ErrToleranceTooLarge`. |
+| `WithReplayNamespace(string)`  | `Verifier`      | Scope the replay-cache keys of one receiver sharing a cache with others. Default empty (no scope). |
 
 ## Usage
 

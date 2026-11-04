@@ -4,6 +4,7 @@
 package hmacsign
 
 import (
+	"strings"
 	"time"
 )
 
@@ -29,6 +30,35 @@ func WithClock(v Clock) Option {
 func WithReplayCache(v ReplayCache) Option {
 	return func(o *options) {
 		o.replayCache = v
+	}
+}
+
+// WithReplayNamespace sets the replayNamespace option.
+//
+// replayNamespace ([WithReplayNamespace]) scopes the replay-cache keys of
+// one receiver. Receivers that share a [ReplayCache] but verify different
+// endpoints or secrets must set distinct namespaces: the key is otherwise
+// the signed message alone, so the same body and timestamp delivered to
+// two receivers would be rejected as a replay by the second. Empty (the
+// default) adds no scope.
+func WithReplayNamespace[T interface{ string | *string }](v T) Option {
+	return func(o *options) {
+		var value string
+		switch t := any(v).(type) {
+		case string:
+			value = t
+		case *string:
+			if t == nil {
+				return
+			}
+			value = *t
+		}
+		transformedValue := strings.TrimSpace(value)
+
+		if transformedValue == "" {
+			return
+		}
+		o.replayNamespace = transformedValue
 	}
 }
 

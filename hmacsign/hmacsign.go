@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math"
@@ -146,6 +147,23 @@ func (v *Verifier) Verify(header string, body []byte) error {
 	return ErrSignatureMismatch
 }
 
+// replayKey returns the replay-cache key of msg within namespace.
+func replayKey(namespace string, msg []byte) [sha256.Size]byte {
+	if namespace == "" {
+		return sha256.Sum256(msg)
+	}
+
+	h := sha256.New()
+	_ = binary.Write(h, binary.BigEndian, uint64(len(namespace))) // a hash.Hash write never fails
+	_, _ = h.Write([]byte(namespace))
+	_, _ = h.Write(msg)
+
+	var key [sha256.Size]byte
+	h.Sum(key[:0])
+
+	return key
+}
+
 // replayWindowSpan is the replay-cache TTL in tolerances: a signature is
 // accepted from tolerance before to tolerance after its timestamp.
 const replayWindowSpan = 2
@@ -154,12 +172,14 @@ const replayWindowSpan = 2
 // full width of the tolerance window and rejects one already recorded. A cache
 // error fails closed.
 //
-// The key is the SHA-256 of the signed message (timestamp and body), not the
-// matched digest: during a secret rotation the sender attaches one digest per
-// secret, and a digest-keyed cache would accept the same delivery once more
-// for every other secret it verifies under.
+// The key is the SHA-256 of the replay namespace and the signed message
+// (timestamp and body), not the matched digest: during a secret rotation the
+// sender attaches one digest per secret, and a digest-keyed cache would accept
+// the same delivery once more for every other secret it verifies under. The
+// namespace is length-prefixed so that no namespace and message pair hashes
+// like another; an empty namespace keys on the message alone.
 func (v *Verifier) checkReplay(msg []byte) error {
-	key := sha256.Sum256(msg)
+	key := replayKey(v.opts.replayNamespace, msg)
 
 	seen, err := v.opts.replayCache.CheckAndStore(hex.EncodeToString(key[:]), replayWindowSpan*v.opts.tolerance)
 	if err != nil {

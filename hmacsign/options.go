@@ -41,6 +41,14 @@ type options struct {
 	// largest time.Duration ([ErrToleranceTooLarge]).
 	replayCache ReplayCache
 
+	// replayNamespace ([WithReplayNamespace]) scopes the replay-cache keys of
+	// one receiver. Receivers that share a [ReplayCache] but verify different
+	// endpoints or secrets must set distinct namespaces: the key is otherwise
+	// the signed message alone, so the same body and timestamp delivered to
+	// two receivers would be rejected as a replay by the second. Empty (the
+	// default) adds no scope.
+	replayNamespace string
+
 	// secrets holds additional accepted secrets beyond the primary one passed to
 	// [NewVerifier], enabling zero-downtime rotation. Set via [WithSecrets]; the
 	// verifier accepts a body signed by any of them. Signer-only fields ignore it.

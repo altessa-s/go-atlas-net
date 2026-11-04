@@ -18,7 +18,8 @@ import (
 
 // Verify reads r's body (capped at [WithMaxBytes]), verifies the signature in
 // v's scheme header against it, and restores r.Body so a handler can read it
-// again. It returns the verified raw body, or an error: [ErrBodyTooLarge], or a
+// again, whether or not the signature verifies. Only a failed read (such as
+// [ErrBodyTooLarge]) leaves r.Body consumed. It returns the verified raw body, or an error: [ErrBodyTooLarge], or a
 // verification failure forwarded from [hmacsign.Verifier.Verify]
 // ([hmacsign.ErrSignatureMismatch], [hmacsign.ErrMalformedSignature],
 // [hmacsign.ErrTimestampOutOfTolerance]).

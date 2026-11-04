@@ -5,6 +5,7 @@
 package hmacsign
 
 import (
+	"crypto/sha256"
 	"testing"
 	"time"
 
@@ -33,4 +34,12 @@ func TestMemoryReplayCacheSweepsShortEntriesBehindLongOnes(t *testing.T) {
 
 	require.NotContains(t, c.entries, "short", "the expired short-TTL entry was not swept")
 	require.Len(t, c.entries, 2)
+}
+
+func TestReplayKeyPrefixesTheNamespace(t *testing.T) {
+	t.Parallel()
+
+	require.NotEqual(t, replayKey("a", []byte("bc")), replayKey("ab", []byte("c")))
+	require.NotEqual(t, replayKey("", []byte("abc")), replayKey("a", []byte("bc")))
+	require.Equal(t, sha256.Sum256([]byte("abc")), replayKey("", []byte("abc")))
 }
