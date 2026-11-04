@@ -130,21 +130,28 @@ func (v *Verifier) Verify(header string, body []byte) error {
 		}
 	}
 
+	// Compare every digest against every secret without stopping at the first
+	// match, so the verification time does not reveal which secret signed the
+	// delivery (the primary or a rotation secret).
 	msg := v.scheme.Message(signedAt, body)
+	matched := false
+
 	for _, secret := range v.secrets {
 		expected := digest(secret, msg)
 		for _, sig := range sigs {
-			if hmac.Equal(expected, sig) {
-				if timed && v.opts.replayCache != nil {
-					return v.checkReplay(msg)
-				}
-
-				return nil
-			}
+			matched = hmac.Equal(expected, sig) || matched
 		}
 	}
 
-	return ErrSignatureMismatch
+	if !matched {
+		return ErrSignatureMismatch
+	}
+
+	if timed && v.opts.replayCache != nil {
+		return v.checkReplay(msg)
+	}
+
+	return nil
 }
 
 // replayKey returns the replay-cache key of msg within namespace.
