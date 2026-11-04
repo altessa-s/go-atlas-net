@@ -50,12 +50,14 @@ type syncBuffer struct {
 func (b *syncBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	return b.buf.Write(p)
 }
 
 func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	return b.buf.String()
 }
 
@@ -74,8 +76,10 @@ func secretURL(base string) string {
 func roundTripError(t *testing.T, err error) error {
 	t.Helper()
 	require.Error(t, err)
+
 	var urlErr *url.Error
 	require.ErrorAs(t, err, &urlErr)
+
 	return urlErr.Err
 }
 
@@ -83,6 +87,7 @@ func roundTripError(t *testing.T, err error) error {
 // the logs.
 func requireRedacted(t *testing.T, err error, logs string) {
 	t.Helper()
+
 	for _, secret := range []string{querySecret, passwordSecret} {
 		require.NotContains(t, err.Error(), secret)
 		require.NotContains(t, fmt.Sprintf("%+v", err), secret)
@@ -102,10 +107,13 @@ func TestRedactionStatusError(t *testing.T) {
 				if r.URL.Query().Get("token") != querySecret {
 					t.Error("the request query was changed")
 				}
+
 				w.WriteHeader(status)
 			}))
 			t.Cleanup(srv.Close)
+
 			var logs syncBuffer
+
 			c := httpclient.New(loopback, httpclient.WithRetryMax(1), fastRetries, debugLogger(&logs))
 			err := roundTripError(t, doGet(t, c, t.Context(), secretURL(srv.URL)))
 			requireRedacted(t, err, logs.String())
@@ -114,6 +122,7 @@ func TestRedactionStatusError(t *testing.T) {
 			require.NotNil(t, se, "%v", err)
 			require.Equal(t, status, se.Status)
 			require.Equal(t, "/orders", se.URI)
+
 			if status == http.StatusServiceUnavailable {
 				re := httpclient.IsRetryExhaustedError(err)
 				require.NotNil(t, re)
@@ -151,7 +160,9 @@ func TestRedactionTransportError(t *testing.T) {
 
 			tr := httpclient.DefaultPooledTransport()
 			tr.DialContext = failingDialer{tc.cause}.DialContext
+
 			var logs syncBuffer
+
 			c := httpclient.New(httpclient.WithoutSSRFProtection(), httpclient.WithTransport(tr),
 				httpclient.WithRetryMax(1), fastRetries, debugLogger(&logs))
 			err := roundTripError(t, doGet(t, c, t.Context(), secretURL("http://example.org")))
@@ -204,6 +215,7 @@ func TestRedactionKeepsTimeout(t *testing.T) {
 	c := httpclient.New(httpclient.WithoutSSRFProtection(), httpclient.WithClient(&http.Client{Transport: timingOut}),
 		httpclient.WithoutRetry())
 	err := doGet(t, c, t.Context(), secretURL("http://example.org"))
+
 	var urlErr *url.Error
 	require.ErrorAs(t, err, &urlErr)
 	require.True(t, urlErr.Timeout())
@@ -226,6 +238,7 @@ func TestRedactionMessages(t *testing.T) {
 	t.Parallel()
 
 	leak := errors.New("custom failure for ?token=" + querySecret)
+
 	tests := []struct {
 		name  string
 		cause error
@@ -294,8 +307,10 @@ func TestHTTPClientRedactsURLErrors(t *testing.T) {
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
+
 	addr := ln.Addr().String()
 	require.NoError(t, ln.Close())
+
 	secretURL := "http://user:" + passwordSecret + "@" + addr + "/path?token=" + querySecret
 
 	newClient := func() httpclient.HTTPClient {
@@ -311,6 +326,7 @@ func TestHTTPClientRedactsURLErrors(t *testing.T) {
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
+
 			return err
 		}},
 		{"get invalid url", func(ctx context.Context) error {
@@ -318,6 +334,7 @@ func TestHTTPClientRedactsURLErrors(t *testing.T) {
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
+
 			return err
 		}},
 		{"builder dial failure", func(ctx context.Context) error {
@@ -325,6 +342,7 @@ func TestHTTPClientRedactsURLErrors(t *testing.T) {
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
+
 			return err
 		}},
 	}
@@ -354,18 +372,23 @@ func TestRedactionRetryPolicyError(t *testing.T) {
 
 			srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 			t.Cleanup(srv.Close)
+
 			policy := func(_ context.Context, resp *http.Response, err error) (bool, error) {
 				if err != nil {
 					return false, err
 				}
+
 				return retry, fmt.Errorf("policy for %s: %w", resp.Request.URL, errPolicy)
 			}
+
 			var logs syncBuffer
+
 			c := httpclient.New(loopback, httpclient.WithRetryMax(1), fastRetries, debugLogger(&logs),
 				httpclient.WithRetryPolicyHandler(policy))
 			err := roundTripError(t, doGet(t, c, t.Context(), secretURL(srv.URL)))
 			requireRedacted(t, err, logs.String())
 			require.ErrorIs(t, err, errPolicy)
+
 			if retry {
 				require.Contains(t, logs.String(), "http client retrying request")
 				require.ErrorIs(t, err, httpclient.ErrMaxRetriesExceeded)
@@ -389,6 +412,7 @@ func TestRedactionRequestBodyError(t *testing.T) {
 	leak := errors.New("body source " + secretURL("http://example.org"))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
+
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	t.Cleanup(srv.Close)
@@ -400,19 +424,23 @@ func TestRedactionRequestBodyError(t *testing.T) {
 		{name: "buffer", request: func(t *testing.T) *http.Request {
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, secretURL(srv.URL), failingReader{leak})
 			require.NoError(t, err)
+
 			return req
 		}},
 		{name: "rewind", request: func(t *testing.T) *http.Request {
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, secretURL(srv.URL), strings.NewReader("payload"))
 			require.NoError(t, err)
+
 			calls := 0
 			req.GetBody = func() (io.ReadCloser, error) {
 				calls++
 				if calls > 1 {
 					return nil, leak
 				}
+
 				return io.NopCloser(strings.NewReader("payload")), nil
 			}
+
 			return req
 		}},
 	}
@@ -421,11 +449,14 @@ func TestRedactionRequestBodyError(t *testing.T) {
 			t.Parallel()
 
 			var logs syncBuffer
+
 			c := httpclient.New(loopback, httpclient.WithRetryMax(2), fastRetries, debugLogger(&logs))
+
 			resp, err := c.Do(tc.request(t))
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
+
 			err = roundTripError(t, err)
 			requireRedacted(t, err, logs.String())
 			require.ErrorIs(t, err, leak)
@@ -451,13 +482,16 @@ func TestRedactError(t *testing.T) {
 	requireRedacted(t, redacted, "")
 	require.ErrorIs(t, redacted, syscall.ECONNRESET)
 	require.ErrorIs(t, redacted, httpclient.ErrMaxRetriesExceeded)
+
 	var urlErr *url.Error
 	require.ErrorAs(t, redacted, &urlErr)
 	require.Equal(t, "http://example.org/orders", urlErr.URL)
+
 	before := redacted.Error()
 	require.Equal(t, before, httpclient.RedactError(redacted).Error())
 
 	require.NoError(t, httpclient.RedactError(nil))
+
 	plain := errors.New("no url " + querySecret)
 	require.Same(t, plain, httpclient.RedactError(plain), "an error without a *url.Error is returned unchanged")
 }
@@ -472,6 +506,7 @@ func TestRedactErrorLocationHeader(t *testing.T) {
 		w.WriteHeader(http.StatusFound)
 	}))
 	t.Cleanup(srv.Close)
+
 	c := httpclient.New(loopback, httpclient.WithoutRetry())
 	err := doGet(t, c, t.Context(), srv.URL+"/start")
 	require.Error(t, err)
@@ -479,6 +514,7 @@ func TestRedactErrorLocationHeader(t *testing.T) {
 
 	err = httpclient.RedactError(err)
 	requireRedacted(t, err, "")
+
 	var urlErr *url.Error
 	require.ErrorAs(t, err, &urlErr)
 	require.Equal(t, srv.URL+"/start", urlErr.URL)
@@ -487,10 +523,13 @@ func TestRedactErrorLocationHeader(t *testing.T) {
 // refusedAddr returns a loopback address nothing listens on.
 func refusedAddr(t *testing.T) string {
 	t.Helper()
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
+
 	addr := ln.Addr().String()
 	require.NoError(t, ln.Close())
+
 	return addr
 }
 
@@ -504,8 +543,10 @@ func TestRedactErrorKeepsClassifiers(t *testing.T) {
 		http.Redirect(w, r, "/loop?sig="+querySecret, http.StatusFound)
 	}))
 	t.Cleanup(redirectLoop.Close)
+
 	untrusted := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	t.Cleanup(untrusted.Close)
+
 	stalled := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
 	t.Cleanup(stalled.Close)
 
@@ -521,6 +562,7 @@ func TestRedactErrorKeepsClassifiers(t *testing.T) {
 		{name: "connection refused", target: secretURL("http://" + refusedAddr(t)), classify: network.IsConnectionRefused},
 		{name: "timeout", target: secretURL(stalled.URL), classify: network.IsRequestTimeoutError, timeout: true},
 	}
+
 	callers := []struct {
 		name string
 		call func(ctx context.Context, target string) error
@@ -530,10 +572,12 @@ func TestRedactErrorKeepsClassifiers(t *testing.T) {
 			if err != nil {
 				return err
 			}
+
 			resp, err := httpclient.New(loopback, httpclient.WithRetryMax(1), fastRetries).Do(req)
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
+
 			return httpclient.RedactError(err)
 		}},
 		{name: "wrapper", call: func(ctx context.Context, target string) error {
@@ -541,14 +585,17 @@ func TestRedactErrorKeepsClassifiers(t *testing.T) {
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
+
 			return err
 		}},
 		{name: "builder", call: func(ctx context.Context, target string) error {
 			c := httpclient.NewHTTPClient(loopback, httpclient.WithRetryMax(1), fastRetries)
+
 			resp, err := httpclient.NewRequestBuilder(c).GET(target).Send(ctx)
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
+
 			return err
 		}},
 	}
@@ -558,11 +605,14 @@ func TestRedactErrorKeepsClassifiers(t *testing.T) {
 				t.Parallel()
 
 				ctx := t.Context()
+
 				if sc.timeout {
 					var cancel context.CancelFunc
+
 					ctx, cancel = context.WithTimeout(ctx, 50*time.Millisecond)
 					defer cancel()
 				}
+
 				err := caller.call(ctx, sc.target)
 				require.Error(t, err)
 				requireRedacted(t, err, "")
@@ -588,6 +638,7 @@ func TestRedactionErrorHandlerError(t *testing.T) {
 
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status) }))
 			t.Cleanup(srv.Close)
+
 			handler := func(resp *http.Response, err error, _ int) (*http.Response, error) {
 				require.NotNil(t, resp)
 				return resp, fmt.Errorf("handler for %s: %w: %w", resp.Request.URL, errHandled, err)
@@ -599,6 +650,7 @@ func TestRedactionErrorHandlerError(t *testing.T) {
 			se := httpclient.IsUnexpectedStatusError(err)
 			require.NotNil(t, se, "%v", err)
 			require.Equal(t, status, se.Status)
+
 			if status == http.StatusServiceUnavailable {
 				require.ErrorIs(t, err, httpclient.ErrMaxRetriesExceeded)
 			}
@@ -625,6 +677,7 @@ func TestRedactionTypedStatusError(t *testing.T) {
 			Body:   []byte("upstream rejected " + req.URL.String()),
 		}
 	}
+
 	tests := []struct {
 		name string
 		opt  httpclient.Option
@@ -633,6 +686,7 @@ func TestRedactionTypedStatusError(t *testing.T) {
 			if err != nil {
 				return false, err
 			}
+
 			return false, typed(resp.Request)
 		})},
 		{"error handler", httpclient.WithErrorHandler(func(resp *http.Response, _ error, _ int) (*http.Response, error) {
@@ -647,7 +701,9 @@ func TestRedactionTypedStatusError(t *testing.T) {
 				w.WriteHeader(http.StatusBadRequest)
 			}))
 			t.Cleanup(srv.Close)
+
 			var logs syncBuffer
+
 			c := httpclient.New(loopback, httpclient.WithRetryMax(1), fastRetries, debugLogger(&logs), tc.opt)
 			err := roundTripError(t, doGet(t, c, t.Context(), secretURL(srv.URL)))
 			requireRedacted(t, err, logs.String())
@@ -685,12 +741,15 @@ func TestRedactionTypedIdentityFields(t *testing.T) {
 
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusBadRequest) }))
 			t.Cleanup(srv.Close)
+
 			var logs syncBuffer
+
 			c := httpclient.New(loopback, httpclient.WithRetryMax(1), fastRetries, debugLogger(&logs),
 				httpclient.WithRetryPolicyHandler(func(_ context.Context, resp *http.Response, err error) (bool, error) {
 					if err != nil {
 						return false, err
 					}
+
 					return false, tc.typed(resp.Request.URL.String())
 				}))
 			err := roundTripError(t, doGet(t, c, t.Context(), secretURL(srv.URL)))
@@ -706,6 +765,7 @@ func TestHTTPClientDoRedacts(t *testing.T) {
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
+
 	addr := ln.Addr().String()
 	require.NoError(t, ln.Close())
 
@@ -713,10 +773,12 @@ func TestHTTPClientDoRedacts(t *testing.T) {
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet,
 		"http://user:"+passwordSecret+"@"+addr+"/path?token="+querySecret, nil)
 	require.NoError(t, err)
+
 	resp, err := c.Do(req)
 	if resp != nil {
 		_ = resp.Body.Close()
 	}
+
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), querySecret)
 	require.NotContains(t, err.Error(), passwordSecret)
@@ -763,6 +825,7 @@ func TestSSRFRefusalIgnoresRetryingPolicy(t *testing.T) {
 			t.Parallel()
 
 			var calls atomic.Int32
+
 			refusing := httpx.RoundTripperFunc(func(*http.Request) (*http.Response, error) {
 				calls.Add(1)
 				return nil, tc.cause

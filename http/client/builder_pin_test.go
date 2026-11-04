@@ -27,6 +27,7 @@ func TestBuildWithContext_Pin(t *testing.T) {
 
 	t.Run("an empty method defaults to GET", func(t *testing.T) {
 		t.Parallel()
+
 		rb := &requestBuilder{url: "http://example.com/p"}
 		req, err := rb.BuildWithContext(t.Context())
 		require.NoError(t, err)
@@ -35,6 +36,7 @@ func TestBuildWithContext_Pin(t *testing.T) {
 
 	t.Run("a deferred body error is returned", func(t *testing.T) {
 		t.Parallel()
+
 		boom := errors.New("boom")
 		rb := &requestBuilder{method: http.MethodPost, url: "http://example.com/p", body: &coreio.ErrorReader{Err: boom}}
 		_, err := rb.BuildWithContext(t.Context())
@@ -52,6 +54,7 @@ func TestBuildWithContext_Pin(t *testing.T) {
 
 	t.Run("an invalid method fails", func(t *testing.T) {
 		t.Parallel()
+
 		rb := &requestBuilder{method: "BAD METHOD", url: "http://example.com/p"}
 		_, err := rb.BuildWithContext(t.Context())
 		require.Error(t, err)
@@ -59,6 +62,7 @@ func TestBuildWithContext_Pin(t *testing.T) {
 
 	t.Run("query parameters merge into an existing query", func(t *testing.T) {
 		t.Parallel()
+
 		rb := &requestBuilder{method: http.MethodGet, url: "http://example.com/p?a=1", queryParams: url.Values{"b": {"2"}}}
 		req, err := rb.BuildWithContext(t.Context())
 		require.NoError(t, err)
@@ -67,6 +71,7 @@ func TestBuildWithContext_Pin(t *testing.T) {
 
 	t.Run("a malformed existing query fails the merge", func(t *testing.T) {
 		t.Parallel()
+
 		rb := &requestBuilder{method: http.MethodGet, url: "http://example.com/p?a=%zz", queryParams: url.Values{"b": {"2"}}}
 		_, err := rb.BuildWithContext(t.Context())
 		require.Error(t, err)
@@ -75,6 +80,7 @@ func TestBuildWithContext_Pin(t *testing.T) {
 
 func TestRenderTrusted_Pin(t *testing.T) {
 	t.Parallel()
+
 	for _, tc := range []struct {
 		name string
 		err  error

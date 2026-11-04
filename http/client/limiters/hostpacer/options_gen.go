@@ -11,6 +11,9 @@ import (
 type Option func(o *options)
 
 // WithClock sets the clock option.
+//
+// clock is the time source bucket levels are read at and the waits for
+// a slot run on.
 func WithClock(v clock.Clock) Option {
 	return func(o *options) {
 		o.clock = v
@@ -18,6 +21,14 @@ func WithClock(v clock.Clock) Option {
 }
 
 // WithMaxHosts sets the maxHosts option.
+//
+// maxHosts is a soft bound on the number of tracked hosts: at or above
+// it, a new host first triggers a sweep that drops the fully refilled
+// buckets. Dropping such a bucket is lossless, as a fresh one starts full
+// too. Buckets still refilling are kept, so the pacer can exceed maxHosts
+// by the hosts used within one burst × interval window. LRU eviction is
+// deliberately not used: dropping a bucket that is still refilling would
+// hand its host a fresh full bucket and let it exceed its pace.
 func WithMaxHosts(v int) Option {
 	return func(o *options) {
 		o.maxHosts = v

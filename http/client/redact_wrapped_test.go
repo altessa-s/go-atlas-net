@@ -37,7 +37,9 @@ func TestRedactErrorWrapped(t *testing.T) {
 	t.Parallel()
 
 	urlErr := func(rawURL string) *url.Error { return &url.Error{Op: "Get", URL: rawURL, Err: io.EOF} }
+
 	const secret = "token=secret"
+
 	tests := []struct {
 		name string
 		err  func() error
@@ -58,6 +60,7 @@ func TestRedactErrorWrapped(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+
 			err := httpclient.RedactError(tt.err())
 			require.Error(t, err)
 			require.NotContains(t, err.Error(), "secret")
@@ -80,6 +83,7 @@ func TestRedactErrorWrapped(t *testing.T) {
 	require.ErrorIs(t, redacted, io.EOF)
 	require.Contains(t, direct.Error(), "secret", "the caller's error is not modified")
 	require.Same(t, redacted, httpclient.RedactError(redacted), "a redacted *url.Error is returned unchanged")
+
 	plain := fmt.Errorf("no URL: %w", io.EOF)
 	require.Same(t, plain, httpclient.RedactError(plain), "an error without a *url.Error is returned unchanged")
 }
@@ -94,6 +98,7 @@ func TestRedactErrorBeyondTraversalLimit(t *testing.T) {
 	for range 1024 {
 		errs = append(errs, io.ErrUnexpectedEOF)
 	}
+
 	errs = append(errs, &url.Error{Op: "Get", URL: "https://example.org/?token=secret", Err: io.EOF})
 	wide := errors.Join(errs...)
 
@@ -101,6 +106,7 @@ func TestRedactErrorBeyondTraversalLimit(t *testing.T) {
 	for range 1100 {
 		deep = fmt.Errorf("layer: %w", deep)
 	}
+
 	for name, err := range map[string]error{"wide": wide, "deep": deep} {
 		redacted := httpclient.RedactError(err)
 		require.NotContains(t, redacted.Error(), "secret", name)
@@ -130,6 +136,7 @@ func TestRedactErrorSharedCause(t *testing.T) {
 				if resp != nil {
 					httpclient.CloseBody(resp.Body)
 				}
+
 				if err == nil || strings.Contains(err.Error(), "secret") {
 					t.Errorf("err = %v, want a redacted error", err)
 					return
@@ -137,6 +144,7 @@ func TestRedactErrorSharedCause(t *testing.T) {
 			}
 		})
 	}
+
 	wg.Wait()
 	require.Equal(t, "https://upstream.example/?token=secret", shared.URL, "the transport's error is not modified")
 }
@@ -161,6 +169,7 @@ func TestRedactErrorExplosiveCauses(t *testing.T) {
 	for range 40 {
 		doubled = errors.Join(doubled, doubled)
 	}
+
 	self := error(&selfCause{})
 	clientGet := func(cause error, opts ...httpclient.Option) func() error {
 		return func() error {
@@ -168,10 +177,12 @@ func TestRedactErrorExplosiveCauses(t *testing.T) {
 			c := httpclient.NewHTTPClient(append([]httpclient.Option{
 				httpclient.WithoutSSRFProtection(), httpclient.WithClient(&http.Client{Transport: transport}),
 			}, opts...)...)
+
 			resp, err := c.Get(t.Context(), "https://example.org/?token=secret")
 			if resp != nil {
 				httpclient.CloseBody(resp.Body)
 			}
+
 			return err
 		}
 	}
@@ -179,6 +190,7 @@ func TestRedactErrorExplosiveCauses(t *testing.T) {
 	policy := httpclient.WithRetryPolicyHandler(func(context.Context, *http.Response, error) (bool, error) {
 		return false, httpclient.RedactError(self)
 	})
+
 	calls := map[string]func() error{
 		"direct doubled": func() error {
 			return httpclient.RedactError(&url.Error{Op: "Get", URL: "https://example.org/?token=secret", Err: doubled})
@@ -196,12 +208,15 @@ func TestRedactErrorExplosiveCauses(t *testing.T) {
 	}
 	for name, call := range calls {
 		done := make(chan error, 1)
+
 		go func() {
 			err := call()
 			_ = errors.Is(err, context.Canceled) // classification must return too
+
 			_, _ = errors.AsType[*url.Error](err)
 			done <- err
 		}()
+
 		select {
 		case err := <-done:
 			require.Error(t, err, name)

@@ -43,10 +43,13 @@ func BenchmarkChain_Allow(b *testing.B) {
 		for i := range ls {
 			ls[i] = &noopLimiter{}
 		}
+
 		chained := Chain(ls...)
+
 		b.Run("limiters_"+strconv.Itoa(n), func(b *testing.B) {
 			ctx := b.Context()
 			b.ReportAllocs()
+
 			for b.Loop() {
 				_ = chained.Allow(ctx, "api.example.com")
 			}

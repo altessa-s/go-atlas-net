@@ -22,24 +22,28 @@ import (
 
 func TestNew_ReturnsClient(t *testing.T) {
 	t.Parallel()
+
 	c := New()
 	require.NotNil(t, c)
 }
 
 func TestNew_WithOptions(t *testing.T) {
 	t.Parallel()
+
 	c := New(WithSSRFAllowedCIDRs(netip.MustParsePrefix("127.0.0.0/8")), WithRetryMax(1), WithRetryWait(100*time.Millisecond, 500*time.Millisecond))
 	require.NotNil(t, c)
 }
 
 func TestNewHTTPClient(t *testing.T) {
 	t.Parallel()
+
 	c := NewHTTPClient()
 	require.NotNil(t, c)
 }
 
 func TestHTTPClient_Get(t *testing.T) {
 	t.Parallel()
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -48,12 +52,15 @@ func TestHTTPClient_Get(t *testing.T) {
 	c := NewHTTPClient(WithSSRFAllowedCIDRs(netip.MustParsePrefix("127.0.0.0/8")), WithRetryMax(0))
 	resp, err := c.Get(t.Context(), srv.URL)
 	require.NoError(t, err)
+
 	defer resp.Body.Close()
+
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
 func TestHTTPClient_PostJSON(t *testing.T) {
 	t.Parallel()
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		w.WriteHeader(http.StatusCreated)
@@ -63,11 +70,13 @@ func TestHTTPClient_PostJSON(t *testing.T) {
 	c := NewHTTPClient(WithSSRFAllowedCIDRs(netip.MustParsePrefix("127.0.0.0/8")), WithRetryMax(0))
 	resp, err := c.PostJSON(t.Context(), srv.URL, map[string]string{"key": "value"})
 	require.NoError(t, err)
+
 	defer resp.Body.Close()
 }
 
 func TestHTTPClient_Delete(t *testing.T) {
 	t.Parallel()
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodDelete, r.Method)
 		w.WriteHeader(http.StatusNoContent)
@@ -77,11 +86,13 @@ func TestHTTPClient_Delete(t *testing.T) {
 	c := NewHTTPClient(WithSSRFAllowedCIDRs(netip.MustParsePrefix("127.0.0.0/8")), WithRetryMax(0))
 	resp, err := c.Delete(t.Context(), srv.URL)
 	require.NoError(t, err)
+
 	defer resp.Body.Close()
 }
 
 func TestHTTPClient_Head(t *testing.T) {
 	t.Parallel()
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodHead, r.Method)
 		w.WriteHeader(http.StatusOK)
@@ -91,11 +102,13 @@ func TestHTTPClient_Head(t *testing.T) {
 	c := NewHTTPClient(WithSSRFAllowedCIDRs(netip.MustParsePrefix("127.0.0.0/8")), WithRetryMax(0))
 	resp, err := c.Head(t.Context(), srv.URL)
 	require.NoError(t, err)
+
 	defer resp.Body.Close()
 }
 
 func TestHTTPClient_GetWithOptions(t *testing.T) {
 	t.Parallel()
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "test", r.Header.Get("X-Custom"))
 		w.WriteHeader(http.StatusOK)
@@ -105,11 +118,13 @@ func TestHTTPClient_GetWithOptions(t *testing.T) {
 	c := NewHTTPClient(WithSSRFAllowedCIDRs(netip.MustParsePrefix("127.0.0.0/8")), WithRetryMax(0))
 	resp, err := c.GetWithOptions(t.Context(), srv.URL, WithHeader("X-Custom", "test"))
 	require.NoError(t, err)
+
 	defer resp.Body.Close()
 }
 
 func TestWithBearerToken(t *testing.T) {
 	t.Parallel()
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "Bearer my-token", r.Header.Get("Authorization"))
 		w.WriteHeader(http.StatusOK)
@@ -119,11 +134,13 @@ func TestWithBearerToken(t *testing.T) {
 	c := NewHTTPClient(WithSSRFAllowedCIDRs(netip.MustParsePrefix("127.0.0.0/8")), WithRetryMax(0))
 	resp, err := c.GetWithOptions(t.Context(), srv.URL, WithBearerToken("my-token"))
 	require.NoError(t, err)
+
 	defer resp.Body.Close()
 }
 
 func TestWithBasicAuth(t *testing.T) {
 	t.Parallel()
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, p, ok := r.BasicAuth()
 		require.True(t, ok, "BasicAuth should be present")
@@ -136,6 +153,7 @@ func TestWithBasicAuth(t *testing.T) {
 	c := NewHTTPClient(WithSSRFAllowedCIDRs(netip.MustParsePrefix("127.0.0.0/8")), WithRetryMax(0))
 	resp, err := c.GetWithOptions(t.Context(), srv.URL, WithBasicAuth("user", "pass"))
 	require.NoError(t, err)
+
 	defer resp.Body.Close()
 }
 
@@ -151,6 +169,7 @@ func TestWithRequestTimeout(t *testing.T) {
 
 func TestWithRequestDeadline(t *testing.T) {
 	t.Parallel()
+
 	req, _ := http.NewRequest("GET", "http://example.com", nil)
 	dl := time.Now().Add(10 * time.Second)
 	WithRequestDeadline(dl)(req)
@@ -161,6 +180,7 @@ func TestWithRequestDeadline(t *testing.T) {
 
 func TestIsUnexpectedStatusError(t *testing.T) {
 	t.Parallel()
+
 	statusErr := &UnexpectedStatusError{Status: 404}
 	require.NotNil(t, IsUnexpectedStatusError(statusErr))
 	require.Nil(t, IsUnexpectedStatusError(context.Canceled))
@@ -197,6 +217,7 @@ func TestAttachCancel(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(t.Context())
 		resp := attachCancel(&http.Response{Body: io.NopCloser(strings.NewReader("x"))}, cancel)
+
 		require.NoError(t, ctx.Err(), "must not cancel before Close")
 		require.NoError(t, resp.Body.Close())
 		require.ErrorIs(t, ctx.Err(), context.Canceled)
@@ -210,6 +231,7 @@ func TestAttachCancel(t *testing.T) {
 		resp := attachCancel(&http.Response{Body: orig}, cancel)
 		w, ok := resp.Body.(io.Writer)
 		require.True(t, ok, "writable body must stay writable")
+
 		_, err := w.Write([]byte("ping"))
 		require.NoError(t, err)
 		require.Equal(t, "ping", string(orig.written))
@@ -229,6 +251,7 @@ func TestAttachCancel(t *testing.T) {
 
 func TestRoundTripFunc(t *testing.T) {
 	t.Parallel()
+
 	fn := httpx.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK}, nil
 	})

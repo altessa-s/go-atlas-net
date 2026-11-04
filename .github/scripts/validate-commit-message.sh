@@ -38,6 +38,14 @@ if [[ ! "$subject" =~ $merge ]]; then
     [[ ! "$description" =~ ^[A-Z] ]] || fail 'description must start with lowercase'
 fi
 
+# Release notes group breaking changes by the subject, so a breaking footer
+# needs the ! marker too. A merge subject cannot carry it, so a merge never
+# declares a breaking change: the merged commits do.
+breaking='^[a-z]+(\([^)]+\))?!: '
+if grep -Eq '^BREAKING[ -]CHANGE:' <<< "$message" && [[ ! "$subject" =~ $breaking ]]; then
+    fail 'mark a BREAKING CHANGE footer with ! in the subject (merge commits carry no breaking footer)'
+fi
+
 # Reject report sections and common assistant signatures. Whether a message
 # explains a concrete change without filler remains a review requirement.
 # Agent names match as whole words only (start, end or a non-alphanumeric

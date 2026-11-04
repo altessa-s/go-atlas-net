@@ -52,6 +52,7 @@ func TestAllowSpacesPerHost(t *testing.T) {
 
 	short, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
+
 	start := fake.Now()
 	err = p.Allow(short, "a.example")
 	require.ErrorIs(t, err, context.DeadlineExceeded, "the next slot lies beyond the deadline")
@@ -62,11 +63,14 @@ func TestAllowWaitsForTheSlot(t *testing.T) {
 	t.Parallel()
 
 	const interval = 50 * time.Millisecond
+
 	fake := clock.NewFake(time.Now())
 	p, err := hostpacer.New(interval, 1, hostpacer.WithClock(fake))
 	require.NoError(t, err)
 	require.NoError(t, p.Allow(t.Context(), "h"))
+
 	start := fake.Now()
+
 	require.NoError(t, p.Allow(t.Context(), "h"))
 	require.InDelta(t, float64(interval), float64(fake.Now().Sub(start)), float64(time.Millisecond), "the wait runs on the clock")
 }
@@ -76,11 +80,14 @@ func TestAllowBurst(t *testing.T) {
 
 	p, err := hostpacer.New(time.Hour, 3, hostpacer.WithClock(clock.NewFake(time.Now())))
 	require.NoError(t, err)
+
 	for range 3 {
 		require.NoError(t, p.Allow(t.Context(), "h"))
 	}
+
 	short, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
 	defer cancel()
+
 	require.ErrorIs(t, p.Allow(short, "h"), context.DeadlineExceeded)
 }
 
@@ -129,6 +136,7 @@ func TestEvictionKeepsReservedBuckets(t *testing.T) {
 
 	short, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
 	defer cancel()
+
 	require.ErrorIs(t, p.Allow(short, "x"), context.DeadlineExceeded, "x keeps its pace")
 }
 
@@ -150,6 +158,7 @@ func TestConcurrentEvictionNeverExceedsBurst(t *testing.T) {
 		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 			defer cancel()
+
 			if p.Allow(ctx, "x") == nil {
 				granted.Add(1)
 			}
@@ -158,6 +167,7 @@ func TestConcurrentEvictionNeverExceedsBurst(t *testing.T) {
 			_ = p.Allow(t.Context(), "churn-"+strconv.Itoa(i))
 		})
 	}
+
 	wg.Wait()
 	require.Equal(t, int32(1), granted.Load(), "one slot per interval for x, whatever the sweeps")
 }

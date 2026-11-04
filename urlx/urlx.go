@@ -57,14 +57,17 @@ var ErrDotSegment = fmt.Errorf("%w: dot segment in path element", coreerrs.ErrIn
 // valid except for its scheme also matches [ErrSchemeNotAllowed].
 func ParseBaseURL(raw string, opts ...Option) (*url.URL, error) {
 	o := newOptions(opts...)
+
 	if raw == "" {
 		return nil, invalid("URL is empty")
 	}
+
 	u, err := url.Parse(raw)
 	if err != nil {
 		// The *url.Error text quotes raw; keep it out of the chain.
 		return nil, invalid("URL is malformed")
 	}
+
 	switch {
 	case u.Scheme == "":
 		return nil, invalid("URL must be absolute")
@@ -84,6 +87,7 @@ func ParseBaseURL(raw string, opts ...Option) (*url.URL, error) {
 	if !o.endpointMode {
 		setEscapedPath(u, strings.TrimRight(u.EscapedPath(), "/"))
 	}
+
 	return u, nil
 }
 
@@ -103,30 +107,38 @@ func JoinPath(base *url.URL, elem ...string) (string, error) {
 	if base == nil {
 		return "", nil
 	}
+
 	var p strings.Builder
 	p.WriteString(strings.TrimRight(base.EscapedPath(), "/"))
+
 	trailing := false
+
 	for _, e := range elem {
 		for seg := range strings.SplitSeq(e, "/") {
 			if seg == "" {
 				continue
 			}
+
 			if seg == "." || seg == ".." {
 				return "", ErrDotSegment
 			}
+
 			p.WriteByte('/')
 			p.WriteString(url.PathEscape(seg))
 		}
+
 		if e != "" {
 			trailing = strings.HasSuffix(e, "/")
 		}
 	}
+
 	if trailing {
 		p.WriteByte('/')
 	}
 
 	u := base.Clone()
 	setEscapedPath(u, p.String())
+
 	return u.String(), nil
 }
 
@@ -140,6 +152,7 @@ func Canonical(u *url.URL) string {
 	if u == nil {
 		return ""
 	}
+
 	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host) + strings.TrimRight(u.EscapedPath(), "/")
 }
 

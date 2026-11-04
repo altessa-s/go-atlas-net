@@ -23,11 +23,13 @@ func TestResponseSizeErrorCarriesStatus(t *testing.T) {
 	t.Parallel()
 
 	const limit = 16
+
 	for _, status := range []int{http.StatusOK, http.StatusServiceUnavailable} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			t.Parallel()
 
 			var hits atomic.Int32
+
 			body := strings.Repeat("x", limit*2)
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				hits.Add(1)

@@ -14,6 +14,7 @@ import (
 func BenchmarkNew_WithProxyURL(b *testing.B) {
 	u, err := url.Parse("http://proxy.local:3128")
 	require.NoError(b, err)
+
 	for b.Loop() {
 		_ = New(WithoutSSRFProtection(), WithProxyURL(u))
 	}

@@ -26,6 +26,7 @@ func BenchmarkRedactTransportError(b *testing.B) {
 	for _, bc := range cases {
 		b.Run(bc.name, func(b *testing.B) {
 			b.ReportAllocs()
+
 			for b.Loop() {
 				_ = redactTransportError(bc.err)
 			}
@@ -38,7 +39,9 @@ func BenchmarkRedactedURL(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+
 	b.ReportAllocs()
+
 	for b.Loop() {
 		_ = redactedURL(u)
 	}

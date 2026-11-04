@@ -19,10 +19,13 @@ func TestParseXForwardedForHeader_Pin(t *testing.T) {
 
 	newDebug := func(t *testing.T, opt ...Option) (*Extractor, *bytes.Buffer) {
 		t.Helper()
+
 		var buf bytes.Buffer
+
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		e, err := NewExtractor(append(opt, WithLogger(logger))...)
 		require.NoError(t, err)
+
 		return e, &buf
 	}
 
@@ -55,10 +58,11 @@ func TestParseXForwardedForHeader_Pin(t *testing.T) {
 // per entry (the process-wide interner used to copy every one of them).
 func TestExtractor_HeaderEntriesNotInterned(t *testing.T) {
 	// Serial: testing.AllocsPerRun refuses to run in a parallel test.
-
 	const n = 1024
+
 	peer := netip.MustParseAddr("10.0.0.1")
 	chains := make([]*benchHeaders, n)
+
 	single := make([]*benchHeaders, n)
 	for i := range n {
 		client := netip.AddrFrom4([4]byte{198, 51, byte(i >> 8), byte(i)}).String()
@@ -87,6 +91,7 @@ func TestExtractor_HeaderEntriesNotInterned(t *testing.T) {
 			allocs := testing.AllocsPerRun(n-1, func() {
 				got := e.Extract(t.Context(), peer, tc.headers[i])
 				i++
+
 				if got == peer {
 					t.Fatal("header entry was not used")
 				}

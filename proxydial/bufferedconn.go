@@ -19,15 +19,19 @@ func newBufferedConn(conn net.Conn, br *bufio.Reader) net.Conn {
 	if n == 0 {
 		return conn
 	}
+
 	peeked, _ := br.Peek(n) // n bytes are buffered: Peek cannot fail
 	bc := &bufferedConn{Conn: conn, pending: append([]byte(nil), peeked...)}
+
 	cw, ok := conn.(closeWriter)
 	if !ok {
 		return bc
 	}
+
 	if cr, ok := conn.(closeReader); ok {
 		return &bufferedHalfCloseConn{bufferedConn: bc, cw: cw, cr: cr}
 	}
+
 	return &bufferedCloseWriteConn{bufferedConn: bc, cw: cw}
 }
 
@@ -49,14 +53,17 @@ func (c *bufferedConn) Read(p []byte) (int, error) {
 	c.mu.Lock()
 	if len(c.pending) > 0 {
 		n := copy(p, c.pending)
+
 		c.pending = c.pending[n:]
 		if len(c.pending) == 0 {
 			c.pending = nil
 		}
 		c.mu.Unlock()
+
 		return n, nil
 	}
 	c.mu.Unlock()
+
 	return c.Conn.Read(p)
 }
 

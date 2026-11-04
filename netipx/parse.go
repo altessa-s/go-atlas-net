@@ -22,9 +22,12 @@ func ParsePrefixes(strs []string) ([]netip.Prefix, error) {
 			if err != nil {
 				return nil, err
 			}
+
 			prefix = netip.PrefixFrom(addr, addr.BitLen())
 		}
+
 		result = append(result, prefix)
 	}
+
 	return result, nil
 }

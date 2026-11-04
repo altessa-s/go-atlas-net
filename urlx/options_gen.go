@@ -11,6 +11,10 @@ import (
 type Option func(o *options)
 
 // WithAllowedSchemes sets the allowedSchemes option.
+//
+// allowedSchemes lists the accepted schemes. Matching is
+// case-insensitive: [url.Parse] lower-cases the parsed scheme and the
+// option lower-cases the configured ones.
 func WithAllowedSchemes(v ...string) Option {
 	return func(o *options) {
 		if len(v) == 0 {
@@ -42,6 +46,10 @@ func WithAllowedSchemes(v ...string) Option {
 }
 
 // WithEndpointMode enables the endpointMode option.
+//
+// endpointMode keeps the path exactly as given, trailing slash included,
+// for a URL that names a full endpoint. Without it (base mode) trailing
+// slashes are trimmed so that paths can be appended with [JoinPath].
 func WithEndpointMode() Option {
 	return func(o *options) {
 		value := true

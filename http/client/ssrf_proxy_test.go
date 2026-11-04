@@ -23,6 +23,7 @@ func TestSSRFDialControl(t *testing.T) {
 
 	allowed10 := netip.MustParsePrefix("10.0.0.0/8")
 	allowedMapped := netip.MustParsePrefix("::ffff:192.168.0.0/112")
+
 	tests := []struct {
 		name    string
 		allowed []netip.Prefix
@@ -55,8 +56,10 @@ func TestSSRFDialControl(t *testing.T) {
 			if tc.blocked {
 				require.ErrorIs(t, err, httpclient.ErrSSRFBlocked)
 				require.NotNil(t, httpclient.IsSSRFError(err))
+
 				return
 			}
+
 			require.NoError(t, err)
 		})
 	}
@@ -76,6 +79,7 @@ func TestSSRFDialControl(t *testing.T) {
 		allowed := []netip.Prefix{allowed10}
 		ctl := httpclient.SSRFDialControl(allowed...)
 		allowed[0] = netip.MustParsePrefix("192.168.0.0/16")
+
 		require.NoError(t, ctl("tcp", "10.0.0.1:80", nil))
 		require.ErrorIs(t, ctl("tcp", "192.168.0.1:80", nil), httpclient.ErrSSRFBlocked)
 	})
@@ -98,17 +102,20 @@ func (p *forwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *forwardProxy) seen() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	return append([]string(nil), p.urls...)
 }
 
 // startProxy serves a forwardProxy on loopback and returns its URL.
 func startProxy(t *testing.T) (*forwardProxy, *url.URL) {
 	t.Helper()
+
 	p := &forwardProxy{}
 	srv := httptest.NewServer(p)
 	t.Cleanup(srv.Close)
 	u, err := url.Parse(srv.URL)
 	require.NoError(t, err)
+
 	return p, u
 }
 
@@ -159,7 +166,9 @@ func TestSSRFWithProxy_PrivateLiteralTargetBlocked(t *testing.T) {
 	t.Parallel()
 
 	p, proxyURL := startProxy(t)
+
 	var resolved atomic.Int32
+
 	resolver := func(*http.Request) (*url.URL, error) {
 		resolved.Add(1)
 		return proxyURL, nil
@@ -175,6 +184,7 @@ func TestSSRFWithProxy_PrivateLiteralTargetBlocked(t *testing.T) {
 		_, err := get(t, c, target)
 		require.ErrorIs(t, err, httpclient.ErrSSRFBlocked, target)
 	}
+
 	require.Empty(t, p.seen(), "a blocked literal target never reaches the proxy")
 	require.Positive(t, resolved.Load())
 
@@ -189,6 +199,7 @@ func TestSSRFWithProxy_WithoutProxyStillDirect(t *testing.T) {
 	t.Parallel()
 
 	var hits atomic.Int32
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
 		w.WriteHeader(http.StatusNoContent)

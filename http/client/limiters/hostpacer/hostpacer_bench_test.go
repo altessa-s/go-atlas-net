@@ -17,6 +17,7 @@ func BenchmarkPacer_Allow(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+
 	ctx := b.Context()
 	for b.Loop() {
 		_ = p.Allow(ctx, "api.example.com")
@@ -30,6 +31,7 @@ func BenchmarkPacer_AllowManyHosts(b *testing.B) {
 	for i := range hosts {
 		hosts[i] = "h" + strconv.Itoa(i) + ".example.com"
 	}
+
 	cases := []struct {
 		name string
 		opts []hostpacer.Option
@@ -43,9 +45,12 @@ func BenchmarkPacer_AllowManyHosts(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
+
 			ctx := b.Context()
 			i := 0
+
 			b.ReportAllocs()
+
 			for b.Loop() {
 				_ = p.Allow(ctx, hosts[i%len(hosts)])
 				i++

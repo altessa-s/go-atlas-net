@@ -23,6 +23,7 @@ func BenchmarkRoundTripperFunc(b *testing.B) {
 	require.NoError(b, err)
 
 	b.ReportAllocs()
+
 	for b.Loop() {
 		if _, err := fn.RoundTrip(req); err != nil {
 			b.Fatal(err)

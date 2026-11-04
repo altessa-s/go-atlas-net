@@ -21,7 +21,9 @@ func TestRetryRoundTripper_PolicyPin(t *testing.T) {
 
 	t.Run("a policy retrying a transport error retries it", func(t *testing.T) {
 		t.Parallel()
+
 		var calls atomic.Int32
+
 		rt := &retryRoundTripper{
 			observer:          NoopObserver{},
 			retryableStatuses: DefaultRetryableStatuses(),
@@ -29,6 +31,7 @@ func TestRetryRoundTripper_PolicyPin(t *testing.T) {
 				if calls.Add(1) < 3 {
 					return nil, errors.New("transient")
 				}
+
 				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
 			}),
 			retryPolicyHandler: func(_ context.Context, _ *http.Response, err error) (bool, error) {
@@ -47,7 +50,9 @@ func TestRetryRoundTripper_PolicyPin(t *testing.T) {
 
 	t.Run("a policy retrying an empty outcome stops", func(t *testing.T) {
 		t.Parallel()
+
 		var calls atomic.Int32
+
 		rt := &retryRoundTripper{
 			observer:          NoopObserver{},
 			retryableStatuses: DefaultRetryableStatuses(),

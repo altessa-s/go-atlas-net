@@ -69,6 +69,7 @@ func FuzzExtractIgnoresHeadersFromAnUntrustedPeer(f *testing.F) {
 		if err != nil {
 			t.Skip("not an address; the caller supplies a parsed peer")
 		}
+
 		if netip.MustParsePrefix("10.0.0.0/8").Contains(peer.Unmap()) {
 			t.Skip("a trusted peer is allowed to be spoken for by its headers")
 		}

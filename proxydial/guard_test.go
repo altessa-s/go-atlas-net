@@ -42,26 +42,32 @@ type fakeResolver struct {
 func (r *fakeResolver) LookupNetIP(_ context.Context, network, host string) ([]netip.Addr, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	n := 0
+
 	for _, l := range r.lookups {
 		if l == network+" "+host {
 			n++
 		}
 	}
+
 	r.lookups = append(r.lookups, network+" "+host)
 	if r.err != nil {
 		return nil, r.err
 	}
+
 	answers := r.answers[host]
 	if len(answers) == 0 {
 		return nil, nil
 	}
+
 	return answers[min(n, len(answers)-1)], nil
 }
 
 func (r *fakeResolver) calls() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	return slices.Clone(r.lookups)
 }
 
@@ -70,6 +76,7 @@ func addrs(s ...string) []netip.Addr {
 	for _, a := range s {
 		out = append(out, netip.MustParseAddr(a))
 	}
+
 	return out
 }
 
@@ -88,6 +95,7 @@ type recordingProxy struct {
 func (p *recordingProxy) seen() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	return slices.Clone(p.targets)
 }
 
@@ -96,6 +104,7 @@ func startRecordingProxy(tb testing.TB, p *recordingProxy) *url.URL {
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(tb, err)
+
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		for {
@@ -103,61 +112,79 @@ func startRecordingProxy(tb testing.TB, p *recordingProxy) *url.URL {
 			if aerr != nil {
 				return
 			}
+
 			p.accepted.Add(1)
 			wg.Go(func() { p.serve(conn) })
 		}
 	})
 	tb.Cleanup(func() {
 		_ = ln.Close()
+
 		wg.Wait()
 	})
+
 	return &url.URL{Scheme: "http", Host: ln.Addr().String()}
 }
 
 func (p *recordingProxy) serve(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
+
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	br := bufio.NewReader(conn)
+
 	req, err := http.ReadRequest(br)
 	if err != nil {
 		return
 	}
+
 	p.mu.Lock()
 	p.targets = append(p.targets, req.Host)
 	p.mu.Unlock()
+
 	if p.refuse[req.Host] {
 		_, _ = io.WriteString(conn, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 		return
 	}
+
 	if p.backend == "" {
 		_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n")
 		return
 	}
+
 	upstream, err := net.Dial("tcp", p.backend)
 	if err != nil {
 		_, _ = io.WriteString(conn, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
 		return
 	}
+
 	defer func() { _ = upstream.Close() }()
+
 	_ = upstream.SetDeadline(time.Now().Add(5 * time.Second))
+
 	if _, err = io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
 		return
 	}
+
 	go func() { _, _ = io.Copy(upstream, br) }()
+
 	_, _ = io.Copy(conn, upstream)
 }
 
 func defaultGuard(tb testing.TB) proxydial.AddrGuard {
 	tb.Helper()
+
 	p, err := httpclient.NewEgressPolicy(nil, []httpclient.EgressRule{{Host: "*.internal"}})
 	require.NoError(tb, err)
+
 	return p.Check
 }
 
 func guardedDialer(tb testing.TB, proxyURL *url.URL, resolver proxydial.Resolver, guard proxydial.AddrGuard) proxydial.DialContextFunc {
 	tb.Helper()
+
 	dial, err := proxydial.FromURL(proxyURL, proxydial.WithSSRFGuard(guard), proxydial.WithResolver(resolver))
 	require.NoError(tb, err)
+
 	return dial
 }
 
@@ -169,6 +196,7 @@ func TestSSRFGuard_PinsCheckedIPAndKeepsHostName(t *testing.T) {
 	t.Parallel()
 
 	var gotHost atomic.Value
+
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotHost.Store(r.Host)
 		w.WriteHeader(http.StatusNoContent)
@@ -189,6 +217,7 @@ func TestSSRFGuard_PinsCheckedIPAndKeepsHostName(t *testing.T) {
 	require.NoError(t, err)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
+
 	_ = resp.Body.Close()
 
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
@@ -212,6 +241,7 @@ func TestSSRFGuard_RebindingNeedsANewLookup(t *testing.T) {
 
 	conn, err := dial(t.Context(), "tcp", "rebind.example:80")
 	require.NoError(t, err)
+
 	_ = conn.Close()
 
 	_, err = dial(t.Context(), "tcp", "rebind.example:80")
@@ -235,6 +265,7 @@ func TestSSRFGuard_Refusals(t *testing.T) {
 		"mixed.example":    {addrs("93.184.216.34", "192.168.1.1")},
 		"db.internal":      {addrs("93.184.216.34")},
 	}}
+
 	tests := []struct {
 		name string
 		addr string
@@ -292,7 +323,9 @@ func TestSSRFGuard_Literals(t *testing.T) {
 			resolver := &fakeResolver{}
 			conn, err := guardedDialer(t, proxyURL, resolver, defaultGuard(t))(t.Context(), "tcp", tc.addr)
 			require.NoError(t, err)
+
 			_ = conn.Close()
+
 			require.Equal(t, []string{tc.target}, proxy.seen())
 			require.Empty(t, resolver.calls(), "an IP literal is not resolved")
 		})
@@ -334,11 +367,13 @@ func TestSSRFGuard_ResolutionErrors(t *testing.T) {
 
 		proxy := &recordingProxy{}
 		proxyURL := startRecordingProxy(t, proxy)
+
 		dial := guardedDialer(t, proxyURL, &fakeResolver{}, defaultGuard(t))
 		for _, addr := range []string{"no-port", "host:99999", "host:http"} {
 			_, err := dial(t.Context(), "tcp", addr)
 			require.Error(t, err, addr)
 		}
+
 		require.Zero(t, proxy.accepted.Load())
 	})
 }
@@ -353,7 +388,9 @@ func TestSSRFGuard_TriesApprovedAddressesInOrder(t *testing.T) {
 	}}
 	conn, err := guardedDialer(t, proxyURL, resolver, defaultGuard(t))(t.Context(), "tcp", "dual.example:443")
 	require.NoError(t, err)
+
 	_ = conn.Close()
+
 	require.Equal(t, []string{"[2606:2800:220:1::1]:443", "93.184.216.34:443"}, proxy.seen())
 
 	t.Run("all fail", func(t *testing.T) {
@@ -374,12 +411,15 @@ func TestSSRFGuard_LookupNetworkFollowsDialNetwork(t *testing.T) {
 	proxy := &recordingProxy{}
 	proxyURL := startRecordingProxy(t, proxy)
 	resolver := &fakeResolver{answers: map[string][][]netip.Addr{"v.example": {addrs("93.184.216.34")}}}
+
 	dial := guardedDialer(t, proxyURL, resolver, defaultGuard(t))
 	for _, network := range []string{"tcp", "tcp4", "tcp6"} {
 		conn, err := dial(t.Context(), network, "v.example:443")
 		require.NoError(t, err)
+
 		_ = conn.Close()
 	}
+
 	require.Equal(t, []string{"ip v.example", "ip4 v.example", "ip6 v.example"}, resolver.calls())
 }
 
@@ -387,10 +427,14 @@ func TestSSRFGuard_GuardErrorIsWrapped(t *testing.T) {
 	t.Parallel()
 
 	errRefused := errors.New("caller sentinel")
+
 	var seen []netip.AddrPort
+
 	guard := func(host string, dst netip.AddrPort) error {
 		require.Equal(t, "custom.example", host)
+
 		seen = append(seen, dst)
+
 		return errRefused
 	}
 	resolver := &fakeResolver{answers: map[string][][]netip.Addr{"custom.example": {addrs("::ffff:93.184.216.34")}}}
@@ -411,7 +455,9 @@ func TestSSRFGuard_WithoutGuardProxyResolves(t *testing.T) {
 	require.NoError(t, err)
 	conn, err := dial(t.Context(), "tcp", "example.com:443")
 	require.NoError(t, err)
+
 	_ = conn.Close()
+
 	require.Equal(t, []string{"example.com:443"}, proxy.seen())
 	require.Empty(t, resolver.calls())
 }
@@ -423,35 +469,45 @@ func startSOCKS5(tb testing.TB) (*url.URL, func() []string) {
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(tb, err)
+
 	var (
 		mu   sync.Mutex
 		dsts []string
 		wg   sync.WaitGroup
 	)
+
 	serve := func(conn net.Conn) {
 		defer func() { _ = conn.Close() }()
+
 		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
 		head := make([]byte, 2)
 		if _, err := io.ReadFull(conn, head); err != nil {
 			return
 		}
+
 		if _, err := io.ReadFull(conn, make([]byte, head[1])); err != nil {
 			return
 		}
+
 		if _, err := conn.Write([]byte{5, 0}); err != nil {
 			return
 		}
+
 		req := make([]byte, 4)
 		if _, err := io.ReadFull(conn, req); err != nil {
 			return
 		}
+
 		var dst string
+
 		switch req[3] {
 		case 1, 4:
 			ip := make([]byte, map[byte]int{1: 4, 4: 16}[req[3]])
 			if _, err := io.ReadFull(conn, ip); err != nil {
 				return
 			}
+
 			a, _ := netip.AddrFromSlice(ip)
 			dst = "ip/" + a.String()
 		case 3:
@@ -459,37 +515,48 @@ func startSOCKS5(tb testing.TB) (*url.URL, func() []string) {
 			if _, err := io.ReadFull(conn, n); err != nil {
 				return
 			}
+
 			name := make([]byte, n[0])
 			if _, err := io.ReadFull(conn, name); err != nil {
 				return
 			}
+
 			dst = "name/" + string(name)
 		}
+
 		port := make([]byte, 2)
 		if _, err := io.ReadFull(conn, port); err != nil {
 			return
 		}
+
 		mu.Lock()
+
 		dsts = append(dsts, dst+":"+strconv.Itoa(int(binary.BigEndian.Uint16(port))))
 		mu.Unlock()
+
 		_, _ = conn.Write([]byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0})
 	}
+
 	wg.Go(func() {
 		for {
 			conn, aerr := ln.Accept()
 			if aerr != nil {
 				return
 			}
+
 			wg.Go(func() { serve(conn) })
 		}
 	})
 	tb.Cleanup(func() {
 		_ = ln.Close()
+
 		wg.Wait()
 	})
+
 	return &url.URL{Scheme: "socks5", Host: ln.Addr().String()}, func() []string {
 		mu.Lock()
 		defer mu.Unlock()
+
 		return slices.Clone(dsts)
 	}
 }
@@ -506,6 +573,7 @@ func TestSSRFGuard_SOCKS5(t *testing.T) {
 
 	conn, err := dial(t.Context(), "tcp", "example.com:443")
 	require.NoError(t, err)
+
 	_ = conn.Close()
 
 	_, err = dial(t.Context(), "tcp", "evil.example:80")

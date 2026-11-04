@@ -14,6 +14,7 @@ import (
 
 func TestExtractor_Extract_CacheHit(t *testing.T) {
 	t.Parallel()
+
 	ext, _ := NewExtractor(WithCacheSize(100), WithTrustPrivatePeers())
 	peerIP := netip.MustParseAddr("10.0.0.1")
 	headers := &mockHeaders{data: map[string][]string{
@@ -30,6 +31,7 @@ func TestExtractor_Extract_CacheHit(t *testing.T) {
 
 func TestExtractor_XFFCountPreservesPositions(t *testing.T) {
 	t.Parallel()
+
 	for _, tc := range []struct {
 		name   string
 		values []string
@@ -49,6 +51,7 @@ func TestExtractor_XFFCountPreservesPositions(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
 			ext, err := NewExtractor(WithTrustedPeers(netip.MustParsePrefix("10.0.0.0/8")), WithTrustedProxiesCount(tc.count))
 			require.NoError(t, err)
 			got := ext.Extract(t.Context(), netip.MustParseAddr("10.0.0.1"), &mockHeaders{data: map[string][]string{
@@ -62,12 +65,15 @@ func TestExtractor_XFFCountPreservesPositions(t *testing.T) {
 
 func TestExtractor_MappedTrustPrefixes(t *testing.T) {
 	t.Parallel()
+
 	for _, prefix := range []string{"10.0.0.0/24", "::ffff:10.0.0.0/120", "::ffff:10.0.0.1/128"} {
 		t.Run(prefix, func(t *testing.T) {
 			t.Parallel()
+
 			ext, err := NewExtractor(WithTrustedPeers(netip.MustParsePrefix(prefix)),
 				WithTrustedProxies(netip.MustParsePrefix("::ffff:9.9.9.0/120")))
 			require.NoError(t, err)
+
 			for range 2 { // Exercise both a cold and a warm parse cache.
 				got := ext.Extract(t.Context(), netip.MustParseAddr("::ffff:10.0.0.1"),
 					&mockHeaders{data: map[string][]string{HeaderXForwardedFor: {"::ffff:8.8.8.8, ::ffff:9.9.9.9"}}})
@@ -79,6 +85,7 @@ func TestExtractor_MappedTrustPrefixes(t *testing.T) {
 
 func TestExtractor_Extract_TrustedProxies(t *testing.T) {
 	t.Parallel()
+
 	trustedProxy := netip.MustParsePrefix("10.0.0.0/8")
 	ext, _ := NewExtractor(WithTrustedProxies(trustedProxy))
 	peerIP := netip.MustParseAddr("10.0.0.1")
@@ -92,6 +99,7 @@ func TestExtractor_Extract_TrustedProxies(t *testing.T) {
 
 func TestExtractor_Extract_TrustedPeers(t *testing.T) {
 	t.Parallel()
+
 	trustedPeer := netip.MustParsePrefix("10.0.0.0/8")
 	ext, _ := NewExtractor(WithTrustedPeers(trustedPeer), WithHeaders(HeaderXRealIP))
 	peerIP := netip.MustParseAddr("10.0.0.1")
@@ -105,8 +113,10 @@ func TestExtractor_Extract_TrustedPeers(t *testing.T) {
 
 func TestExtractor_Extract_InvalidHeader(t *testing.T) {
 	t.Parallel()
+
 	ext, err := NewExtractor(WithTrustedPeers(netip.MustParsePrefix("10.0.0.0/8")))
 	require.NoError(t, err)
+
 	peerIP := netip.MustParseAddr("10.0.0.1")
 	headers := &mockHeaders{data: map[string][]string{
 		HeaderXRealIP: {"not-an-ip"},
@@ -118,6 +128,7 @@ func TestExtractor_Extract_InvalidHeader(t *testing.T) {
 
 func TestExtractor_Extract_WithCustomHeaders(t *testing.T) {
 	t.Parallel()
+
 	ext, _ := NewExtractor(WithHeaders("X-Custom-IP"), WithTrustPrivatePeers())
 	peerIP := netip.MustParseAddr("10.0.0.1")
 	headers := &mockHeaders{data: map[string][]string{
@@ -130,8 +141,10 @@ func TestExtractor_Extract_WithCustomHeaders(t *testing.T) {
 
 func TestExtractor_Extract_TrustedProxiesCount(t *testing.T) {
 	t.Parallel()
+
 	ext, err := NewExtractor(WithTrustedPeers(netip.MustParsePrefix("10.0.0.0/8")), WithTrustedProxiesCount(1))
 	require.NoError(t, err)
+
 	peerIP := netip.MustParseAddr("10.0.0.1")
 	headers := &mockHeaders{data: map[string][]string{
 		HeaderXForwardedFor: {"1.1.1.1, 10.0.0.2"},
@@ -143,8 +156,10 @@ func TestExtractor_Extract_TrustedProxiesCount(t *testing.T) {
 
 func TestExtractor_Extract_MultipleXFF(t *testing.T) {
 	t.Parallel()
+
 	ext, err := NewExtractor(WithTrustedProxies(netip.MustParsePrefix("10.0.0.0/8")))
 	require.NoError(t, err)
+
 	peerIP := netip.MustParseAddr("10.0.0.1")
 	headers := &mockHeaders{data: map[string][]string{
 		HeaderXForwardedFor: {"203.0.114.1, 10.0.0.2, 10.0.0.3"},
@@ -156,6 +171,7 @@ func TestExtractor_Extract_MultipleXFF(t *testing.T) {
 
 func TestExtractor_WithLogger(t *testing.T) {
 	t.Parallel()
+
 	ext, err := NewExtractor(WithLogger(nil))
 	require.NoError(t, err)
 	require.NotNil(t, ext)
@@ -173,6 +189,7 @@ func TestExtractor_WithLogger(t *testing.T) {
 // the peer address.
 func TestExtractor_Extract_AllPrivateXFFFallsBackToPeer(t *testing.T) {
 	t.Parallel()
+
 	ext, err := NewExtractor(WithCacheDisabled(), WithTrustPrivatePeers())
 	require.NoError(t, err)
 
@@ -244,6 +261,7 @@ func TestExtractor_Extract_XFFPaddingKeepsProxyAppendedEntry(t *testing.T) {
 	for i := range 2 * MaxIPsPerHeader {
 		spoofed = append(spoofed, netip.AddrFrom4([4]byte{1, 1, 1, byte(i + 1)}).String())
 	}
+
 	padded := strings.Join(spoofed, ", ")
 	long := padded + strings.Repeat(", 1.2.3.4", MaxIPLength*MaxIPsPerHeader)
 

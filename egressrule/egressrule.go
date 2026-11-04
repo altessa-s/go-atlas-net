@@ -78,18 +78,23 @@ type Matcher struct {
 // ("allow[2].cidr").
 func (r Rule) Parse(list List, index int) (Matcher, error) {
 	name := label(list, index)
+
 	m := Matcher{Name: r.Name, Host: r.Host}
 	if r.CIDR != "" {
 		prefix, err := netip.ParsePrefix(r.CIDR)
 		if err != nil {
 			return Matcher{}, fmt.Errorf("%s.cidr: %w", name, err)
 		}
+
 		m.CIDR = prefix
 	}
+
 	if r.Port < 0 || r.Port > MaxPort {
 		return Matcher{}, fmt.Errorf("%s.port: must be 0 (any) or 1 to %d", name, MaxPort)
 	}
+
 	m.Port = uint16(r.Port)
+
 	return Check(list, index, m)
 }
 
@@ -101,11 +106,13 @@ func Validate(allow, deny []Rule) error {
 			return err
 		}
 	}
+
 	for i, r := range allow {
 		if _, err := r.Parse(Allow, i); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -129,26 +136,33 @@ func Check(list List, index int, m Matcher) (Matcher, error) {
 	default:
 		return Matcher{}, fmt.Errorf("%s: unknown list", name)
 	}
+
 	if m.Name != "" && !nameRe.MatchString(m.Name) {
 		return Matcher{}, fmt.Errorf("%s.name: expected 1 to %d characters of A-Z, a-z, 0-9, '_', '.', '-', '[' and ']'",
 			name, MaxNameLen)
 	}
+
 	if m.Host != "" {
 		host, err := NormalizeHostGlob(m.Host)
 		if err != nil {
 			return Matcher{}, fmt.Errorf("%s.host: %w", name, err)
 		}
+
 		m.Host = host
 	}
+
 	if m.CIDR != (netip.Prefix{}) {
 		if !m.CIDR.IsValid() {
 			return Matcher{}, fmt.Errorf("%s.cidr: invalid prefix", name)
 		}
+
 		if m.CIDR.Addr().Is4In6() && m.CIDR.Bits() < ipv4MappedBits {
 			return Matcher{}, fmt.Errorf("%s.cidr: an IPv4-mapped prefix needs a length of %d or more", name, ipv4MappedBits)
 		}
+
 		m.CIDR = NormalizePrefix(m.CIDR)
 	}
+
 	return m, nil
 }
 
@@ -165,6 +179,7 @@ func NormalizePrefix(p netip.Prefix) netip.Prefix {
 	if p.Addr().Is4In6() && p.Bits() >= ipv4MappedBits {
 		return netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-ipv4MappedBits)
 	}
+
 	return p
 }
 
@@ -194,15 +209,18 @@ func NormalizeHostGlob(pattern string) (string, error) {
 	if err := checkHostGlob(pattern); err != nil {
 		return "", err
 	}
+
 	host, err := asciiHostGlob(pattern)
 	if err != nil {
 		return "", err
 	}
+
 	if host != pattern {
 		if err := checkHostGlob(host); err != nil {
 			return "", fmt.Errorf("normalized to %q: %w", host, err)
 		}
 	}
+
 	return host, nil
 }
 
@@ -211,12 +229,15 @@ func checkHostGlob(pattern string) error {
 	if pattern == "" {
 		return errors.New("empty host glob")
 	}
+
 	if host := unicodeDots.Replace(pattern); strings.ContainsAny(host, ":/@ \t") || strings.HasSuffix(host, ".") {
 		return errBadHostGlob
 	}
+
 	if _, err := path.Match(pattern, ""); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -231,21 +252,27 @@ func asciiHostGlob(pattern string) (string, error) {
 			labels[i] = strings.ToLower(label)
 			continue
 		}
+
 		if strings.ContainsAny(label, `*?[]\`) {
 			return "", fmt.Errorf("label %q mixes Unicode and glob metacharacters, write it in punycode", label)
 		}
+
 		ascii, err := idna.Lookup.ToASCII(label)
 		if err != nil {
 			return "", fmt.Errorf("label %q is not a valid internationalized name: %w", label, err)
 		}
+
 		if strings.Contains(ascii, ".") {
 			return "", fmt.Errorf("label %q holds a label separator, write it with ASCII dots", label)
 		}
+
 		if ascii == "" {
 			return "", fmt.Errorf("label %q maps to nothing", label)
 		}
+
 		labels[i] = ascii
 	}
+
 	return strings.Join(labels, "."), nil
 }
 
@@ -263,6 +290,7 @@ func NormalizeHost(host string) string {
 			host = unicodeDots.Replace(host)
 		}
 	}
+
 	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
 
@@ -273,5 +301,6 @@ func isASCII(s string) bool {
 			return false
 		}
 	}
+
 	return true
 }

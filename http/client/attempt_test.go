@@ -28,6 +28,7 @@ func TestWithAttemptTimeout(t *testing.T) {
 	t.Parallel()
 
 	const timeout = 300 * time.Millisecond
+
 	tests := []struct {
 		name  string
 		first http.HandlerFunc
@@ -43,11 +44,13 @@ func TestWithAttemptTimeout(t *testing.T) {
 			t.Parallel()
 
 			var hits atomic.Int32
+
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if hits.Add(1) == 1 {
 					tc.first(w, r)
 					return
 				}
+
 				_, _ = io.WriteString(w, "ok")
 			}))
 			t.Cleanup(srv.Close)
@@ -71,6 +74,7 @@ func TestWithAttemptTimeout_BoundsBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.(http.Flusher).Flush()
+
 		select { // never finish the body
 		case <-release:
 		case <-r.Context().Done():
@@ -82,6 +86,7 @@ func TestWithAttemptTimeout_BoundsBody(t *testing.T) {
 	c := httpclient.New(loopback, httpclient.WithRetryMax(0), httpclient.WithAttemptTimeout(200*time.Millisecond))
 	resp, err := get(t, c, srv.URL)
 	require.NoError(t, err)
+
 	start := time.Now()
 	_, err = io.ReadAll(resp.Body)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
@@ -92,10 +97,13 @@ func TestWithAttemptTimeout_BoundsLimiterWait(t *testing.T) {
 	t.Parallel()
 
 	srv, hits := failingServer(t, 0)
+
 	var calls atomic.Int32
+
 	waiting := limiters.Func(func(ctx context.Context, _ string) error {
 		calls.Add(1)
 		<-ctx.Done() // a limiter that only gives up with the context
+
 		return ctx.Err()
 	})
 	c := httpclient.New(loopback, httpclient.WithRetryMax(3), httpclient.WithRetryWait(time.Millisecond, time.Millisecond),
@@ -121,17 +129,21 @@ func (s *challengeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.cookies = append(s.cookies, strings.Join(r.Header.Values("Cookie"), "|"))
 	s.mu.Unlock()
+
 	if c, err := r.Cookie("challenge"); err != nil || c.Value != "accepted" {
 		http.SetCookie(w, &http.Cookie{Name: "challenge", Value: "accepted", Path: "/"})
 		w.WriteHeader(http.StatusServiceUnavailable)
+
 		return
 	}
+
 	_, _ = io.WriteString(w, "ok")
 }
 
 func (s *challengeServer) seen() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	return append([]string(nil), s.cookies...)
 }
 
@@ -154,6 +166,7 @@ func TestRetryKeepsCookiesOfDiscardedReplies(t *testing.T) {
 
 			jar, err := cookiejar.New(nil)
 			require.NoError(t, err)
+
 			c := httpclient.New(loopback, httpclient.WithClient(&http.Client{Jar: jar}),
 				httpclient.WithRetryMax(2), httpclient.WithRetryWait(time.Millisecond, time.Millisecond))
 
@@ -188,19 +201,24 @@ func (s *cookieRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.cookies = append(s.cookies, strings.Join(r.Header.Values("Cookie"), "|"))
 	n := len(s.cookies)
 	s.mu.Unlock()
+
 	if n <= s.failures {
 		if s.setFirst != nil {
 			s.setFirst(w)
 		}
+
 		w.WriteHeader(http.StatusServiceUnavailable)
+
 		return
 	}
+
 	_, _ = io.WriteString(w, "ok")
 }
 
 func (s *cookieRecorder) seen() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	return append([]string(nil), s.cookies...)
 }
 
@@ -271,6 +289,7 @@ func TestFailedRequestStoresCookies(t *testing.T) {
 			t.Parallel()
 
 			var hits atomic.Int32
+
 			attempts := int32(tc.retryMax + 1)
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				n := hits.Add(1)
@@ -278,19 +297,24 @@ func TestFailedRequestStoresCookies(t *testing.T) {
 					if n == attempts { // the last attempt of the failing request
 						http.SetCookie(w, &http.Cookie{Name: "challenge", Value: "accepted", Path: "/"})
 					}
+
 					w.WriteHeader(http.StatusServiceUnavailable)
+
 					return
 				}
+
 				if c, err := r.Cookie("challenge"); err != nil || c.Value != "accepted" {
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}
+
 				_, _ = io.WriteString(w, "ok")
 			}))
 			t.Cleanup(srv.Close)
 
 			jar, err := cookiejar.New(nil)
 			require.NoError(t, err)
+
 			c := httpclient.New(loopback, httpclient.WithClient(&http.Client{Jar: jar}),
 				httpclient.WithRetryMax(tc.retryMax), httpclient.WithRetryWait(time.Millisecond, time.Millisecond))
 

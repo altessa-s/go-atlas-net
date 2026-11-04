@@ -27,6 +27,7 @@ func (c chain) Allow(ctx context.Context, key string) error {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -45,6 +46,7 @@ func Chain(limiters ...RequestsLimiter) RequestsLimiter {
 			c = append(c, l)
 		}
 	}
+
 	switch len(c) {
 	case 0:
 		return nil

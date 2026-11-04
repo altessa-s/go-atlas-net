@@ -57,6 +57,7 @@ func TestRoundTripper_RoundTrip_Denied(t *testing.T) {
 
 func TestRoundTripper_RoundTrip_HostnameExtracted(t *testing.T) {
 	var capturedKey string
+
 	limiter := &capturingLimiter{capturedKey: &capturedKey}
 	next := httpx.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK}, nil
@@ -71,6 +72,7 @@ func TestRoundTripper_RoundTrip_HostnameExtracted(t *testing.T) {
 
 func TestRoundTripper_RoundTrip_NilLimiterPassesThrough(t *testing.T) {
 	t.Parallel()
+
 	for _, tc := range []struct {
 		name    string
 		limiter RequestsLimiter
@@ -81,6 +83,7 @@ func TestRoundTripper_RoundTrip_NilLimiterPassesThrough(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
 			calls := 0
 			next := httpx.RoundTripperFunc(func(*http.Request) (*http.Response, error) {
 				calls++

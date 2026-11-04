@@ -23,15 +23,19 @@ import (
 // failingServer answers 503 to the first failures requests and 200 after.
 func failingServer(t *testing.T, failures int32) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
+
 	var hits atomic.Int32
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if hits.Add(1) <= failures {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
+
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
+
 	return srv, &hits
 }
 
@@ -40,10 +44,12 @@ func get(t *testing.T, c *http.Client, url string) (*http.Response, error) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
 	require.NoError(t, err)
+
 	resp, err := c.Do(req)
 	if resp != nil {
 		t.Cleanup(func() { _ = resp.Body.Close() })
 	}
+
 	return resp, err
 }
 
@@ -63,7 +69,9 @@ func TestWithLimiterPerAttempt(t *testing.T) {
 			t.Parallel()
 
 			srv, hits := failingServer(t, 2)
+
 			var calls atomic.Int32
+
 			opts := []httpclient.Option{
 				loopback, httpclient.WithRetryMax(3), httpclient.WithRetryWait(time.Millisecond, time.Millisecond),
 				httpclient.WithLimiter(limiters.Func(func(context.Context, string) error { calls.Add(1); return nil })),
@@ -71,6 +79,7 @@ func TestWithLimiterPerAttempt(t *testing.T) {
 			if tc.perAttempt {
 				opts = append(opts, httpclient.WithLimiterPerAttempt())
 			}
+
 			resp, err := get(t, httpclient.New(opts...), srv.URL)
 			require.NoError(t, err)
 			require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -85,7 +94,9 @@ func TestWithLimiterPerAttempt_RefusalNotRetried(t *testing.T) {
 
 	srv, hits := failingServer(t, 0)
 	errRefused := errors.New("budget exhausted")
+
 	var calls atomic.Int32
+
 	c := httpclient.New(loopback, httpclient.WithRetryMax(3), httpclient.WithRetryWait(time.Millisecond, time.Millisecond),
 		httpclient.WithLimiterPerAttempt(),
 		httpclient.WithLimiter(limiters.Func(func(context.Context, string) error { calls.Add(1); return errRefused })))

@@ -35,6 +35,7 @@ func NewRoundTripper(next http.RoundTripper, limiter RequestsLimiter) *RoundTrip
 	if nilcheck.IsNil(limiter) {
 		limiter = nil
 	}
+
 	return &RoundTripper{
 		next:    cmp.Or(next, http.DefaultTransport),
 		limiter: limiter,
@@ -51,11 +52,13 @@ func (rt *RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if rt.limiter == nil {
 		return rt.next.RoundTrip(req)
 	}
+
 	host := req.URL.Hostname()
 	if err := rt.limiter.Allow(req.Context(), host); err != nil {
 		if IsRateLimitError(err) != nil {
 			return nil, err
 		}
+
 		return nil, &RateLimitError{Host: host, Err: err}
 	}
 

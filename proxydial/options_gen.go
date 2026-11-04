@@ -13,6 +13,11 @@ import (
 type Option func(o *options)
 
 // WithDialer sets the dialer option.
+//
+// dialer overrides the underlying *net.Dialer used to reach the
+// proxy. Defaults to [DefaultDialer]. Generated WithDialer skips
+// nil arguments so callers can pass through configuration values
+// unconditionally.
 func WithDialer(v *net.Dialer) Option {
 	return func(o *options) {
 		if v == nil {
@@ -23,6 +28,12 @@ func WithDialer(v *net.Dialer) Option {
 }
 
 // WithProxyTLSConfig sets the proxyTLSConfig option.
+//
+// proxyTLSConfig is the *tls.Config used for the TLS handshake to
+// an https:// proxy. The caller's config is cloned via [TLSConfig]
+// before use; it is never mutated. ServerName and MinVersion are
+// filled in from the proxy URL only when left at the zero value.
+// No effect for http:// or socks5:// proxies.
 func WithProxyTLSConfig(v *tls.Config) Option {
 	return func(o *options) {
 		if v == nil {
@@ -33,6 +44,9 @@ func WithProxyTLSConfig(v *tls.Config) Option {
 }
 
 // WithResolver sets the resolver option.
+//
+// resolver looks up destination host names for ssrfGuard. Defaults to
+// [net.DefaultResolver].
 func WithResolver(v Resolver) Option {
 	return func(o *options) {
 		switch rv := reflect.ValueOf(v); rv.Kind() {
@@ -48,6 +62,16 @@ func WithResolver(v Resolver) Option {
 }
 
 // WithSSRFGuard sets the ssrfGuard option.
+//
+// ssrfGuard, set by the generated WithSSRFGuard, makes the dialer
+// returned by [FromURL] resolve the destination host itself before the
+// proxy is asked to connect: every resolved address must pass the guard,
+// otherwise the dial fails with the guard's error and the proxy is never
+// contacted. The proxy is then asked for an approved IP address instead
+// of the host name, so it cannot resolve the name to another address.
+// Without a guard the proxy resolves the destination. Pass
+// httpclient.EgressPolicy.Check for the private-address and egress-rule
+// checks.
 func WithSSRFGuard(v AddrGuard) Option {
 	return func(o *options) {
 		o.ssrfGuard = v

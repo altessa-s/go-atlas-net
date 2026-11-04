@@ -49,8 +49,10 @@ func TestNormalizeHostGlob(t *testing.T) {
 			if tc.wantErr {
 				require.Error(t, err)
 				require.Empty(t, got)
+
 				return
 			}
+
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -76,10 +78,12 @@ func requireNormalizedGlob(t *testing.T, host string) {
 	t.Helper()
 
 	require.NotEmpty(t, host)
+
 	for i := range len(host) {
 		require.Less(t, host[i], byte(0x80), "non-ASCII byte in %q", host)
 		require.False(t, host[i] >= 'A' && host[i] <= 'Z', "upper case in %q", host)
 	}
+
 	require.False(t, strings.ContainsAny(host, ":/@ \t"), "forbidden character in %q", host)
 	require.False(t, strings.HasSuffix(host, "."), "trailing dot in %q", host)
 	_, err := path.Match(host, "")
@@ -97,12 +101,14 @@ func FuzzNormalizeHostGlob(f *testing.F) {
 	} {
 		f.Add(seed)
 	}
+
 	f.Fuzz(func(t *testing.T, pattern string) {
 		host, err := egressrule.NormalizeHostGlob(pattern)
 		if err != nil {
 			require.Empty(t, host)
 			return
 		}
+
 		requireNormalizedGlob(t, host)
 	})
 }
@@ -119,15 +125,19 @@ func FuzzRuleParse(f *testing.F) {
 			require.Zero(t, m)
 			return
 		}
+
 		require.True(t, list == string(egressrule.Allow) || list == string(egressrule.Deny))
 		require.Equal(t, uint16(port), m.Port) //nolint:gosec // a parsed port is within 0 to 65535
+
 		if m.Host != "" {
 			requireNormalizedGlob(t, m.Host)
 		}
+
 		if m.CIDR.IsValid() {
 			require.Equal(t, m.CIDR.Masked(), m.CIDR, "prefix not masked")
 			require.False(t, m.CIDR.Addr().Is4In6(), "IPv4-mapped prefix not unmapped")
 		}
+
 		again, err := egressrule.Check(egressrule.List(list), 0, m)
 		require.NoError(t, err)
 		require.Equal(t, m, again, "Check of a parsed matcher is not idempotent")
@@ -138,6 +148,7 @@ func FuzzNormalizeHost(f *testing.F) {
 	for _, seed := range []string{"Example.COM.", "bücher.de", "example。com。", "\u00ad", "a..", ""} {
 		f.Add(seed)
 	}
+
 	f.Fuzz(func(t *testing.T, host string) {
 		got := egressrule.NormalizeHost(host)
 		for i := range len(got) {

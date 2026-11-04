@@ -21,6 +21,7 @@ func allowPublic(_ string, dst netip.AddrPort) error {
 	if dst.Addr().IsPrivate() || dst.Addr().IsLoopback() {
 		return context.Canceled
 	}
+
 	return nil
 }
 
@@ -43,6 +44,7 @@ func BenchmarkApprovedTargets(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			ctx := b.Context()
 			b.ReportAllocs()
+
 			for b.Loop() {
 				if _, err := approvedTargets(ctx, "tcp", tc.addr, allowPublic, tc.resolver); err != nil {
 					b.Fatal(err)

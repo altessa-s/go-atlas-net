@@ -169,6 +169,7 @@ var requestBuilderPool = sync.Pool{
 	New: func() any {
 		headers := coremaps.NewPool[string, string](DefaultHeadersCapacity).Get()
 		queryParams := make(url.Values, DefaultQueryParamsCapacity)
+
 		return &requestBuilder{
 			headers:     *headers,
 			queryParams: queryParams,
@@ -223,14 +224,17 @@ func (rb *requestBuilder) reset(client httpx.Doer, headerKeys *intern.Interner) 
 		rb.basicAuthUser.Clear()
 		rb.basicAuthUser = nil
 	}
+
 	if rb.basicAuthPass != nil {
 		rb.basicAuthPass.Clear()
 		rb.basicAuthPass = nil
 	}
+
 	if rb.bearerToken != nil {
 		rb.bearerToken.Clear()
 		rb.bearerToken = nil
 	}
+
 	rb.apiKeyKey = ""
 	if rb.apiKeyValue != nil {
 		rb.apiKeyValue.Clear()
@@ -246,6 +250,7 @@ func (rb *requestBuilder) reset(client httpx.Doer, headerKeys *intern.Interner) 
 func (rb *requestBuilder) GET(url string) RequestBuilder {
 	rb.method = http.MethodGet
 	rb.url = url
+
 	return rb
 }
 
@@ -253,6 +258,7 @@ func (rb *requestBuilder) GET(url string) RequestBuilder {
 func (rb *requestBuilder) POST(url string) RequestBuilder {
 	rb.method = http.MethodPost
 	rb.url = url
+
 	return rb
 }
 
@@ -260,6 +266,7 @@ func (rb *requestBuilder) POST(url string) RequestBuilder {
 func (rb *requestBuilder) PUT(url string) RequestBuilder {
 	rb.method = http.MethodPut
 	rb.url = url
+
 	return rb
 }
 
@@ -267,6 +274,7 @@ func (rb *requestBuilder) PUT(url string) RequestBuilder {
 func (rb *requestBuilder) PATCH(url string) RequestBuilder {
 	rb.method = http.MethodPatch
 	rb.url = url
+
 	return rb
 }
 
@@ -274,6 +282,7 @@ func (rb *requestBuilder) PATCH(url string) RequestBuilder {
 func (rb *requestBuilder) DELETE(url string) RequestBuilder {
 	rb.method = http.MethodDelete
 	rb.url = url
+
 	return rb
 }
 
@@ -281,6 +290,7 @@ func (rb *requestBuilder) DELETE(url string) RequestBuilder {
 func (rb *requestBuilder) HEAD(url string) RequestBuilder {
 	rb.method = http.MethodHead
 	rb.url = url
+
 	return rb
 }
 
@@ -288,6 +298,7 @@ func (rb *requestBuilder) HEAD(url string) RequestBuilder {
 func (rb *requestBuilder) OPTIONS(url string) RequestBuilder {
 	rb.method = http.MethodOptions
 	rb.url = url
+
 	return rb
 }
 
@@ -295,6 +306,7 @@ func (rb *requestBuilder) OPTIONS(url string) RequestBuilder {
 func (rb *requestBuilder) Method(method, url string) RequestBuilder {
 	rb.method = method
 	rb.url = url
+
 	return rb
 }
 
@@ -310,11 +322,13 @@ func (rb *requestBuilder) Body(body io.Reader) RequestBuilder {
 // or [RequestBuilder.BuildWithContext] is called.
 func (rb *requestBuilder) JSONBody(body any) RequestBuilder {
 	buf := coreio.GetBuffer()
+
 	encoder := json.NewEncoder(buf)
 	if err := encoder.Encode(body); err != nil {
 		coreio.PutBuffer(buf)
 		// Store error in a way that will be returned during Send()
 		rb.body = coreio.NewErrorReader(coreerrs.WrapOperation(err, "marshal JSON body"))
+
 		return rb
 	}
 
@@ -325,6 +339,7 @@ func (rb *requestBuilder) JSONBody(body any) RequestBuilder {
 
 	rb.body = bytes.NewReader(data)
 	rb.headers["Content-Type"] = "application/json"
+
 	return rb
 }
 
@@ -333,6 +348,7 @@ func (rb *requestBuilder) JSONBody(body any) RequestBuilder {
 func (rb *requestBuilder) FormBody(data url.Values) RequestBuilder {
 	rb.body = strings.NewReader(data.Encode())
 	rb.headers["Content-Type"] = "application/x-www-form-urlencoded"
+
 	return rb
 }
 
@@ -354,6 +370,7 @@ func (rb *requestBuilder) headerKey(key string) string {
 	if rb.headerKeys == nil {
 		return key
 	}
+
 	return rb.headerKeys.String(key)
 }
 
@@ -368,6 +385,7 @@ func (rb *requestBuilder) Headers(seq iter.Seq2[string, string]) RequestBuilder 
 	for k, v := range seq {
 		rb.headers[rb.headerKey(k)] = v
 	}
+
 	return rb
 }
 
@@ -394,6 +412,7 @@ func (rb *requestBuilder) BasicAuth(username, password string) RequestBuilder {
 	// We'll store these and apply them during Build()
 	rb.basicAuthUser = secure.NewString(username)
 	rb.basicAuthPass = secure.NewString(password)
+
 	return rb
 }
 
@@ -408,6 +427,7 @@ func (rb *requestBuilder) BearerToken(token string) RequestBuilder {
 func (rb *requestBuilder) APIKey(key, value string) RequestBuilder {
 	rb.apiKeyKey = key
 	rb.apiKeyValue = secure.NewString(value)
+
 	return rb
 }
 
@@ -424,6 +444,7 @@ func (rb *requestBuilder) QueryParams(params url.Values) RequestBuilder {
 			rb.queryParams.Add(k, v)
 		}
 	}
+
 	return rb
 }
 
@@ -432,6 +453,7 @@ func (rb *requestBuilder) QueryParamsSeq(seq iter.Seq2[string, string]) RequestB
 	for k, v := range seq {
 		rb.queryParams.Add(k, v)
 	}
+
 	return rb
 }
 
@@ -462,15 +484,19 @@ func (rb *requestBuilder) Send(ctx context.Context) (*http.Response, error) {
 		rb.Release()
 		return nil, coreerrs.WrapOperation(err, "build request")
 	}
+
 	cancel := cancelFromContext(req.Context()) //nolint:contextcheck // context attached by builder
 	resp, err := rb.client.Do(req)
 	rb.Release()
+
 	if err != nil {
 		if cancel != nil {
 			cancel()
 		}
+
 		return nil, coreerrs.Wrapf(RedactError(err), "request execution failed for %s %s", req.Method, redactedURL(req.URL))
 	}
+
 	return attachCancel(resp, cancel), nil
 }
 
@@ -504,6 +530,7 @@ func (rb *requestBuilder) BuildWithContext(ctx context.Context) (*http.Request, 
 	if rb.method == "" {
 		rb.method = http.MethodGet
 	}
+
 	if rb.url == "" {
 		return nil, &RequestBuilderError{Message: "URL is required"}
 	}
@@ -530,6 +557,7 @@ func (rb *requestBuilder) BuildWithContext(ctx context.Context) (*http.Request, 
 	if err := rb.applyQuery(req); err != nil {
 		return nil, err
 	}
+
 	return req, nil
 }
 
@@ -558,6 +586,7 @@ func (rb *requestBuilder) applyAuth(req *http.Request) {
 
 	if rb.bearerToken != nil {
 		token := rb.bearerToken.String()
+
 		req.Header.Set("Authorization", corestrings.BuildString(func(builder *strings.Builder) {
 			builder.Grow(BearerPrefixLength + len(token))
 			builder.WriteString("Bearer ")
@@ -575,6 +604,7 @@ func (rb *requestBuilder) applyQuery(req *http.Request) error {
 	if len(rb.queryParams) == 0 {
 		return nil
 	}
+
 	if req.URL.RawQuery == "" {
 		req.URL.RawQuery = rb.queryParams.Encode()
 		return nil
@@ -590,6 +620,8 @@ func (rb *requestBuilder) applyQuery(req *http.Request) error {
 			existing.Add(k, v)
 		}
 	}
+
 	req.URL.RawQuery = existing.Encode()
+
 	return nil
 }

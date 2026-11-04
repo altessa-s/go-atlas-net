@@ -1,7 +1,7 @@
 # IDE
 .idea/
 
-# Local AI tooling & internal docs
+# Local tooling and internal notes
 /.mcp.json
 /.claude/
 /.ai-factory*

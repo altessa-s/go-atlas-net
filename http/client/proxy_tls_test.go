@@ -36,6 +36,7 @@ type httpsProxy struct {
 func (p *httpsProxy) seen() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	return slices.Clone(p.targets)
 }
 
@@ -48,36 +49,47 @@ func startHTTPSProxy(tb testing.TB) *httpsProxy {
 			http.Error(w, "CONNECT only", http.StatusMethodNotAllowed)
 			return
 		}
+
 		p.mu.Lock()
 		p.targets = append(p.targets, r.Host)
 		p.mu.Unlock()
+
 		upstream, err := net.DialTimeout("tcp", r.Host, 5*time.Second)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
+
 		defer func() { _ = upstream.Close() }()
+
 		conn, rw, err := http.NewResponseController(w).Hijack()
 		if err != nil {
 			return
 		}
+
 		defer func() { _ = conn.Close() }()
+
 		deadline := time.Now().Add(5 * time.Second)
 		_ = conn.SetDeadline(deadline)
 		_ = upstream.SetDeadline(deadline)
+
 		if _, err = io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
 			return
 		}
+
 		go func() { _, _ = io.Copy(upstream, rw) }()
+
 		_, _ = io.Copy(conn, upstream)
 	}))
 	tb.Cleanup(srv.Close)
 
 	u, err := url.Parse(srv.URL)
 	require.NoError(tb, err)
+
 	p.url = u
 	p.roots = x509.NewCertPool()
 	p.roots.AddCert(srv.Certificate())
+
 	return p
 }
 
@@ -95,6 +107,7 @@ func TestWithProxyTLSConfig_TunnelsThroughHTTPSProxy(t *testing.T) {
 	require.NoError(t, err)
 
 	errResolve := errors.New("no proxy route")
+
 	cases := []struct {
 		name        string
 		proxyFn     func(p *httpsProxy) httpclient.ProxyFunc
@@ -144,6 +157,7 @@ func TestWithProxyTLSConfig_TunnelsThroughHTTPSProxy(t *testing.T) {
 			)
 
 			resp, err := c.Get(t.Context(), backend.URL)
+
 			switch {
 			case tc.wantErr != nil:
 				require.ErrorIs(t, err, tc.wantErr)
@@ -151,11 +165,14 @@ func TestWithProxyTLSConfig_TunnelsThroughHTTPSProxy(t *testing.T) {
 				require.Error(t, err)
 			default:
 				require.NoError(t, err)
+
 				body, rerr := io.ReadAll(resp.Body)
 				_ = resp.Body.Close()
+
 				require.NoError(t, rerr)
 				require.Equal(t, "backend", string(body))
 			}
+
 			require.Equal(t, tc.wantTargets(proxy), proxy.seen())
 		})
 	}

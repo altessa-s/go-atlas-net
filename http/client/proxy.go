@@ -30,6 +30,7 @@ import (
 // the proxy via [http.Transport.Proxy].
 func proxyAwareDialer(proxyFn ProxyFunc, proxyTLSCfg *tls.Config) func(context.Context, string, string) (net.Conn, error) {
 	base := proxydial.DefaultDialer()
+
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		// Synthesize a destination URL for the resolver. http.ProxyURL
 		// and http.ProxyFromEnvironment both decide off the host, so
@@ -37,13 +38,16 @@ func proxyAwareDialer(proxyFn ProxyFunc, proxyTLSCfg *tls.Config) func(context.C
 		// gated-https case; it only narrows the path when callers
 		// wired a custom ProxyFunc that branches on req.URL.Scheme.
 		req := &http.Request{URL: &url.URL{Scheme: schemeHTTPS, Host: addr}}
+
 		proxyURL, err := proxyFn(req)
 		if err != nil {
 			return nil, fmt.Errorf("resolve proxy for %s: %w", addr, err)
 		}
+
 		if proxyURL == nil {
 			return base.DialContext(ctx, network, addr)
 		}
+
 		switch proxyURL.Scheme {
 		case "http", schemeHTTPS:
 			return proxydial.HTTPConnect(ctx, base, proxyURL, proxyTLSCfg, addr)
@@ -52,6 +56,7 @@ func proxyAwareDialer(proxyFn ProxyFunc, proxyTLSCfg *tls.Config) func(context.C
 			if err != nil {
 				return nil, err
 			}
+
 			return contextDial(ctx, network, addr)
 		default:
 			return nil, fmt.Errorf("unsupported proxy scheme %q (allowed: http, https, socks5, socks5h)", proxyURL.Scheme)

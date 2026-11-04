@@ -23,12 +23,15 @@ func TLSConfig(proxyURL *url.URL, user *tls.Config) *tls.Config {
 			MinVersion: tls.VersionTLS12,
 		}
 	}
+
 	cfg := user.Clone()
 	if cfg.ServerName == "" {
 		cfg.ServerName = proxyURL.Hostname()
 	}
+
 	if cfg.MinVersion == 0 {
 		cfg.MinVersion = tls.VersionTLS12
 	}
+
 	return cfg
 }

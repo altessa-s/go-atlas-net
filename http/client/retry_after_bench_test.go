@@ -14,6 +14,7 @@ import (
 
 func BenchmarkParseRetryAfter(b *testing.B) {
 	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+
 	cases := []struct {
 		name  string
 		value string
@@ -29,8 +30,10 @@ func BenchmarkParseRetryAfter(b *testing.B) {
 		if tc.value != "" {
 			h.Set("Retry-After", tc.value)
 		}
+
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
+
 			for b.Loop() {
 				_, _ = httpclient.ParseRetryAfter(h, now, time.Minute)
 			}

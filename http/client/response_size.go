@@ -22,13 +22,16 @@ func newResponseSizeRoundTripper(next http.RoundTripper, limit int64) http.Round
 	if limit <= 0 {
 		return next
 	}
+
 	return idleClosingRoundTripper{next: next, RoundTripperFunc: func(req *http.Request) (*http.Response, error) {
 		res, err := next.RoundTrip(req)
 		if err != nil {
 			return nil, err
 		}
+
 		if res.ContentLength > limit {
 			_ = res.Body.Close() //nolint:errcheck
+
 			return nil, &ResponseSizeError{
 				Limit:  limit,
 				Size:   res.ContentLength,
@@ -36,9 +39,11 @@ func newResponseSizeRoundTripper(next http.RoundTripper, limit int64) http.Round
 				Header: res.Header,
 			}
 		}
+
 		if res.ContentLength < 0 {
 			res.Body = coreio.NewLimitedReadCloser(res.Body, limit)
 		}
+
 		return res, nil
 	}}
 }

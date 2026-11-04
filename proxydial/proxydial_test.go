@@ -97,6 +97,7 @@ func TestHTTPConnect_CancelInterruptsStalledHandshake(t *testing.T) {
 
 	arrived := make(chan struct{})
 	proxyClosed := make(chan error, 1)
+
 	go func() {
 		conn, acceptErr := ln.Accept()
 		if acceptErr != nil {
@@ -110,6 +111,7 @@ func TestHTTPConnect_CancelInterruptsStalledHandshake(t *testing.T) {
 			proxyClosed <- readErr
 			return
 		}
+
 		close(arrived)
 
 		// Never answer; wait for the client to give up and close.
@@ -121,11 +123,13 @@ func TestHTTPConnect_CancelInterruptsStalledHandshake(t *testing.T) {
 	defer cancel()
 
 	result := make(chan error, 1)
+
 	go func() {
 		conn, connectErr := HTTPConnect(ctx, &net.Dialer{}, &url.URL{Scheme: "http", Host: ln.Addr().String()}, nil, "target.example:443")
 		if conn != nil {
 			_ = conn.Close()
 		}
+
 		result <- connectErr
 	}()
 
@@ -136,6 +140,7 @@ func TestHTTPConnect_CancelInterruptsStalledHandshake(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("CONNECT request never reached the proxy")
 	}
+
 	cancel()
 
 	select {
@@ -166,22 +171,28 @@ func startConnectProxy(tb testing.TB, handle func(conn net.Conn, br *bufio.Reade
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+
 		conn, acceptErr := ln.Accept()
 		if acceptErr != nil {
 			return
 		}
+
 		defer func() { _ = conn.Close() }()
 
 		br := bufio.NewReader(conn)
 		if _, readErr := http.ReadRequest(br); readErr != nil {
 			return
 		}
+
 		handle(conn, br)
 	}()
+
 	tb.Cleanup(func() {
 		_ = ln.Close()
+
 		<-done
 	})
+
 	return &url.URL{Scheme: "http", Host: ln.Addr().String()}
 }
 
@@ -193,17 +204,21 @@ func serverFirstHandler(head, greeting string, split bool) func(net.Conn, *bufio
 			if _, err := io.WriteString(conn, head); err != nil {
 				return
 			}
+
 			time.Sleep(20 * time.Millisecond)
+
 			if _, err := io.WriteString(conn, greeting); err != nil {
 				return
 			}
 		} else if _, err := io.WriteString(conn, head+greeting); err != nil {
 			return
 		}
+
 		line, err := br.ReadString('\n')
 		if err != nil || line != "QUIT\r\n" {
 			return
 		}
+
 		_, _ = io.WriteString(conn, "221 bye\r\n")
 	}
 }
@@ -226,6 +241,7 @@ func dialThrough(tb testing.TB, proxyURL *url.URL) net.Conn {
 	conn, err := HTTPConnect(tb.Context(), &net.Dialer{}, proxyURL, nil, "smtp.example:25")
 	require.NoError(tb, err)
 	trackTunnel(tb, conn)
+
 	return conn
 }
 
@@ -245,6 +261,7 @@ func TestHTTPConnect_ServerFirstGreeting(t *testing.T) {
 	t.Parallel()
 
 	const greeting = "220 smtp.example ESMTP ready\r\n"
+
 	cases := []struct {
 		name     string
 		head     string
@@ -281,10 +298,12 @@ func TestHTTPConnect_ClientFirstReturnsBareConn(t *testing.T) {
 		if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
 			return
 		}
+
 		line, err := br.ReadString('\n')
 		if err != nil {
 			return
 		}
+
 		_, _ = io.WriteString(conn, "pong:"+line)
 	})
 	conn := dialThrough(t, proxyURL)
@@ -301,13 +320,16 @@ func TestHTTPConnect_BufferedTunnelKeepsHalfClose(t *testing.T) {
 	t.Parallel()
 
 	const greeting = "SSH-2.0-OpenSSH_9.9\r\n"
+
 	proxyURL := startConnectProxy(t, func(conn net.Conn, br *bufio.Reader) {
 		if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n"+greeting); err != nil {
 			return
 		}
+
 		if _, err := io.Copy(io.Discard, br); err != nil {
 			return
 		}
+
 		_, _ = io.WriteString(conn, "bye")
 	})
 	conn := dialThrough(t, proxyURL)
@@ -330,6 +352,7 @@ func TestHTTPConnect_CancelAfterSuccessKeepsTunnel(t *testing.T) {
 	t.Parallel()
 
 	const greeting = "220 ftp.example ready\r\n"
+
 	proxyURL := startConnectProxy(t, serverFirstHandler("HTTP/1.1 200 Connection established\r\n\r\n", greeting, false))
 
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
@@ -355,6 +378,7 @@ func TestHTTPConnect_Non200Fails(t *testing.T) {
 			proxyClosed <- err
 			return
 		}
+
 		_, err := br.ReadByte()
 		proxyClosed <- err
 	})
@@ -391,10 +415,12 @@ func TestHTTPConnect_OversizedResponseHeader(t *testing.T) {
 				_, _ = io.WriteString(conn, head)
 				// The client closes after rejecting the header: the next read ends.
 				_, _ = io.Copy(io.Discard, conn)
+
 				close(closed)
 			})
 			_, err := HTTPConnect(t.Context(), &net.Dialer{}, proxyURL, nil, "tenders.example:443")
 			require.ErrorIs(t, err, ErrConnectResponseTooLarge)
+
 			select {
 			case <-closed:
 			case <-time.After(5 * time.Second):

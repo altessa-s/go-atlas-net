@@ -16,6 +16,7 @@ import (
 
 func TestRuleParse(t *testing.T) {
 	t.Parallel()
+
 	for _, tc := range []struct {
 		name    string
 		list    egressrule.List
@@ -58,11 +59,13 @@ func TestRuleParse(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
 			got, err := tc.rule.Parse(tc.list, 0)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				return
 			}
+
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -71,6 +74,7 @@ func TestRuleParse(t *testing.T) {
 
 func TestCheckUnknownList(t *testing.T) {
 	t.Parallel()
+
 	_, err := egressrule.Check("other", 0, egressrule.Matcher{Port: 1})
 	require.ErrorContains(t, err, "unknown list")
 }
@@ -84,6 +88,7 @@ func TestValidateDenyFirst(t *testing.T) {
 
 func TestNormalizeHost(t *testing.T) {
 	t.Parallel()
+
 	for in, want := range map[string]string{
 		"Example.COM.":   "example.com",
 		"bücher.example": "xn--bcher-kva.example",

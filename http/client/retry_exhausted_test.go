@@ -25,23 +25,29 @@ import (
 // statusServer answers every request with status and counts the hits.
 func statusServer(t *testing.T, status int) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
+
 	var hits atomic.Int32
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
 		w.WriteHeader(status)
 	}))
 	t.Cleanup(srv.Close)
+
 	return srv, &hits
 }
 
 func doGet(t *testing.T, c *http.Client, ctx context.Context, url string) error {
 	t.Helper()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	require.NoError(t, err)
+
 	resp, err := c.Do(req)
 	if err == nil {
 		_ = resp.Body.Close()
 	}
+
 	return err
 }
 
@@ -63,6 +69,7 @@ func TestRetryExhaustedStatus(t *testing.T) {
 	require.Equal(t, 3, re.Attempts)
 	require.Equal(t, http.MethodGet, re.Method)
 	require.Equal(t, srv.URL+"/orders", re.URL, "the URL omits the query string")
+
 	se := httpclient.IsUnexpectedStatusError(err)
 	require.NotNil(t, se)
 	require.Equal(t, http.StatusServiceUnavailable, se.Status)
@@ -94,6 +101,7 @@ func TestRetryExhaustedTransportError(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int32
+
 	reset := &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}
 	failing := httpx.RoundTripperFunc(func(*http.Request) (*http.Response, error) {
 		calls.Add(1)
@@ -103,6 +111,7 @@ func TestRetryExhaustedTransportError(t *testing.T) {
 		httpclient.WithRetryMax(2), fastRetries)
 	err := doGet(t, c, t.Context(), "http://upstream.invalid/x")
 	require.EqualValues(t, 3, calls.Load())
+
 	re := httpclient.IsRetryExhaustedError(err)
 	require.NotNil(t, re, "%v", err)
 	require.Equal(t, 3, re.Attempts)
@@ -121,8 +130,10 @@ func TestRetryNotExhausted(t *testing.T) {
 	require.NotNil(t, httpclient.IsUnexpectedStatusError(err))
 
 	unavailable, _ := statusServer(t, http.StatusServiceUnavailable)
+
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
+
 	slow := httpclient.New(loopback, httpclient.WithRetryMax(5), httpclient.WithRetryWait(time.Second, time.Second))
 	err = doGet(t, slow, ctx, unavailable.URL)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
@@ -134,7 +145,9 @@ func TestRetryExhaustedErrorHandler(t *testing.T) {
 	t.Parallel()
 
 	srv, _ := statusServer(t, http.StatusBadGateway)
+
 	var got error
+
 	handler := func(resp *http.Response, err error, _ int) (*http.Response, error) {
 		got = err
 		return nil, err

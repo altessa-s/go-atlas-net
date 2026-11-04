@@ -10,21 +10,12 @@ defaults:
   # Default output file name
   output: options_gen.go
 
-  # Format generated files with gci (import sorting)
-  # Use {file} placeholder for the file path, or it will be appended automatically
+  # Format generated files with gofmt only. make generate then runs
+  # golangci-lint fmt over every *_gen.go, which applies the gci import order
+  # of .golangci.yml exactly like make fmt (the standalone gci is not used: it
+  # misfiles standard packages newer than its own list, such as Go 1.27's uuid).
   # The command runs without a shell: quotes group arguments, shell operators are rejected
-  formatter: >-
-    gci write
-    -s standard
-    -s default
-    -s "prefix(google.golang.org)"
-    -s "prefix(golang.org)"
-    -s "prefix(github.com/altessa-s/go-atlas-core)"
-    -s "prefix(github.com/altessa-s/go-atlas-net)"
-    -s "prefix(github.com/altessa-s)"
-    -s blank
-    -s alias
-    {file}
+  formatter: gofmt -w {file}
 
   # Verbose output disabled by default
   verbose: false

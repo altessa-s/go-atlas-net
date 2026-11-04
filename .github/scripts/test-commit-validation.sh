@@ -49,6 +49,7 @@ check 0 'revert: restore endpoint validation'
 check 0 'build(devtools): bump golangci-lint'
 check 0 'docs(README): describe the quick start'
 check 0 'docs(docs): link the architecture notes'
+check 1 "feat($scope_b): reject recursion"$'\n\nBREAKING CHANGE: recursive definitions now fail before dispatch.'
 check 1 'fix(root): update configuration'
 check 1 'build(deps): '
 check 1 'fix(unknown): update configuration'
@@ -81,6 +82,7 @@ check 0 'Merge pull request #12 from altessa-s/feature/x'
 check 1 'Merge branch develop'
 check 1 'Merge the release'
 check 1 $'Merge branch \'develop\'\n\nGenerated with Claude Code'
+check 1 $'Merge branch \'release/v1.0.0\'\n\nBREAKING CHANGE: the root package was renamed.'
 
 # Reports, in the body only: a scopeless test subject is a commit type.
 check 0 'test: add unit, integration and benchmark tests'
@@ -107,4 +109,44 @@ check 0 "fix($scope_a): keep the detail"$'\n\nThe detail written by the maintain
 check 0 "fix($scope_b): keep the agents list"$'\n\nThe list created by the reagent loader stays sorted.'
 check 0 "fix($scope_a): preserve provider usage"$'\n\nCo-authored-by: Abbot Robotham <abbot@example.com>'
 check 0 "fix($scope_a): preserve provider usage"$'\n\nCo-authored-by: Maida Rain <maida@example.com>'
+# Range selection of validate-commits.sh in a scratch repository: origin/main
+# holds an invalid commit that origin/develop lacks, so a pull request against
+# main whose BASE_SHA is missing passes only when the range starts at main.
+range_repo=$(mktemp -d)
+trap 'rm -f "$message_file"; rm -rf "$range_repo"' EXIT
+mkdir -p "$range_repo/.github/scripts"
+cp commit_scopes.txt "$range_repo/"
+cp .github/scripts/validate-commit-message.sh .github/scripts/validate-commits.sh "$range_repo/.github/scripts/"
+rgit() { git -C "$range_repo" -c user.name=test -c user.email=test@example.com -c commit.gpgsign=false "$@"; }
+rgit init -q
+rgit add -A
+rgit commit -q -m 'build: add the validators'
+rgit update-ref refs/remotes/origin/develop HEAD
+rgit commit -q --allow-empty -m 'Not a conventional subject'
+rgit update-ref refs/remotes/origin/main HEAD
+rgit commit -q --allow-empty -m 'fix: keep the range'
+missing=0123456789abcdef0123456789abcdef01234567
+
+range_check() {
+    local expected=$1 actual=0
+    shift
+    (cd "$range_repo" && env -u BASE_SHA -u GITHUB_EVENT_NAME -u GITHUB_BASE_REF -u HEAD_SHA "$@" \
+        bash .github/scripts/validate-commits.sh) >/dev/null 2>&1 || actual=$?
+    if [[ "$actual" != "$expected" ]]; then
+        printf 'Unexpected status %s (wanted %s) from validate-commits.sh with %s\n' "$actual" "$expected" "$*" >&2
+        exit 1
+    fi
+    checks=$((checks + 1))
+}
+
+main_sha=$(rgit rev-parse origin/main)
+range_check 0 GITHUB_EVENT_NAME=pull_request BASE_SHA="$main_sha" GITHUB_BASE_REF=main
+range_check 0 GITHUB_EVENT_NAME=pull_request BASE_SHA="$missing" GITHUB_BASE_REF=main
+range_check 1 GITHUB_EVENT_NAME=pull_request BASE_SHA="$missing" GITHUB_BASE_REF=develop
+range_check 1 GITHUB_EVENT_NAME=pull_request BASE_SHA="$missing"
+range_check 1 GITHUB_EVENT_NAME=pull_request BASE_SHA="$missing" GITHUB_BASE_REF=release
+range_check 1 GITHUB_EVENT_NAME=push BASE_SHA="$missing"
+range_check 0 GITHUB_EVENT_NAME=push BASE_SHA="$main_sha"
+range_check 1 BASE_SHA="$missing"
+
 printf 'Passed %s commit validation checks\n' "$checks"

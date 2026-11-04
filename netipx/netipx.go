@@ -66,6 +66,7 @@ func IsPrivate(ip netip.Addr) bool {
 		b := ip.As16()
 		ip = netip.AddrFrom4([4]byte(b[12:]))
 	}
+
 	return InList(ip, privateAndLocalRanges)
 }
 

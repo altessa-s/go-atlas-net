@@ -41,5 +41,6 @@ func TestDefaultPooledTransportWithClient(t *testing.T) {
 
 	tr := httpclient.DefaultPooledTransport()
 	tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+
 	require.NotPanics(t, func() { httpclient.New(httpclient.WithTransport(tr)) })
 }

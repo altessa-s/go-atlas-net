@@ -40,6 +40,7 @@ func TestNew_CloseIdleConnectionsReachesTransport(t *testing.T) {
 			t.Parallel()
 
 			var closed atomic.Int32
+
 			srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = w.Write([]byte("ok"))
 			}))
@@ -54,6 +55,7 @@ func TestNew_CloseIdleConnectionsReachesTransport(t *testing.T) {
 			c := New(append(tc.opts, WithSSRFAllowedCIDRs(netip.MustParsePrefix("127.0.0.0/8")))...)
 			resp, err := c.Get(srv.URL)
 			require.NoError(t, err)
+
 			_, _ = io.Copy(io.Discard, resp.Body)
 			require.NoError(t, resp.Body.Close())
 			require.Zero(t, closed.Load(), "precondition: the connection is kept alive")

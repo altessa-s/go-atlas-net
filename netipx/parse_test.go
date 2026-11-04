@@ -16,6 +16,7 @@ import (
 
 func TestParsePrefixes(t *testing.T) {
 	t.Parallel()
+
 	tests := []struct {
 		name    string
 		in      []string
@@ -68,12 +69,15 @@ func TestParsePrefixes(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
 			got, err := netipx.ParsePrefixes(tc.in)
 			if tc.wantErr {
 				require.Error(t, err)
 				require.Nil(t, got)
+
 				return
 			}
+
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
 		})
@@ -87,16 +91,21 @@ func FuzzParsePrefixes(f *testing.F) {
 	for _, seed := range []string{"10.0.0.0/8", "192.168.1.1", "2001:db8::1", "fe80::1%eth0", "", " ", "10.0.0.0/33", "garbage"} {
 		f.Add(seed)
 	}
+
 	f.Fuzz(func(t *testing.T, in string) {
 		elems := strings.Split(in, ",")
+
 		got, err := netipx.ParsePrefixes(elems)
 		if err != nil {
 			require.Nil(t, got)
 			return
 		}
+
 		require.Len(t, got, len(elems))
+
 		for i, p := range got {
 			require.True(t, p.IsValid(), "prefix %q from %q is invalid", p, elems[i])
+
 			if addr, aerr := netip.ParseAddr(elems[i]); aerr == nil {
 				require.Equal(t, addr.BitLen(), p.Bits(), "bare address %q is not a host prefix", elems[i])
 			}

@@ -29,16 +29,20 @@ import (
 // are exposed via the returned channel pointers.
 func newProxyServer(t *testing.T) (srv *httptest.Server, lastHost, lastAuth *atomic.Value) {
 	t.Helper()
+
 	lastHost = &atomic.Value{}
 	lastAuth = &atomic.Value{}
+
 	lastHost.Store("")
 	lastAuth.Store("")
+
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lastHost.Store(r.URL.Host)
 		lastAuth.Store(r.Header.Get("Proxy-Authorization"))
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(srv.Close)
+
 	return srv, lastHost, lastAuth
 }
 
@@ -55,7 +59,9 @@ func TestWithProxyURL_RoutesThroughProxy(t *testing.T) {
 
 	resp, err := c.Do(req)
 	require.NoError(t, err)
+
 	defer resp.Body.Close()
+
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 	require.Equal(t, "example.invalid", lastHost.Load())
 }
@@ -75,6 +81,7 @@ func TestWithProxyFunc_DynamicRouting(t *testing.T) {
 		if strings.HasPrefix(req.URL.Host, "a.") {
 			return urlA, nil
 		}
+
 		return urlB, nil
 	}
 
@@ -113,7 +120,9 @@ func TestWithoutProxy_OverridesEarlierOption(t *testing.T) {
 	require.NoError(t, err)
 	resp, err := c.Do(req)
 	require.NoError(t, err)
+
 	defer resp.Body.Close()
+
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
@@ -147,6 +156,7 @@ func TestWithProxy_DoesNotMutateProvidedClient(t *testing.T) {
 	require.NoError(t, err)
 	resp, err := c.Do(req)
 	require.NoError(t, err)
+
 	defer resp.Body.Close()
 
 	require.Equal(t, "example.invalid", lastHost.Load())
@@ -189,6 +199,7 @@ func TestWithProxy_NilTransportClient_AppliesResolver(t *testing.T) {
 	require.NoError(t, err)
 	resp, err := c.Do(req)
 	require.NoError(t, err)
+
 	defer resp.Body.Close()
 
 	require.Equal(t, "example.invalid", lastHost.Load(), "proxy resolver was not consulted — nil Transport not normalized")
@@ -198,8 +209,10 @@ func TestWithProxy_NonTransportRoundTripper_NoOp(t *testing.T) {
 	t.Parallel()
 
 	var called atomic.Bool
+
 	rt := httpx.RoundTripperFunc(func(*http.Request) (*http.Response, error) {
 		called.Store(true)
+
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(strings.NewReader("")),
@@ -215,7 +228,9 @@ func TestWithProxy_NonTransportRoundTripper_NoOp(t *testing.T) {
 	require.NoError(t, err)
 	resp, err := c.Do(req)
 	require.NoError(t, err)
+
 	defer resp.Body.Close()
+
 	require.True(t, called.Load(), "custom RoundTripper was bypassed")
 }
 
@@ -264,7 +279,9 @@ func TestWithProxy_HostPortAuth(t *testing.T) {
 				require.NoError(t, err)
 				resp, err := c.Do(req)
 				require.NoError(t, err)
+
 				defer resp.Body.Close()
+
 				require.Equal(t, tc.wantAuth, lastAuth.Load())
 			})
 		}

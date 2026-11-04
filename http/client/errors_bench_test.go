@@ -12,28 +12,34 @@ import (
 
 func BenchmarkUnexpectedStatusError_Error(b *testing.B) {
 	err := UnexpectedStatusError{Status: 404, Method: "GET", Host: "example.com", URI: "/users"}
+
 	var s string
 	for b.Loop() {
 		s = err.Error()
 	}
+
 	_ = s
 }
 
 func BenchmarkResponseSizeError_Error(b *testing.B) {
 	err := &ResponseSizeError{Limit: 1000, Size: 2000}
+
 	var s string
 	for b.Loop() {
 		s = err.Error()
 	}
+
 	_ = s
 }
 
 func BenchmarkCircuitBreakerError_Error(b *testing.B) {
 	err := &CircuitBreakerError{Name: "test-cb", State: "open"}
+
 	var s string
 	for b.Loop() {
 		s = err.Error()
 	}
+
 	_ = s
 }
 

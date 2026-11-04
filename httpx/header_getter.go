@@ -26,6 +26,7 @@ func NewHTTPHeaderGetter(r *http.Request) *HTTPHeaderGetter {
 	if r == nil {
 		return nil
 	}
+
 	return &HTTPHeaderGetter{request: r}
 }
 
@@ -39,6 +40,7 @@ func (h *HTTPHeaderGetter) GetHeader(name string) []string {
 	if h == nil || h.request == nil {
 		return nil
 	}
+
 	return h.request.Header.Values(name)
 }
 
@@ -52,5 +54,6 @@ func (h *HTTPHeaderGetter) GetSingleHeader(name string) string {
 	if h == nil || h.request == nil {
 		return ""
 	}
+
 	return h.request.Header.Get(name)
 }

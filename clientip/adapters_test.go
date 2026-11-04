@@ -44,6 +44,7 @@ func TestExtract_GRPCHeaderGetter(t *testing.T) {
 
 	e, err := clientip.NewExtractor(clientip.WithTrustedPeers(netip.MustParsePrefix("10.0.0.0/8")))
 	require.NoError(t, err)
+
 	got := e.Extract(ctx, netip.MustParseAddr("10.0.0.1"), metadata.NewHeaderGetter(ctx))
 	require.Equal(t, "8.8.8.8", got.String())
 }

@@ -51,11 +51,14 @@ func TestDoerFunc(t *testing.T) {
 	t.Parallel()
 
 	errBoom := errors.New("boom")
-	var got *http.Request
-	var d httpx.Doer = httpx.DoerFunc(func(req *http.Request) (*http.Response, error) {
-		got = req
-		return &http.Response{StatusCode: http.StatusTeapot}, errBoom
-	})
+
+	var (
+		got *http.Request
+		d   httpx.Doer = httpx.DoerFunc(func(req *http.Request) (*http.Response, error) {
+			got = req
+			return &http.Response{StatusCode: http.StatusTeapot}, errBoom
+		})
+	)
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com", http.NoBody)
 	require.NoError(t, err)

@@ -30,18 +30,22 @@ import (
 // an IP literal before passing addr.
 func SOCKS5Dialer(proxyURL *url.URL, dialer *net.Dialer) (DialContextFunc, error) {
 	var auth *xproxy.Auth
+
 	if u := proxyURL.User; u != nil {
 		pwd, _ := u.Password()
 		auth = &xproxy.Auth{User: u.Username(), Password: pwd}
 	}
+
 	d, err := xproxy.SOCKS5("tcp", proxyURL.Host, auth, dialer)
 	if err != nil {
 		return nil, fmt.Errorf("build socks5 dialer for %s: %w", proxyURL.Host, err)
 	}
+
 	contextDialer, ok := d.(xproxy.ContextDialer)
 	if !ok {
 		return nil, fmt.Errorf("socks5 dialer for %s does not implement ContextDialer", proxyURL.Host)
 	}
+
 	return func(ctx context.Context, _, addr string) (net.Conn, error) {
 		return contextDialer.DialContext(ctx, "tcp", addr)
 	}, nil

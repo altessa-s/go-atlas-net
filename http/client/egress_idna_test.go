@@ -39,17 +39,19 @@ func TestEgressPolicy_InternationalizedHosts(t *testing.T) {
 		{"punycode rule, url host", "xn--bcher-kva.example", "bücher.example", true},
 		{"glob over unicode label", "*.bücher.example", "a.xn--bcher-kva.example", true},
 		{"other name", "bücher.example", "xn--bchr-kva.example", false},
-		{"ascii neighbour", "bücher.example", "bucher.example", false},
+		{"ascii neighbor", "bücher.example", "bucher.example", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			p := mustEgressPolicy(t, nil, []httpclient.EgressRule{{Host: tt.rule}})
+
 			err := p.Check(tt.host, publicAddr)
 			if !tt.refused {
 				require.NoError(t, err)
 				return
 			}
+
 			require.ErrorIs(t, err, httpclient.ErrSSRFBlocked)
 			require.Contains(t, httpclient.IsSSRFError(err).Rule, "deny[0]")
 		})
@@ -72,17 +74,21 @@ func TestEgressPolicy_DialedNameMatchesUnicodeRule(t *testing.T) {
 	t.Parallel()
 
 	errDialed := errors.New("dialed")
+
 	var dialed string
+
 	transport := &http.Transport{DialContext: func(_ context.Context, _, addr string) (net.Conn, error) {
 		dialed = addr
 		return nil, errDialed
 	}}
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://bücher.example/", http.NoBody)
 	require.NoError(t, err)
+
 	resp, err := transport.RoundTrip(req)
 	if resp != nil {
 		httpclient.CloseBody(resp.Body)
 	}
+
 	require.ErrorIs(t, err, errDialed)
 
 	host, _, err := net.SplitHostPort(dialed)
@@ -102,11 +108,13 @@ func TestWithEgressPolicy_ProxyUnicodeHosts(t *testing.T) {
 		{Host: "bücher.example"},
 		{Host: "xn--caf-dma.example"},
 	})
+
 	c := httpclient.New(httpclient.WithProxyURL(proxyURL), httpclient.WithEgressPolicy(policy), httpclient.WithRetryMax(0))
 	for _, target := range []string{"http://bücher.example/", "http://xn--bcher-kva.example/", "http://café.example/"} {
 		_, err := get(t, c, target)
 		require.ErrorIs(t, err, httpclient.ErrSSRFBlocked, target)
 	}
+
 	require.Empty(t, p.seen(), "a refused target never reaches the proxy")
 }
 
@@ -123,6 +131,7 @@ func TestEgressPolicy_UnicodeFullStops(t *testing.T) {
 	t.Parallel()
 
 	ascii := mustEgressPolicy(t, nil, []httpclient.EgressRule{{Host: "blocked.example"}})
+
 	for _, stop := range unicodeStops {
 		for _, host := range []string{"blocked.example" + stop, "blocked" + stop + "example", "BLOCKED" + stop + "example" + stop} {
 			require.ErrorIs(t, ascii.Check(host, publicAddr), httpclient.ErrSSRFBlocked, "%+q", host)
@@ -132,6 +141,7 @@ func TestEgressPolicy_UnicodeFullStops(t *testing.T) {
 		for _, host := range []string{"blocked.example", "a.xn--bcher-kva.example"} {
 			require.ErrorIs(t, spelled.Check(host, publicAddr), httpclient.ErrSSRFBlocked, "%+q", host)
 		}
+
 		require.NoError(t, spelled.Check("blocked.example.org", publicAddr))
 
 		for _, host := range []string{"blocked.example" + stop, "bücher" + stop} {
@@ -149,6 +159,7 @@ func TestWithEgressPolicy_ProxyUnicodeFullStops(t *testing.T) {
 	p, proxyURL := startProxy(t)
 	policy := mustEgressPolicy(t, loopbackAllow, []httpclient.EgressRule{{Host: "blocked.example"}})
 	c := httpclient.New(httpclient.WithProxyURL(proxyURL), httpclient.WithEgressPolicy(policy), httpclient.WithRetryMax(0))
+
 	for _, stop := range unicodeStops {
 		for _, target := range []string{
 			"http://blocked.example" + stop + "/",
@@ -160,6 +171,7 @@ func TestWithEgressPolicy_ProxyUnicodeFullStops(t *testing.T) {
 			require.ErrorIs(t, err, httpclient.ErrSSRFBlocked, "%+q", target)
 		}
 	}
+
 	require.Empty(t, p.seen(), "a refused target never reaches the proxy")
 }
 
@@ -171,6 +183,7 @@ func TestSSRFProxy_UnicodeFullStops(t *testing.T) {
 
 	p, proxyURL := startProxy(t)
 	c := httpclient.New(httpclient.WithProxyURL(proxyURL), proxyLoopback, httpclient.WithRetryMax(0))
+
 	for _, stop := range unicodeStops {
 		for _, target := range []string{
 			"http://169" + stop + "254" + stop + "169" + stop + "254/",
@@ -181,9 +194,11 @@ func TestSSRFProxy_UnicodeFullStops(t *testing.T) {
 			require.ErrorIs(t, err, httpclient.ErrSSRFBlocked, "%+q", target)
 		}
 	}
+
 	for _, target := range []string{"http://１６９．２５４．１６９．２５４/", "https://１０．０．０．１/"} {
 		_, err := get(t, c, target)
 		require.ErrorIs(t, err, httpclient.ErrSSRFBlocked, "%+q", target)
 	}
+
 	require.Empty(t, p.seen(), "a refused target never reaches the proxy")
 }

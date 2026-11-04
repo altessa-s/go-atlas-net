@@ -28,6 +28,7 @@ func TestClient_FailingHostDoesNotTripOtherHosts(t *testing.T) {
 		if req.URL.Host == "down.test" {
 			return nil, errors.New("connection refused")
 		}
+
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(strings.NewReader("ok")),
@@ -43,16 +44,19 @@ func TestClient_FailingHostDoesNotTripOtherHosts(t *testing.T) {
 	do := func(host string) error {
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+host+"/", nil)
 		require.NoError(t, err)
+
 		resp, err := c.Do(req)
 		if resp != nil {
 			_ = resp.Body.Close()
 		}
+
 		return err
 	}
 
 	for range DefaultBreakerMinRequests {
 		require.Error(t, do("down.test"))
 	}
+
 	err := do("down.test")
 	require.True(t, IsCircuitBreakerOpen(err), "failing host breaker must be open: %v", err)
 
@@ -68,6 +72,7 @@ func TestGetBreakerForHost(t *testing.T) {
 
 	t.Run("lazy breaker per host", func(t *testing.T) {
 		t.Parallel()
+
 		cb := newCB()
 		a := cb.getBreakerForHost("a.test")
 		b := cb.getBreakerForHost("b.test")
@@ -79,6 +84,7 @@ func TestGetBreakerForHost(t *testing.T) {
 
 	t.Run("cap routes overflow hosts to shared breaker", func(t *testing.T) {
 		t.Parallel()
+
 		cb := newCB(WithMaxHostBreakers(1))
 		require.NotSame(t, cb.CircuitBreaker, cb.getBreakerForHost("a.test"))
 		require.Same(t, cb.CircuitBreaker, cb.getBreakerForHost("b.test"))
@@ -87,12 +93,14 @@ func TestGetBreakerForHost(t *testing.T) {
 
 	t.Run("zero cap shares one breaker", func(t *testing.T) {
 		t.Parallel()
+
 		cb := newCB(WithMaxHostBreakers(0))
 		require.Same(t, cb.CircuitBreaker, cb.getBreakerForHost("a.test"))
 	})
 
 	t.Run("explicit hosts do not consume the cap", func(t *testing.T) {
 		t.Parallel()
+
 		cb := newCB(
 			WithMaxHostBreakers(1),
 			WithCircuitBreakerSettings("explicit.test", &CircuitBreakerSettings{Name: "explicit"}),
@@ -104,6 +112,7 @@ func TestGetBreakerForHost(t *testing.T) {
 
 	t.Run("lazy breaker inherits client settings", func(t *testing.T) {
 		t.Parallel()
+
 		cb := newCB(WithBreakerName("api"))
 		require.Equal(t, "api-a.test", cb.getBreakerForHost("a.test").Name())
 	})
@@ -123,6 +132,7 @@ func TestBreakersStatesIgnoresIdleSharedBreaker(t *testing.T) {
 		})
 		require.Error(t, err)
 	}
+
 	require.Equal(t, gobreaker.StateOpen, hostCB.State())
 
 	// The only used breaker is open; the idle shared one must not be reported.
@@ -149,6 +159,7 @@ func TestBreakersStatesCallbackCreatesBreaker(t *testing.T) {
 	t.Parallel()
 
 	var cb *circuitBreakerClient
+
 	settings := &CircuitBreakerSettings{
 		Timeout:     10 * time.Millisecond,
 		ReadyToTrip: func(gobreaker.Counts) bool { return true },
@@ -169,6 +180,7 @@ func TestBreakersStatesCallbackCreatesBreaker(t *testing.T) {
 
 	done := make(chan []gobreaker.State, 1)
 	go func() { done <- cb.States() }()
+
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):

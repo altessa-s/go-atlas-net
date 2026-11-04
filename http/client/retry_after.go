@@ -29,6 +29,7 @@ func ParseRetryAfter(h http.Header, now time.Time, maxDelay time.Duration) (d ti
 	if v == "" {
 		return 0, false
 	}
+
 	if isDigits(v) {
 		secs, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || secs > int64(math.MaxInt64/time.Second) {
@@ -41,11 +42,14 @@ func ParseRetryAfter(h http.Header, now time.Time, maxDelay time.Duration) (d ti
 		if err != nil {
 			return 0, false
 		}
+
 		d = max(at.Sub(now), 0)
 	}
+
 	if maxDelay > 0 {
 		d = min(d, maxDelay)
 	}
+
 	return d, true
 }
 
@@ -56,6 +60,7 @@ func isDigits(s string) bool {
 			return false
 		}
 	}
+
 	return s != ""
 }
 

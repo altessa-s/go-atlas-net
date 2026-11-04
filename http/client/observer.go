@@ -136,10 +136,12 @@ func (c *circuitBreakerClient) States() []gobreaker.State {
 	if c.sharedUsed.Load() || len(breakers) == 0 {
 		breakers = append(breakers, c.CircuitBreaker) //nolint:bodyclose // breaker pointer, no response
 	}
+
 	states := make([]gobreaker.State, len(breakers))
 	for i, b := range breakers {
 		states[i] = b.State()
 	}
+
 	return states
 }
 
@@ -148,9 +150,11 @@ func (c *circuitBreakerClient) HostState(host string) gobreaker.State {
 	c.mu.RLock()
 	breaker, exists := c.hostBreakers[host]
 	c.mu.RUnlock()
+
 	if !exists {
 		return gobreaker.StateClosed
 	}
+
 	return breaker.State()
 }
 

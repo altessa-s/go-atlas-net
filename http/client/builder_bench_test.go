@@ -17,7 +17,9 @@ func BenchmarkRequestBuilder_BuildWithContext(b *testing.B) {
 		headers:     map[string]string{"Accept": "application/json"},
 		queryParams: url.Values{"limit": {"50"}},
 	}
+
 	b.ReportAllocs()
+
 	for b.Loop() {
 		if _, err := rb.BuildWithContext(b.Context()); err != nil {
 			b.Fatal(err)

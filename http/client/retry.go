@@ -98,6 +98,7 @@ func (rt *retryRoundTripper) now() time.Time {
 	if rt.clock == nil {
 		return clock.Real().Now()
 	}
+
 	return rt.clock.Now()
 }
 
@@ -108,6 +109,7 @@ func (rt *retryRoundTripper) retryableStatus(resp *http.Response) *retryableStat
 	if rt.retryAfterMax > 0 && honorsRetryAfter(rt.retryAfterStatuses, resp.StatusCode) {
 		e.retryAfter, _ = ParseRetryAfter(resp.Header, rt.now(), rt.retryAfterMax)
 	}
+
 	return e
 }
 
@@ -119,6 +121,7 @@ func retryAfterDelay(backoff coreretry.NextDelayFunc) coreretry.NextDelayFunc {
 		if rs, ok := errors.AsType[*retryableStatusError](err); ok && d > 0 {
 			d = max(d, rs.retryAfter)
 		}
+
 		return d
 	}
 }
@@ -135,17 +138,22 @@ func (rt *retryRoundTripper) attemptRequest(
 	if rt.jar != nil {
 		out = req.Clone(ctx)
 		out.Header.Del("Cookie")
+
 		for _, v := range callerCookie {
 			out.Header.Add("Cookie", v)
 		}
+
 		for _, c := range rt.jar.Cookies(cookieURL(req)) {
 			out.AddCookie(c)
 		}
 	}
+
 	if rt.attemptTimeout <= 0 {
 		return out, nil
 	}
+
 	actx, cancel := context.WithTimeout(ctx, rt.attemptTimeout)
+
 	return out.WithContext(actx), cancel
 }
 
@@ -155,8 +163,10 @@ func cookieURL(req *http.Request) *url.URL {
 	if req.Host == "" {
 		return req.URL
 	}
+
 	u := req.URL.Clone()
 	u.Host = req.Host
+
 	return u
 }
 
@@ -172,26 +182,35 @@ func filterRedirectCookies(req *http.Request, via []*http.Request) {
 	if len(via) == 0 || via[0].Header.Get("Cookie") == "" || len(req.Header.Values("Cookie")) == 0 {
 		return // no initial cookies, or http.Client stripped them (other domain)
 	}
+
 	set := make(map[string]struct{})
 	addCookieNames(set, req.Response)
+
 	for _, r := range via[1:] {
 		addCookieNames(set, r.Response)
 	}
+
 	if len(set) == 0 {
 		return
 	}
+
 	var kept []string
+
 	changed := false
+
 	for _, c := range via[0].Cookies() {
 		if _, ok := set[c.Name]; ok {
 			changed = true
 			continue
 		}
+
 		kept = append(kept, c.Name+"="+c.Value)
 	}
+
 	if !changed {
 		return
 	}
+
 	slices.Sort(kept)                                  // as net/http, for a deterministic header
 	req.Header.Set("Cookie", strings.Join(kept, "; ")) // #nosec G119 -- a subset of the Cookie header net/http already forwarded
 }
@@ -201,6 +220,7 @@ func addCookieNames(set map[string]struct{}, resp *http.Response) {
 	if resp == nil {
 		return
 	}
+
 	for _, c := range resp.Cookies() {
 		set[c.Name] = struct{}{}
 	}
@@ -216,12 +236,15 @@ const maxRedirects = 10
 func redirectPolicy(check func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
 		filterRedirectCookies(req, via)
+
 		if check != nil {
 			return check(req, via)
 		}
+
 		if len(via) >= maxRedirects {
 			return errors.New("stopped after 10 redirects")
 		}
+
 		return nil
 	}
 }
@@ -232,6 +255,7 @@ func (rt *retryRoundTripper) storeCookies(req *http.Request, resp *http.Response
 	if rt.jar == nil || resp == nil {
 		return
 	}
+
 	if rc := resp.Cookies(); len(rc) > 0 {
 		rt.jar.SetCookies(cookieURL(req), rc)
 	}
@@ -243,11 +267,14 @@ func releaseWithBody(resp *http.Response, err error, cancel context.CancelFunc) 
 	if cancel == nil {
 		return resp
 	}
+
 	if err != nil || resp == nil || resp.Body == nil {
 		cancel()
 		return resp
 	}
+
 	resp.Body = &cancelOnClose{ReadCloser: resp.Body, cancel: cancel}
+
 	return resp
 }
 
@@ -261,6 +288,7 @@ type cancelOnClose struct {
 func (c *cancelOnClose) Close() error {
 	err := c.ReadCloser.Close()
 	c.cancel()
+
 	return err
 }
 
@@ -274,6 +302,7 @@ func (rt *retryRoundTripper) CloseIdleConnections() { closeIdleConnections(rt.ne
 // to the observer, timed from the start of the call (buffering included).
 func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	start := rt.now()
+
 	replay := rt.replayable(req)
 	if replay {
 		if bufErr := rt.bufferBody(req); bufErr != nil {
@@ -284,6 +313,7 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 			// buffer.
 			resp, err := rt.finish(nil, nil, bufErr, 0)
 			rt.requestDone(req, start, "unknown", 0, true)
+
 			return resp, err
 		}
 	}
@@ -301,6 +331,7 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		firstAttempt: true,
 	}
 	perRequestOpts := append(make([]coreretry.Option, 0, len(rt.retryOpts)+2), rt.retryOpts...)
+
 	perRequestOpts = append(perRequestOpts,
 		coreretry.WithShouldRetry(retryable),
 		coreretry.WithOnRetry(call.onRetry),
@@ -331,6 +362,7 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	failed := retryErr != nil || call.lastErr != nil
 	resp, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts)
 	rt.requestDone(req, start, statusClass, call.retryAttempts, failed)
+
 	return resp, err
 }
 
@@ -358,10 +390,12 @@ func (rt *retryRoundTripper) replayable(req *http.Request) bool {
 	if rt.retryPolicyHandler != nil {
 		return true
 	}
+
 	switch req.Method {
 	case "", http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace, http.MethodPut, http.MethodDelete:
 		return true
 	}
+
 	return req.Header.Get("Idempotency-Key") != "" || req.Header.Get("X-Idempotency-Key") != ""
 }
 
@@ -378,19 +412,26 @@ func (rt *retryRoundTripper) bufferBody(req *http.Request) error {
 	if req.Body == nil || req.GetBody != nil || rt.maxAttempts == 0 {
 		return nil
 	}
+
 	ctx := req.Context()
+
 	closeBody := sync.OnceValue(req.Body.Close)
 	if err := ctx.Err(); err != nil {
 		_ = closeBody()
 		return err
 	}
+
 	stop := context.AfterFunc(ctx, func() { _ = closeBody() })
 	buf := coreio.GetBuffer()
 	_, err := buf.ReadFrom(req.Body)
+
 	stop()
+
 	_ = closeBody()
+
 	if err != nil {
 		coreio.PutBuffer(buf)
+
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			// The read failed because the context ended and closed the body.
 			return ctxErr
@@ -398,6 +439,7 @@ func (rt *retryRoundTripper) bufferBody(req *http.Request) error {
 		// The body's error text is the caller's: render a trusted one.
 		return coreerrs.Wrapf(redactTransportError(err), "failed to read request body for retry buffering")
 	}
+
 	bodyBytes := bytes.Clone(buf.Bytes())
 	coreio.PutBuffer(buf)
 
@@ -408,6 +450,7 @@ func (rt *retryRoundTripper) bufferBody(req *http.Request) error {
 	// The original body was consumed by buffering; install the replay
 	// copy for the first attempt.
 	req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
 	return nil
 }
 
@@ -441,7 +484,9 @@ func (c *retryCall) onRetry(attempt int, err error, delay time.Duration) {
 		closeBody(c.lastResp)
 		c.lastResp.Body = http.NoBody
 	}
+
 	c.rt.observer.Retry(AttemptEvent{Method: c.req.Method, Host: c.req.URL.Hostname()})
+
 	if c.rt.logger != nil {
 		c.rt.logger.DebugContext(c.ctx,
 			"http client retrying request",
@@ -472,8 +517,10 @@ func (c *retryCall) try(ctx context.Context) error {
 			c.lastErr = coreerrs.Wrapf(redactTransportError(gbErr), "failed to rewind request body for retry")
 			return &NonRetryableError{Err: c.lastErr}
 		}
+
 		c.req.Body = body
 	}
+
 	c.firstAttempt = false
 
 	attemptReq, cancel := c.rt.attemptRequest(ctx, c.req, c.callerCookie)
@@ -508,6 +555,7 @@ func (c *retryCall) try(ctx context.Context) error {
 
 	classified := c.rt.classifyResponse(resp)
 	c.lastErr = classified
+
 	return classified
 }
 
@@ -524,16 +572,20 @@ func (c *retryCall) applyPolicy(ctx context.Context, resp *http.Response, err er
 		c.lastErr = refusal
 		return &NonRetryableError{Err: refusal}
 	}
+
 	if policyErr != nil {
 		c.lastErr = policyErr
 		if !retry {
 			return &NonRetryableError{Err: policyErr}
 		}
+
 		return policyErr
 	}
+
 	if !retry {
 		return nil // signal success to stop retrying
 	}
+
 	if err != nil {
 		return err
 	}
@@ -542,7 +594,9 @@ func (c *retryCall) applyPolicy(ctx context.Context, resp *http.Response, err er
 		c.lastErr = c.rt.retryableStatus(resp)
 		return c.lastErr
 	}
+
 	c.lastErr = nil
+
 	return nil
 }
 
@@ -557,6 +611,7 @@ func exhausted(req *http.Request, lastResp *http.Response, retryErr error, attem
 	if _, ok := errors.AsType[*retryableStatusError](retryErr); ok && lastResp != nil && lastResp.Request != nil {
 		last = unexpectedStatus(lastResp)
 	}
+
 	return &RetryExhaustedError{
 		LastError: last,
 		Attempts:  attempts,
@@ -577,6 +632,7 @@ func unexpectedStatus(resp *http.Response) *UnexpectedStatusError {
 			se.URI = cmp.Or(req.URL.EscapedPath(), "/")
 		}
 	}
+
 	return se
 }
 
@@ -591,12 +647,15 @@ func (rt *retryRoundTripper) finish(lastResp *http.Response, lastErr, retryErr e
 			// The handler's error is returned: it renders trusted text only,
 			// as a transport error does (it may quote resp.Request.URL).
 			err = redactTransportError(err)
+
 			if resp != lastResp {
 				// The handler did not hand the original response on.
 				closeBody(lastResp)
 			}
+
 			return discardOnError(resp, err)
 		}
+
 		return discardOnError(lastResp, retryErr)
 	}
 
@@ -611,6 +670,7 @@ func discardOnError(resp *http.Response, err error) (*http.Response, error) {
 		closeBody(resp)
 		return nil, err
 	}
+
 	return resp, nil
 }
 
@@ -631,9 +691,11 @@ func closeBody(resp *http.Response) {
 	if resp == nil || resp.Body == nil {
 		return
 	}
+
 	if drainable(resp) {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDiscardDrain))
 	}
+
 	_ = resp.Body.Close()
 }
 
@@ -642,7 +704,9 @@ func drainable(resp *http.Response) bool {
 	if resp.StatusCode == http.StatusSwitchingProtocols || resp.ContentLength > maxDiscardDrain || resp.Request == nil {
 		return false
 	}
+
 	_, ok := resp.Request.Context().Deadline()
+
 	return ok
 }
 
@@ -653,13 +717,17 @@ func retryable(err error) bool {
 	if _, ok := errors.AsType[*NonRetryableError](err); ok {
 		return false
 	}
+
 	if _, ok := errors.AsType[*CircuitBreakerError](err); ok {
 		return false
 	}
+
 	if _, ok := errors.AsType[*UnexpectedStatusError](err); ok {
 		return false
 	}
+
 	_, ok := errors.AsType[*ResponseSizeError](err)
+
 	return !ok
 }
 
@@ -693,6 +761,7 @@ func classifyTransportError(ctx context.Context, err error) error {
 		} else {
 			state = "too_many_requests"
 		}
+
 		return &CircuitBreakerError{
 			Name:  "httpclient",
 			State: state,
@@ -718,15 +787,19 @@ func permanentTransportError(err error) bool {
 	if _, ok := errors.AsType[x509.UnknownAuthorityError](err); ok {
 		return true
 	}
+
 	if _, ok := errors.AsType[x509.HostnameError](err); ok {
 		return true
 	}
+
 	if _, ok := errors.AsType[x509.CertificateInvalidError](err); ok {
 		return true
 	}
+
 	if _, ok := errors.AsType[*tls.CertificateVerificationError](err); ok {
 		return true
 	}
+
 	return unsupportedScheme(err)
 }
 
@@ -738,6 +811,7 @@ func (rt *retryRoundTripper) classifyResponse(resp *http.Response) error {
 	if retry {
 		return rt.retryableStatus(resp)
 	}
+
 	return err
 }
 
@@ -748,5 +822,6 @@ func ssrfRefusal(err error) error {
 	if err != nil && (IsSSRFError(err) != nil || errors.Is(err, ErrSSRFBlocked)) {
 		return err
 	}
+
 	return nil
 }

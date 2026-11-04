@@ -27,5 +27,6 @@ func FromContext(ctx context.Context) netip.Addr {
 	if !ok {
 		return netip.Addr{}
 	}
+
 	return ip
 }

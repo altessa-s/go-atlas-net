@@ -29,19 +29,23 @@ func TestIntegration_HeaderGetterOnServerRequest(t *testing.T) {
 		single string
 		absent []string
 	}
+
 	got := make(chan seen, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g := httpx.NewHTTPHeaderGetter(r)
 		got <- seen{all: g.GetHeader("x-forwarded-for"), single: g.GetSingleHeader("X-FORWARDED-FOR"), absent: g.GetHeader("X-Missing")}
+
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(srv.Close)
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
 	require.NoError(t, err)
+
 	req.Header["X-Forwarded-For"] = []string{"8.8.8.8, 10.0.0.1", "10.0.0.2"}
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
+
 	_ = resp.Body.Close()
 
 	s := <-got
@@ -62,13 +66,16 @@ func TestIntegration_RoundTripperAndDoerFuncs(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	var trips int
+
 	transport := httpx.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		trips++
 		req = req.Clone(req.Context())
 		req.Header.Set("X-Request-Id", "req-"+strconv.Itoa(trips))
+
 		return http.DefaultTransport.RoundTrip(req)
 	})
 	client := &http.Client{Transport: transport}
+
 	var doer httpx.Doer = httpx.DoerFunc(func(req *http.Request) (*http.Response, error) {
 		req.Header.Set("User-Agent", "atlas-it")
 		return client.Do(req)
@@ -81,9 +88,11 @@ func TestIntegration_RoundTripperAndDoerFuncs(t *testing.T) {
 		require.NoError(t, err)
 		body, err := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
+
 		require.NoError(t, err)
 		require.Equal(t, "req-"+strconv.Itoa(i)+"|atlas-it", string(body))
 	}
+
 	require.Equal(t, 2, trips)
 }
 
@@ -97,12 +106,15 @@ func TestIntegration_StatusClassesOfRealReplies(t *testing.T) {
 		if err != nil {
 			code = http.StatusBadRequest
 		}
+
 		if code >= 300 && code < 400 && code != http.StatusNotModified {
 			w.Header().Set("Location", "/200")
 		}
+
 		w.WriteHeader(code)
 	}))
 	t.Cleanup(srv.Close)
+
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 	cases := []struct {
@@ -126,6 +138,7 @@ func TestIntegration_StatusClassesOfRealReplies(t *testing.T) {
 			require.NoError(t, err)
 			resp, err := client.Do(req)
 			require.NoError(t, err)
+
 			_ = resp.Body.Close()
 			require.Equal(t, tc.status, resp.StatusCode)
 			require.Equal(t, tc.wantSuccess, httpx.IsSuccess(resp.StatusCode))

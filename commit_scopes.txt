@@ -10,15 +10,16 @@ README                      # Root README
 docs                        # Documentation
 
 # Packages
-clientip                    # Real client IP extraction
-egressrule                  # Egress rule grammar
-grpc/metadata               # Incoming gRPC metadata getter
-http/client                 # Outbound HTTP client
-http/client/limiters        # Client-side rate limiters
-httpx                       # HTTP helpers and header names
-netipx                      # IP address helpers
-proxydial                   # Forward-proxy dialers
-urlx                        # Base URL parsing and joining
+clientip                         # Real client IP extraction
+egressrule                       # Egress rule grammar
+grpc/metadata                    # Incoming gRPC metadata getter
+http/client                      # Outbound HTTP client
+http/client/limiters             # Client-side rate limiters
+http/client/limiters/hostpacer   # Waiting per-host request limiter
+httpx                            # HTTP helpers and header names
+netipx                           # IP address helpers
+proxydial                        # Forward-proxy dialers
+urlx                             # Base URL parsing and joining
 
 # Tooling
 devtools                    # Development tool dependencies

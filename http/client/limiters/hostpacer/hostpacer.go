@@ -12,11 +12,11 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/altessa-s/go-atlas-core/time/clock"
 
 	"github.com/altessa-s/go-atlas-net/http/client/limiters"
-
-	"golang.org/x/time/rate"
 )
 
 var _ limiters.RequestsLimiter = (*Pacer)(nil)
@@ -53,7 +53,9 @@ func New(interval time.Duration, burst int, opts ...Option) (*Pacer, error) {
 	if interval <= 0 || burst <= 0 {
 		return nil, fmt.Errorf("%w: interval %s, burst %d", ErrInvalidRate, interval, burst)
 	}
+
 	o := newOptions(opts...)
+
 	return &Pacer{
 		every:    rate.Every(interval),
 		burst:    burst,
@@ -73,19 +75,24 @@ func (p *Pacer) Allow(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	r, now := p.reserve(key)
+
 	delay := r.DelayFrom(now)
 	if delay <= 0 {
 		return nil
 	}
+
 	if deadline, ok := ctx.Deadline(); ok && deadline.Sub(now) < delay {
 		r.CancelAt(now)
 		return fmt.Errorf("%w: next slot for %q in %s", context.DeadlineExceeded, key, delay)
 	}
+
 	if err := p.clock.Sleep(ctx, delay); err != nil {
 		r.CancelAt(p.clock.Now())
 		return err
 	}
+
 	return nil
 }
 
@@ -93,6 +100,7 @@ func (p *Pacer) Allow(ctx context.Context, key string) error {
 func (p *Pacer) Len() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	return len(p.hosts)
 }
 
@@ -103,15 +111,19 @@ func (p *Pacer) Len() int {
 func (p *Pacer) reserve(key string) (*rate.Reservation, time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	now := p.clock.Now()
+
 	lim, ok := p.hosts[key]
 	if !ok {
 		if p.maxHosts > 0 && len(p.hosts) >= p.maxHosts {
 			p.sweep(now)
 		}
+
 		lim = rate.NewLimiter(p.every, p.burst)
 		p.hosts[key] = lim
 	}
+
 	return lim.ReserveN(now, 1), now
 }
 

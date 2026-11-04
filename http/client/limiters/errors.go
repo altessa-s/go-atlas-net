@@ -36,9 +36,11 @@ func (e *RateLimitError) Error() string {
 	if e.RetryAfter > 0 {
 		msg += fmt.Sprintf(", retry after %v", e.RetryAfter)
 	}
+
 	if e.Err != nil {
 		msg += ": " + e.Err.Error()
 	}
+
 	return msg
 }
 

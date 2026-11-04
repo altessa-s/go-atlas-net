@@ -44,19 +44,23 @@ func HTTPConnect(ctx context.Context, dialer *net.Dialer, proxyURL *url.URL, tls
 	if err != nil {
 		return nil, fmt.Errorf("dial proxy %s: %w", proxyURL.Host, err)
 	}
+
 	if proxyURL.Scheme == "https" {
 		tlsConn := tls.Client(conn, TLSConfig(proxyURL, tlsCfg))
 		if err = tlsConn.HandshakeContext(ctx); err != nil {
 			_ = conn.Close()
 			return nil, fmt.Errorf("tls handshake to proxy %s: %w", proxyURL.Host, err)
 		}
+
 		conn = tlsConn
 	}
+
 	tunnel, err := sendConnect(ctx, conn, addr, proxyURL.User)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
+
 	return tunnel, nil
 }
 
@@ -74,8 +78,10 @@ func sendConnect(ctx context.Context, conn net.Conn, addr string, auth *url.User
 	}
 	// A deadline in the past unblocks the pending Write/Read on cancellation.
 	interrupted := make(chan struct{})
+
 	stop := context.AfterFunc(ctx, func() {
 		_ = conn.SetDeadline(time.Unix(1, 0))
+
 		close(interrupted)
 	})
 	defer func() {
@@ -83,8 +89,10 @@ func sendConnect(ctx context.Context, conn net.Conn, addr string, auth *url.User
 			// Wait for the callback so it cannot poison the deadline after the
 			// reset below; the conn is unusable either way, so report ctx.
 			<-interrupted
+
 			err = fmt.Errorf("CONNECT to %s: %w", addr, ctx.Err())
 		}
+
 		_ = conn.SetDeadline(time.Time{})
 	}()
 
@@ -107,13 +115,16 @@ func sendConnect(ctx context.Context, conn net.Conn, addr string, auth *url.User
 	// limit wraps only the parser's reads; the tunnel then reads conn.
 	limited := &io.LimitedReader{R: conn, N: MaxConnectResponseHeaderBytes}
 	br := bufio.NewReader(limited)
+
 	resp, err := http.ReadResponse(br, req) //nolint:bodyclose // HTTPConnect owns conn; closing this body would drain tunnel or rejection bytes.
 	if err != nil {
 		if limited.N <= 0 {
 			return nil, fmt.Errorf("read CONNECT response from %s: %w", addr, ErrConnectResponseTooLarge)
 		}
+
 		return nil, fmt.Errorf("read CONNECT response from %s: %w", addr, err)
 	}
+
 	if resp.StatusCode != http.StatusOK {
 		// HTTPConnect closes the failed connection. Closing this response's
 		// body would drain it first and could block on an untrusted proxy.
@@ -130,5 +141,6 @@ func basicAuthHeader(u *url.Userinfo) string {
 	user := u.Username()
 	pwd, _ := u.Password()
 	creds := base64.StdEncoding.EncodeToString([]byte(user + ":" + pwd))
+
 	return "Basic " + creds
 }

@@ -20,6 +20,13 @@ import (
 type Option func(o *options)
 
 // WithAttemptTimeout sets the attemptTimeout option.
+//
+// attemptTimeout bounds each attempt of the retry layer — the limiter
+// wait under limiterPerAttempt, the connection, the reply and reading
+// its body — rather than the whole request: retries and their backoff
+// (Retry-After included) are not cut short by the first attempt. Zero or
+// negative leaves attempts bounded by the request context and
+// http.Client.Timeout.
 func WithAttemptTimeout(v time.Duration) Option {
 	return func(o *options) {
 		o.attemptTimeout = v
@@ -86,6 +93,13 @@ func WithClient(v *http.Client) Option {
 }
 
 // WithClock sets the clock option.
+//
+// clock is the time source of the retry layer: the elapsed-time budget
+// of retryMaxElapsed, the backoff and Retry-After waits between attempts,
+// a Retry-After HTTP date and the request duration reported to the
+// observer. Defaults to the system clock; pass a clock.Fake in tests.
+// Context deadlines (attemptTimeout, per-request timeouts) and the
+// circuit breaker keep the system clock.
 func WithClock(v clock.Clock) Option {
 	return func(o *options) {
 		switch rv := reflect.ValueOf(v); rv.Kind() {
@@ -101,6 +115,13 @@ func WithClock(v clock.Clock) Option {
 }
 
 // WithCookieJar sets the cookieJar option.
+//
+// cookieJar is the cookie jar the retry layer owns. Every attempt and
+// every redirect hop sends the caller's Cookie header plus the jar's
+// cookies for its URL, read at attempt time, and every reply's cookies
+// are stored exactly once, when received — retried, failed and redirect
+// replies included. When unset, the jar of a WithClient client is used
+// the same way; the returned *http.Client has no Jar either way.
 func WithCookieJar(v http.CookieJar) Option {
 	return func(o *options) {
 		o.cookieJar = v
@@ -108,6 +129,15 @@ func WithCookieJar(v http.CookieJar) Option {
 }
 
 // WithEgressPolicy sets the egressPolicy option.
+//
+// egressPolicy, set by the generated WithEgressPolicy, replaces the
+// built-in private-address check of SSRF protection with an allow/deny
+// [EgressPolicy] (deny wins; allow rules exempt private ranges). The
+// ssrfAllowedCIDRs exemptions still apply on top of it. It has an effect
+// only while SSRF protection is on (the default): WithoutSSRFProtection
+// disables it too. With an explicit proxy, a target host name is checked
+// against the deny rules that need no address, a literal IP target in
+// full; the proxy resolves host names.
 func WithEgressPolicy(v *EgressPolicy) Option {
 	return func(o *options) {
 		if v == nil {
@@ -140,6 +170,11 @@ func WithLimiter(v limiters.RequestsLimiter) Option {
 }
 
 // WithLimiterPerAttempt enables the limiterPerAttempt option.
+//
+// limiterPerAttempt, set by the generated WithLimiterPerAttempt, places
+// the limiter under the retry layer instead of around it, so every retry
+// attempt waits on (or is refused by) the limiter too, not only the
+// first. A refusal is never retried by the default classification.
 func WithLimiterPerAttempt() Option {
 	return func(o *options) {
 		value := true
@@ -158,6 +193,11 @@ func WithLogger(v *slog.Logger) Option {
 }
 
 // WithMaxHostBreakers sets the maxHostBreakers option.
+//
+// maxHostBreakers caps the number of per-host breakers created lazily for
+// hosts without explicit [CircuitBreakerSettings]. Once reached, further
+// hosts share the client-wide breaker. Zero or negative disables lazy
+// per-host breakers entirely.
 func WithMaxHostBreakers(v int) Option {
 	return func(o *options) {
 		o.maxHostBreakers = v
@@ -172,6 +212,9 @@ func WithMaxResponseSize(v int64) Option {
 }
 
 // WithObserver sets the observer option.
+//
+// observer receives the client's telemetry events (see [Observer]).
+// Defaults to [NoopObserver]; set it with the generated WithObserver.
 func WithObserver(v Observer) Option {
 	return func(o *options) {
 		switch rv := reflect.ValueOf(v); rv.Kind() {
@@ -187,6 +230,10 @@ func WithObserver(v Observer) Option {
 }
 
 // WithProxyFunc sets the proxy option.
+//
+// proxy resolves the proxy URL for outgoing requests. The auto-generated
+// setter is named WithProxyFunc to free the WithProxy name for the more
+// common host/port/auth convenience setter declared below.
 func WithProxyFunc(v ProxyFunc) Option {
 	return func(o *options) {
 		o.proxy = v
@@ -194,6 +241,13 @@ func WithProxyFunc(v ProxyFunc) Option {
 }
 
 // WithProxyTLSConfig sets the proxyTLSConfig option.
+//
+// proxyTLSConfig customizes the TLS handshake to https:// proxies
+// (e.g. a corporate proxy fronted by a self-signed cert). When set,
+// the client routes outbound requests through a custom DialContext
+// that performs TCP+TLS+CONNECT manually, isolating proxy TLS from
+// the destination's TLSClientConfig. Has no effect for plain http://
+// or socks5:// proxies.
 func WithProxyTLSConfig(v *tls.Config) Option {
 	return func(o *options) {
 		if v == nil {
@@ -204,6 +258,14 @@ func WithProxyTLSConfig(v *tls.Config) Option {
 }
 
 // WithoutRedirects disables the withoutRedirects option.
+//
+// withoutRedirects stops the client from following redirects: a 3xx
+// reply is returned to the caller as the response, body unread
+// (CheckRedirect returns http.ErrUseLastResponse). It is applied to the
+// client before the proxy, SSRF and circuit-breaker layers copy it, so
+// every layer keeps it, and it replaces the CheckRedirect of a client
+// supplied with WithClient (on a copy; the caller's client is unchanged).
+// Set it with the generated WithoutRedirects.
 func WithoutRedirects() Option {
 	return func(o *options) {
 		value := true
@@ -212,6 +274,13 @@ func WithoutRedirects() Option {
 }
 
 // WithoutRetry disables the withoutRetry option.
+//
+// withoutRetry disables the retry layer: every request is sent exactly
+// once and its outcome is returned as it is — the response for any
+// status, body unread, or the transport error (its message redacted, its
+// causes intact). It overrides retryMax
+// and retryPolicyHandler. Set it with the generated WithoutRetry when the
+// caller classifies replies itself or retries around the client.
 func WithoutRetry() Option {
 	return func(o *options) {
 		value := true
@@ -220,6 +289,10 @@ func WithoutRetry() Option {
 }
 
 // WithRetryAfterMax sets the retryAfterMax option.
+//
+// retryAfterMax caps the Retry-After of a 429/503 reply the retry layer
+// honors: the next retry waits at least that long (beyond retryWaitMax),
+// up to this cap. Zero or negative ignores Retry-After.
 func WithRetryAfterMax(v time.Duration) Option {
 	return func(o *options) {
 		o.retryAfterMax = v
@@ -227,6 +300,9 @@ func WithRetryAfterMax(v time.Duration) Option {
 }
 
 // WithRetryAfterStatuses sets the retryAfterStatuses option.
+//
+// retryAfterStatuses are the reply statuses whose Retry-After the retry
+// layer honors (see retryAfterMax). Defaults to 429 and 503.
 func WithRetryAfterStatuses(v ...int) Option {
 	return func(o *options) {
 		if len(v) == 0 {
@@ -248,6 +324,8 @@ func WithRetryAfterStatuses(v ...int) Option {
 }
 
 // WithRetryFactor sets the retryFactor option.
+//
+// retryFactor is the exponential growth of the retry backoff per attempt.
 func WithRetryFactor(v float64) Option {
 	return func(o *options) {
 		o.retryFactor = v
@@ -255,6 +333,9 @@ func WithRetryFactor(v float64) Option {
 }
 
 // WithRetryJitter sets the retryJitter option.
+//
+// retryJitter is the fraction (0-1) of each backoff added as random
+// jitter; zero makes the delays deterministic.
 func WithRetryJitter(v float64) Option {
 	return func(o *options) {
 		o.retryJitter = v
@@ -269,6 +350,9 @@ func WithRetryMax(v int) Option {
 }
 
 // WithRetryMaxElapsed sets the retryMaxElapsed option.
+//
+// retryMaxElapsed bounds the wall-clock time of all attempts of one
+// request; zero or negative leaves it to the context and retryMax.
 func WithRetryMaxElapsed(v time.Duration) Option {
 	return func(o *options) {
 		o.retryMaxElapsed = v
@@ -303,6 +387,10 @@ func WithRetryWaitMin(v time.Duration) Option {
 }
 
 // WithRetryableStatuses sets the retryableStatuses option.
+//
+// retryableStatuses are the reply statuses the built-in retry
+// classification retries; it applies when no retryPolicyHandler is set.
+// Defaults to DefaultRetryableStatuses(): 408, 429, 502, 503 and 504.
 func WithRetryableStatuses(v ...int) Option {
 	return func(o *options) {
 		if len(v) == 0 {

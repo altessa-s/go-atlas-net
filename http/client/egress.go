@@ -132,6 +132,7 @@ func (r EgressReason) String() string {
 	if r > 0 && int(r) < len(egressReasonNames) {
 		return egressReasonNames[r]
 	}
+
 	return "EgressReason(" + strconv.Itoa(int(r)) + ")"
 }
 
@@ -158,10 +159,12 @@ func (d EgressDecision) Err() error {
 	if d.Allowed {
 		return nil
 	}
+
 	e := &SSRFError{Host: d.Host, Rule: d.Rule}
 	if d.IP.IsValid() {
 		e.IP = d.IP.String()
 	}
+
 	return e
 }
 
@@ -183,15 +186,19 @@ func NewEgressPolicy(allow, deny []EgressRule) (*EgressPolicy, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrInvalidEgressRule, err)
 		}
+
 		p.deny = append(p.deny, compileEgressRule(egressrule.Deny, i, m))
 	}
+
 	for i, r := range allow {
 		m, err := egressrule.Check(egressrule.Allow, i, matcherOf(r))
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrInvalidEgressRule, err)
 		}
+
 		p.allow = append(p.allow, compileEgressRule(egressrule.Allow, i, m))
 	}
+
 	return p, nil
 }
 
@@ -210,15 +217,19 @@ func ParseEgressPolicy(allow, deny []egressrule.Rule) (*EgressPolicy, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrInvalidEgressRule, err)
 		}
+
 		p.deny = append(p.deny, compileEgressRule(egressrule.Deny, i, m))
 	}
+
 	for i, r := range allow {
 		m, err := r.Parse(egressrule.Allow, i)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrInvalidEgressRule, err)
 		}
+
 		p.allow = append(p.allow, compileEgressRule(egressrule.Allow, i, m))
 	}
+
 	return p, nil
 }
 
@@ -231,29 +242,36 @@ func matcherOf(r EgressRule) egressrule.Matcher {
 // matcher m of rule index of list, labeled by its name or its position.
 func compileEgressRule(list egressrule.List, index int, m egressrule.Matcher) egressRule {
 	c := egressRule{host: m.Host, cidr: m.CIDR, port: m.Port}
+
 	name := m.Name
 	if name == "" {
 		name = fmt.Sprintf("%s[%d]", list, index)
 	}
+
 	c.label = egressRuleLabel(name, c)
+
 	return c
 }
 
 func egressRuleLabel(name string, r egressRule) string {
 	var b strings.Builder
 	b.WriteString(name)
+
 	if r.host != "" {
 		b.WriteString(" host=")
 		b.WriteString(r.host)
 	}
+
 	if r.cidr.IsValid() {
 		b.WriteString(" cidr=")
 		b.WriteString(r.cidr.String())
 	}
+
 	if r.port != 0 {
 		b.WriteString(" port=")
 		b.WriteString(strconv.Itoa(int(r.port)))
 	}
+
 	return b.String()
 }
 
@@ -264,15 +282,18 @@ func (r *egressRule) matches(host string, ip netip.Addr, port uint16) bool {
 	if r.port != 0 && r.port != port {
 		return false
 	}
+
 	if r.cidr.IsValid() {
 		if !ip.IsValid() || !r.cidr.Contains(ip) {
 			return false
 		}
 	}
+
 	if r.host != "" {
 		matched, _ := path.Match(r.host, host) // the pattern was validated by egressrule.Check
 		return matched
 	}
+
 	return true
 }
 
@@ -289,6 +310,7 @@ func NormalizeEgressHostGlob(pattern string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%w: host %q: %w", ErrInvalidEgressRule, pattern, err)
 	}
+
 	return host, nil
 }
 
@@ -313,20 +335,24 @@ func (p *EgressPolicy) Explain(host string, dst netip.AddrPort) EgressDecision {
 	if !ip.IsValid() {
 		return EgressDecision{Reason: EgressInvalidAddress, Host: host}
 	}
+
 	normHost := egressrule.NormalizeHost(host)
 	for i := range p.deny {
 		if p.deny[i].matches(normHost, ip, dst.Port()) {
 			return EgressDecision{Reason: EgressDenyRule, Rule: p.deny[i].label, Host: host, IP: ip}
 		}
 	}
+
 	for i := range p.allow {
 		if p.allow[i].matches(normHost, ip, dst.Port()) {
 			return EgressDecision{Allowed: true, Reason: EgressAllowRule, Rule: p.allow[i].label, Host: host, IP: ip}
 		}
 	}
+
 	if netipx.IsPrivate(ip) {
 		return EgressDecision{Reason: EgressPrivateDefault, Host: host, IP: ip}
 	}
+
 	return EgressDecision{Allowed: true, Reason: EgressPublic, Host: host, IP: ip}
 }
 
@@ -342,11 +368,13 @@ func (p *EgressPolicy) CheckHost(host string, port uint16) error {
 	if ip, err := netip.ParseAddr(normHost); err == nil {
 		return p.Check(host, netip.AddrPortFrom(ip, port))
 	}
+
 	for i := range p.deny {
 		if !p.deny[i].cidr.IsValid() && p.deny[i].matches(normHost, netip.Addr{}, port) {
 			return &SSRFError{Host: host, Rule: p.deny[i].label}
 		}
 	}
+
 	return nil
 }
 
@@ -367,9 +395,11 @@ func (p *EgressPolicy) DialContext(d *net.Dialer) func(ctx context.Context, netw
 		if err != nil {
 			return nil, err
 		}
+
 		dialer := *d
 		dialer.Control = nil
 		dialer.ControlContext = p.control(host, d.Control, d.ControlContext)
+
 		return dialer.DialContext(ctx, network, address)
 	}
 }
@@ -386,9 +416,11 @@ func (p *EgressPolicy) control(
 		if err != nil {
 			return err
 		}
+
 		if err := p.Check(host, dst); err != nil {
 			return err
 		}
+
 		switch {
 		case nextCtx != nil:
 			return nextCtx(ctx, network, address, c)
@@ -406,16 +438,20 @@ func (p *EgressPolicy) withAllowedCIDRs(prefixes []netip.Prefix) *EgressPolicy {
 	if len(prefixes) == 0 {
 		return p
 	}
+
 	out := &EgressPolicy{deny: p.deny, allow: make([]egressRule, 0, len(p.allow)+len(prefixes))}
 	out.allow = append(out.allow, p.allow...)
+
 	for i, prefix := range prefixes {
 		if !prefix.IsValid() {
 			continue
 		}
+
 		r := egressRule{cidr: egressrule.NormalizePrefix(prefix)}
 		r.label = egressRuleLabel(fmt.Sprintf("allowedCIDRs[%d]", i), r)
 		out.allow = append(out.allow, r)
 	}
+
 	return out
 }
 
@@ -430,9 +466,11 @@ func (p *EgressPolicy) guardProxy(proxy ProxyFunc) ProxyFunc {
 		if err != nil || u == nil {
 			return u, err
 		}
+
 		if cerr := p.CheckHost(req.URL.Hostname(), targetPort(req.URL)); cerr != nil {
 			return nil, cerr
 		}
+
 		return u, nil
 	}
 }
@@ -445,10 +483,13 @@ func targetPort(u *url.URL) uint16 {
 		if err != nil {
 			return 0
 		}
+
 		return uint16(n)
 	}
+
 	if u.Scheme == schemeHTTPS {
 		return defaultHTTPSPort
 	}
+
 	return defaultHTTPPort
 }
