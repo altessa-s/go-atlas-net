@@ -49,11 +49,12 @@ build it.
 
 ## Development
 
-| Command         | Description                                          |
-|-----------------|------------------------------------------------------|
-| `make test`     | Run all tests                                        |
-| `make lint`     | golangci-lint with the repo config (`.golangci.yml`) |
-| `make generate` | Install `optgen` and run go generate                 |
-| `make bench`    | Run all benchmarks                                   |
+| Command         | Description                                                                 |
+|-----------------|-----------------------------------------------------------------------------|
+| `make test`     | Run all tests                                                               |
+| `make lint`     | Tidy, format and run golangci-lint with the repo config (`.golangci.yml`)   |
+| `make generate` | Build the pinned `optgen` and golangci-lint into `bin/` and run go generate |
+| `make bench`    | Run all benchmarks                                                          |
 
-`make generate` installs [`optgen`](https://github.com/altessa-s/go-optgen) at the version pinned in `devtools/go.mod`.
+`make generate` builds [`optgen`](https://github.com/altessa-s/go-optgen) at the version pinned in `devtools/go.mod` into `bin/optgen` and runs
+it from there; nothing is installed into `GOPATH` and an `optgen` on `PATH` is not used. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for every target.
