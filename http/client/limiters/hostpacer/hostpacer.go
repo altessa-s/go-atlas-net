@@ -12,11 +12,11 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/altessa-s/go-atlas-core/time/clock"
 
 	"github.com/altessa-s/go-atlas-net/http/client/limiters"
-
-	"golang.org/x/time/rate"
 )
 
 var _ limiters.RequestsLimiter = (*Pacer)(nil)
