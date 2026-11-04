@@ -32,6 +32,7 @@ build it.
 | [egressrule](./egressrule)       | Egress allow/deny rule grammar shared by configuration schemas and the HTTP client egress engine    |
 | [grpc/metadata](./grpc/metadata) | Adapts incoming gRPC metadata to the shared header getter                                        |
 | [http/client](./http/client)     | Resilient outbound HTTP client: retries, circuit breaker, SSRF guard, egress policy, proxies     |
+| [hmacsign](./hmacsign)           | HMAC signing and verification of request bodies (Stripe/GitHub schemes), key rotation, replay cache; `httpsign` for `net/http` |
 | [httpx](./httpx)                 | `RoundTripperFunc`, `Doer`, `IsSuccess` / `IsRedirect`, shared header names, `HTTPHeaderGetter`  |
 | [netipx](./netipx)               | `IsPrivate`, `IsTrusted`, `InList`, `ParsePrefixes`                                              |
 | [proxydial](./proxydial)         | Forward-proxy dialers (HTTP CONNECT, SOCKS5)                                                     |
