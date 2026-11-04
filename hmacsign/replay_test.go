@@ -171,3 +171,15 @@ func TestNewVerifierRejectsToleranceTooLargeForReplayCache(t *testing.T) {
 	_, err = hmacsign.NewVerifier(hmacsign.Stripe(), []byte(replaySecret), hmacsign.WithTolerance(huge))
 	require.NoError(t, err, "without a replay cache the tolerance is not limited")
 }
+
+func TestNewVerifierTreatsTypedNilReplayCacheAsAbsent(t *testing.T) {
+	t.Parallel()
+
+	var cache *hmacsign.MemoryReplayCache
+	v, err := hmacsign.NewVerifier(hmacsign.Stripe(), []byte(replaySecret), hmacsign.WithReplayCache(cache))
+	require.NoError(t, err)
+
+	body := []byte(`{"id":"evt_1"}`)
+	header := mustSigner(t, hmacsign.Stripe(), []byte(replaySecret)).Sign(body)
+	require.NotPanics(t, func() { require.NoError(t, v.Verify(header, body)) })
+}

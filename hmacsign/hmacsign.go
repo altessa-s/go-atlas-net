@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/altessa-s/go-atlas-core/types/nilcheck"
 )
 
 // Signer produces the signature header for an outbound request body under a
@@ -73,6 +75,10 @@ type Verifier struct {
 // The verifier owns copies of the secrets.
 func NewVerifier(scheme Scheme, secret []byte, opts ...Option) (*Verifier, error) {
 	o := newOptions(opts...)
+	if nilcheck.IsNil(o.replayCache) {
+		// A typed nil cache would pass the nil checks and panic on use.
+		o.replayCache = nil
+	}
 	if o.replayCache != nil && o.tolerance > math.MaxInt64/replayWindowSpan {
 		return nil, ErrToleranceTooLarge
 	}

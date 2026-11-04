@@ -37,6 +37,8 @@ type options struct {
 	// non-zero tolerance: entries live for twice the tolerance, the width of
 	// the acceptance window. A scheme without a timestamp (GitHub) is
 	// integrity-only and never consults it. Nil (the default) disables it.
+	// With a cache set, [NewVerifier] rejects a tolerance above half the
+	// largest time.Duration ([ErrToleranceTooLarge]).
 	replayCache ReplayCache
 
 	// secrets holds additional accepted secrets beyond the primary one passed to

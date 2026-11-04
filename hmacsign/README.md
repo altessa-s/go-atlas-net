@@ -47,7 +47,7 @@ owned by the signer/verifier, so a custom scheme only describes the wire format.
 | `WithSecrets(...[]byte)`     | `Verifier`        | Additional accepted secrets for zero-downtime rotation. Empty secrets are dropped; a non-empty one under `MinSecretLength` fails `NewVerifier`. |
 | `WithTolerance(time.Duration)` | `Verifier`      | Replay window for a timestamped scheme. Default 5m; `0` disables the timestamp check.    |
 | `WithClock(Clock)`           | both              | Override the time source (tests pin it; signing stamps it). Default `time.Now`.          |
-| `WithReplayCache(ReplayCache)` | `Verifier`      | Reject a second delivery of an accepted signature (`ErrReplayed`). Timestamped schemes only. Default off. |
+| `WithReplayCache(ReplayCache)` | `Verifier`      | Reject a second delivery of an accepted signature (`ErrReplayed`). Timestamped schemes only. Default off. With a cache, a tolerance above half the largest `time.Duration` fails with `ErrToleranceTooLarge`. |
 
 ## Usage
 
@@ -94,6 +94,7 @@ signature.
 | `ErrSignatureMismatch`       | The header was well-formed but authentic to no configured secret.                    |
 | `ErrSecretTooShort`          | `NewSigner`/`NewVerifier` got a secret shorter than `MinSecretLength` (construction). |
 | `ErrReplayed`                | The `ReplayCache` had already accepted this signature (a duplicate delivery).        |
+| `ErrToleranceTooLarge`       | `NewVerifier`: a replay cache is set and twice the tolerance overflows `time.Duration`. |
 
 Match with `errors.Is`.
 
