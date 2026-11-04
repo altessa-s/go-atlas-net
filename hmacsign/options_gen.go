@@ -18,6 +18,14 @@ func WithClock(v Clock) Option {
 }
 
 // WithReplayCache sets the replayCache option.
+//
+// replayCache, when set, rejects a second delivery of an already accepted
+// signature ([ErrReplayed]). It applies only to a timestamped scheme with a
+// non-zero tolerance: entries live for twice the tolerance, the width of
+// the acceptance window. A scheme without a timestamp (GitHub) is
+// integrity-only and never consults it. Nil (the default) disables it.
+// With a cache set, [NewVerifier] rejects a tolerance above half the
+// largest time.Duration ([ErrToleranceTooLarge]).
 func WithReplayCache(v ReplayCache) Option {
 	return func(o *options) {
 		o.replayCache = v

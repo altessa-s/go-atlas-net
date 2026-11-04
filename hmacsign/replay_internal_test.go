@@ -24,11 +24,13 @@ func TestMemoryReplayCacheSweepsShortEntriesBehindLongOnes(t *testing.T) {
 	require.NoError(t, err)
 
 	time.Sleep(5 * time.Millisecond)
+
 	_, err = c.CheckAndStore("next", time.Hour)
 	require.NoError(t, err)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	require.NotContains(t, c.entries, "short", "the expired short-TTL entry was not swept")
 	require.Len(t, c.entries, 2)
 }

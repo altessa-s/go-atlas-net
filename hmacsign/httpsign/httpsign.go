@@ -24,13 +24,16 @@ import (
 // [hmacsign.ErrTimestampOutOfTolerance]).
 func Verify(v *hmacsign.Verifier, r *http.Request, opts ...Option) ([]byte, error) {
 	o := newOptions(opts...)
+
 	body, err := readBody(r, o.maxBytes)
 	if err != nil {
 		return nil, err
 	}
+
 	if err := v.Verify(r.Header.Get(v.HeaderName()), body); err != nil {
 		return nil, err
 	}
+
 	return body, nil
 }
 
@@ -41,16 +44,19 @@ func Verify(v *hmacsign.Verifier, r *http.Request, opts ...Option) ([]byte, erro
 // r.Body.
 func Middleware(v *hmacsign.Verifier, opts ...Option) func(http.Handler) http.Handler {
 	o := newOptions(opts...)
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			body, err := readBody(r, o.maxBytes)
 			if err == nil {
 				err = v.Verify(r.Header.Get(v.HeaderName()), body)
 			}
+
 			if err != nil {
 				o.errorHandler(w, r, err)
 				return
 			}
+
 			next.ServeHTTP(w, r)
 		})
 	}
@@ -63,14 +69,19 @@ func readBody(r *http.Request, maxBytes int64) ([]byte, error) {
 	if r.Body == nil {
 		return nil, nil
 	}
+
 	body, err := coreio.ReadAllLimited(r.Body, maxBytes)
 	_ = r.Body.Close()
+
 	if errors.Is(err, coreio.ErrReadLimitExceeded) {
 		return nil, errors.Join(ErrBodyTooLarge, err)
 	}
+
 	if err != nil {
 		return nil, fmt.Errorf("httpsign: read body: %w", err)
 	}
+
 	r.Body = io.NopCloser(bytes.NewReader(body))
+
 	return body, nil
 }

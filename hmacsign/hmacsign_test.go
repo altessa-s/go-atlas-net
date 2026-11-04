@@ -20,16 +20,20 @@ func fixedClock(t time.Time) hmacsign.Clock { return func() time.Time { return t
 // mustSigner builds a Signer and fails the test on a construction error.
 func mustSigner(t testing.TB, scheme hmacsign.Scheme, secret []byte, opts ...hmacsign.Option) *hmacsign.Signer {
 	t.Helper()
+
 	s, err := hmacsign.NewSigner(scheme, secret, opts...)
 	require.NoError(t, err)
+
 	return s
 }
 
 // mustVerifier builds a Verifier and fails the test on a construction error.
 func mustVerifier(t testing.TB, scheme hmacsign.Scheme, secret []byte, opts ...hmacsign.Option) *hmacsign.Verifier {
 	t.Helper()
+
 	v, err := hmacsign.NewVerifier(scheme, secret, opts...)
 	require.NoError(t, err)
+
 	return v
 }
 
@@ -75,8 +79,10 @@ func TestConstructorsRejectShortSecret(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
 			_, err := hmacsign.NewVerifier(hmacsign.GitHub(), tc.secret, tc.opts...)
 			require.ErrorIs(t, err, hmacsign.ErrSecretTooShort)
+
 			if tc.opts == nil {
 				_, err = hmacsign.NewSigner(hmacsign.GitHub(), tc.secret)
 				require.ErrorIs(t, err, hmacsign.ErrSecretTooShort)
@@ -174,6 +180,7 @@ func TestSecretRotation(t *testing.T) {
 
 func TestStripeTimestampBounds(t *testing.T) {
 	t.Parallel()
+
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
 		name string
@@ -189,9 +196,11 @@ func TestStripeTimestampBounds(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
 			secret, body := []byte("secret_secret_0123"), []byte("event")
 			signer := mustSigner(t, hmacsign.Stripe(), secret, hmacsign.WithClock(fixedClock(tc.at)))
 			verifier := mustVerifier(t, hmacsign.Stripe(), secret, hmacsign.WithClock(fixedClock(now)))
+
 			err := verifier.Verify(signer.Sign(body), body)
 			if tc.ok {
 				require.NoError(t, err)
@@ -218,6 +227,7 @@ func (plainScheme) ParseHeader(header string) (time.Time, [][]byte, error) {
 	if err != nil || len(raw) == 0 {
 		return time.Time{}, nil, hmacsign.ErrMalformedSignature
 	}
+
 	return time.Time{}, [][]byte{raw}, nil
 }
 
@@ -225,6 +235,7 @@ func TestCustomScheme(t *testing.T) {
 	t.Parallel()
 
 	var scheme hmacsign.Scheme = plainScheme{}
+
 	body := []byte("payload")
 	secret := []byte("s3cr3t_s3cr3t_0123")
 
@@ -243,6 +254,7 @@ func TestGitHubKnownAnswer(t *testing.T) {
 
 	secret := []byte("It's a Secret to Everybody")
 	body := []byte("Hello, World!")
+
 	const want = "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17"
 
 	require.Equal(t, want, mustSigner(t, hmacsign.GitHub(), secret).Sign(body))
@@ -251,11 +263,13 @@ func TestGitHubKnownAnswer(t *testing.T) {
 
 func TestConstructorsOwnSecret(t *testing.T) {
 	t.Parallel()
+
 	secret := []byte("original secret value")
 	body := []byte("payload")
 	signer := mustSigner(t, hmacsign.GitHub(), secret)
 	verifier := mustVerifier(t, hmacsign.GitHub(), secret)
 	header := signer.Sign(body)
+
 	clear(secret)
 	require.Equal(t, header, signer.Sign(body))
 	require.NoError(t, verifier.Verify(header, body))

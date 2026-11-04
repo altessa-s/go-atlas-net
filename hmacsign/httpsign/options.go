@@ -30,6 +30,7 @@ var defaultErrorHandler ErrorHandler = func(w http.ResponseWriter, _ *http.Reque
 		http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)
 		return
 	}
+
 	http.Error(w, "invalid signature", http.StatusUnauthorized)
 }
 

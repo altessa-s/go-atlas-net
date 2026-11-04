@@ -22,19 +22,24 @@ const secret = "whsec_test_secret_0123"
 
 func signedRequest(t *testing.T, body string) *http.Request {
 	t.Helper()
+
 	signer, err := hmacsign.NewSigner(hmacsign.GitHub(), []byte(secret))
 	require.NoError(t, err)
+
 	header := signer.Sign([]byte(body))
 	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(body))
 	req.Header.Set(hmacsign.GitHub().HeaderName(), header)
+
 	return req
 }
 
 // mustVerifier builds a GitHub-scheme verifier for the shared test secret.
 func mustVerifier(t testing.TB) *hmacsign.Verifier {
 	t.Helper()
+
 	v, err := hmacsign.NewVerifier(hmacsign.GitHub(), []byte(secret))
 	require.NoError(t, err)
+
 	return v
 }
 
@@ -42,10 +47,13 @@ func TestMiddlewarePassesAuthentic(t *testing.T) {
 	t.Parallel()
 
 	v := mustVerifier(t)
+
 	var seen string
+
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body) // body must still be readable downstream
 		seen = string(b)
+
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -131,6 +139,7 @@ func TestVerifyMaxInt64Limit(t *testing.T) {
 	body, err := httpsign.Verify(v, r, httpsign.WithMaxBytes(math.MaxInt64))
 	require.NoError(t, err)
 	require.Equal(t, "payload", string(body))
+
 	restored, err := io.ReadAll(r.Body)
 	require.NoError(t, err)
 	require.Equal(t, body, restored)

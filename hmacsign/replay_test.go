@@ -43,6 +43,7 @@ func TestReplayCacheRejectsReplayUnderRotatedSecret(t *testing.T) {
 	t.Parallel()
 
 	const newSecret, oldSecret = "whsec_rotation_new_01", "whsec_rotation_old_01"
+
 	now := time.Unix(1_700_000_000, 0)
 	body := []byte("event")
 	sigNew := mustSigner(t, hmacsign.Stripe(), []byte(newSecret), hmacsign.WithClock(fixedClock(now))).Sign(body)
@@ -93,6 +94,7 @@ func TestReplayCacheSkippedWithoutTimestamp(t *testing.T) {
 	t.Parallel()
 
 	cache := &recordingCache{}
+
 	for _, tc := range []struct {
 		name   string
 		scheme hmacsign.Scheme
@@ -110,6 +112,7 @@ func TestReplayCacheSkippedWithoutTimestamp(t *testing.T) {
 			require.NoError(t, v.Verify(header, body))
 		})
 	}
+
 	require.Zero(t, cache.calls)
 }
 
@@ -157,6 +160,7 @@ type recordingCache struct {
 func (c *recordingCache) CheckAndStore(_ string, ttl time.Duration) (bool, error) {
 	c.calls++
 	c.ttl = ttl
+
 	return false, c.err
 }
 
@@ -176,6 +180,7 @@ func TestNewVerifierTreatsTypedNilReplayCacheAsAbsent(t *testing.T) {
 	t.Parallel()
 
 	var cache *hmacsign.MemoryReplayCache
+
 	v, err := hmacsign.NewVerifier(hmacsign.Stripe(), []byte(replaySecret), hmacsign.WithReplayCache(cache))
 	require.NoError(t, err)
 

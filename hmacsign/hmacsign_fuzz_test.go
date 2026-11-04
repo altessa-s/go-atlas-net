@@ -26,6 +26,7 @@ func schemeFor(sel uint8) hmacsign.Scheme {
 	if sel%2 == 0 {
 		return hmacsign.GitHub()
 	}
+
 	return hmacsign.Stripe()
 }
 

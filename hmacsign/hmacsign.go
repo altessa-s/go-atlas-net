@@ -37,6 +37,7 @@ func NewSigner(scheme Scheme, secret []byte, opts ...Option) (*Signer, error) {
 	if err := checkSecret(secret); err != nil {
 		return nil, err
 	}
+
 	return &Signer{scheme: scheme, secret: bytes.Clone(secret), opts: newOptions(opts...)}, nil
 }
 
@@ -45,6 +46,7 @@ func checkSecret(secret []byte) error {
 	if len(secret) < MinSecretLength {
 		return fmt.Errorf("%w: got %d bytes, need at least %d", ErrSecretTooShort, len(secret), MinSecretLength)
 	}
+
 	return nil
 }
 
@@ -79,17 +81,21 @@ func NewVerifier(scheme Scheme, secret []byte, opts ...Option) (*Verifier, error
 		// A typed nil cache would pass the nil checks and panic on use.
 		o.replayCache = nil
 	}
+
 	if o.replayCache != nil && o.tolerance > math.MaxInt64/replayWindowSpan {
 		return nil, ErrToleranceTooLarge
 	}
+
 	secrets := make([][]byte, 0, 1+len(o.secrets))
 	secrets = append(secrets, bytes.Clone(secret))
+
 	secrets = append(secrets, o.secrets...)
 	for _, s := range secrets {
 		if err := checkSecret(s); err != nil {
 			return nil, err
 		}
 	}
+
 	return &Verifier{scheme: scheme, secrets: secrets, opts: o}, nil
 }
 
@@ -115,12 +121,14 @@ func (v *Verifier) Verify(header string, body []byte) error {
 	if err != nil {
 		return err
 	}
+
 	timed := !signedAt.IsZero() && v.opts.tolerance > 0
 	if timed {
 		if err := v.checkTimestamp(signedAt); err != nil {
 			return err
 		}
 	}
+
 	msg := v.scheme.Message(signedAt, body)
 	for _, secret := range v.secrets {
 		expected := digest(secret, msg)
@@ -129,10 +137,12 @@ func (v *Verifier) Verify(header string, body []byte) error {
 				if timed && v.opts.replayCache != nil {
 					return v.checkReplay(msg)
 				}
+
 				return nil
 			}
 		}
 	}
+
 	return ErrSignatureMismatch
 }
 
@@ -150,13 +160,16 @@ const replayWindowSpan = 2
 // for every other secret it verifies under.
 func (v *Verifier) checkReplay(msg []byte) error {
 	key := sha256.Sum256(msg)
+
 	seen, err := v.opts.replayCache.CheckAndStore(hex.EncodeToString(key[:]), replayWindowSpan*v.opts.tolerance)
 	if err != nil {
 		return fmt.Errorf("hmacsign: replay cache: %w", err)
 	}
+
 	if seen {
 		return ErrReplayed
 	}
+
 	return nil
 }
 
@@ -167,5 +180,6 @@ func (v *Verifier) checkTimestamp(ts time.Time) error {
 	if ts.Before(now.Add(-v.opts.tolerance)) || ts.After(now.Add(v.opts.tolerance)) {
 		return fmt.Errorf("%w: signed at %s", ErrTimestampOutOfTolerance, ts)
 	}
+
 	return nil
 }

@@ -18,16 +18,19 @@ import (
 func BenchmarkMiddleware(b *testing.B) {
 	v := mustVerifier(b)
 	body := `{"event":"payment.succeeded","id":"evt_bench"}`
+
 	signer, err := hmacsign.NewSigner(hmacsign.GitHub(), []byte(secret))
 	if err != nil {
 		b.Fatal(err)
 	}
+
 	header := signer.Sign([]byte(body))
 	handler := httpsign.Middleware(v)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 	}))
 
 	b.ReportAllocs()
+
 	for b.Loop() {
 		req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(body))
 		req.Header.Set(v.HeaderName(), header)

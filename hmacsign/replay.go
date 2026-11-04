@@ -54,13 +54,17 @@ func (c *MemoryReplayCache) CheckAndStore(key string, ttl time.Duration) (bool, 
 			}
 		}
 	}
+
 	if exp, ok := c.entries[key]; ok && now.Before(exp) {
 		return true, nil
 	}
+
 	exp := now.Add(ttl)
+
 	c.entries[key] = exp
 	if c.nextSweep.IsZero() || exp.Before(c.nextSweep) {
 		c.nextSweep = exp
 	}
+
 	return false, nil
 }

@@ -46,6 +46,7 @@ type Scheme interface {
 func digest(secret, msg []byte) []byte {
 	m := hmac.New(sha256.New, secret)
 	m.Write(msg)
+
 	return m.Sum(nil)
 }
 
@@ -78,6 +79,7 @@ func (githubScheme) ParseHeader(header string) (time.Time, [][]byte, error) {
 	if err != nil || len(raw) == 0 {
 		return time.Time{}, nil, fmt.Errorf("%w: bad digest", ErrMalformedSignature)
 	}
+
 	return time.Time{}, [][]byte{raw}, nil
 }
 
@@ -101,29 +103,35 @@ func (stripeScheme) ParseHeader(header string) (time.Time, [][]byte, error) {
 		haveTS bool
 		sigs   [][]byte
 	)
+
 	for part := range strings.SplitSeq(header, ",") {
 		key, val, ok := strings.Cut(strings.TrimSpace(part), "=")
 		if !ok {
 			continue
 		}
+
 		switch key {
 		case "t":
 			n, err := strconv.ParseInt(val, 10, 64)
 			if err != nil {
 				return time.Time{}, nil, fmt.Errorf("%w: bad timestamp", ErrMalformedSignature)
 			}
+
 			tsUnix, haveTS = n, true
 		case "v1":
 			raw, err := hex.DecodeString(val)
 			if err != nil {
 				return time.Time{}, nil, fmt.Errorf("%w: bad v1 digest", ErrMalformedSignature)
 			}
+
 			sigs = append(sigs, raw)
 		}
 	}
+
 	if !haveTS || len(sigs) == 0 {
 		return time.Time{}, nil, fmt.Errorf("%w: missing t or v1", ErrMalformedSignature)
 	}
+
 	return time.Unix(tsUnix, 0), sigs, nil
 }
 
@@ -132,5 +140,6 @@ func (stripeScheme) ParseHeader(header string) (time.Time, [][]byte, error) {
 func stripeMessage(tsUnix int64, body []byte) []byte {
 	msg := strconv.AppendInt(nil, tsUnix, 10)
 	msg = append(msg, '.')
+
 	return append(msg, body...)
 }
