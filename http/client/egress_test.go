@@ -25,8 +25,10 @@ import (
 
 func mustEgressPolicy(tb testing.TB, allow, deny []httpclient.EgressRule) *httpclient.EgressPolicy {
 	tb.Helper()
+
 	p, err := httpclient.NewEgressPolicy(allow, deny)
 	require.NoError(tb, err)
+
 	return p
 }
 
@@ -34,6 +36,7 @@ func TestNewEgressPolicy_InvalidRules(t *testing.T) {
 	t.Parallel()
 
 	cidr := netip.MustParsePrefix("10.0.0.0/8")
+
 	tests := []struct {
 		name  string
 		allow []httpclient.EgressRule
@@ -75,6 +78,7 @@ func TestParseEgressPolicy(t *testing.T) {
 		[]egressrule.Rule{{Host: "*.Internal", Port: 22}},
 	)
 	require.NoError(t, err)
+
 	d := p.Explain("api.corp", netip.MustParseAddrPort("10.1.2.3:443"))
 	require.True(t, d.Allowed)
 	require.Equal(t, "corp cidr=10.1.0.0/16", d.Rule)
@@ -93,6 +97,7 @@ func TestParseEgressPolicy(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
 			p, err := httpclient.ParseEgressPolicy(tc.allow, tc.deny)
 			require.ErrorIs(t, err, httpclient.ErrInvalidEgressRule)
 			require.ErrorContains(t, err, tc.want)
@@ -174,11 +179,13 @@ func TestEgressPolicy_Check(t *testing.T) {
 				require.NoError(t, err)
 				return
 			}
+
 			require.ErrorIs(t, err, httpclient.ErrSSRFBlocked)
 			ssrfErr := httpclient.IsSSRFError(err)
 			require.NotNil(t, ssrfErr)
 			require.Equal(t, tc.host, ssrfErr.Host)
 			require.Equal(t, netip.MustParseAddrPort(tc.addr).Addr().WithZone("").Unmap().String(), ssrfErr.IP)
+
 			if tc.rule {
 				require.NotEmpty(t, ssrfErr.Rule)
 				require.Contains(t, ssrfErr.Error(), ssrfErr.Rule)
@@ -200,6 +207,7 @@ func TestEgressPolicy_NoRulesIsDefaultGuard(t *testing.T) {
 	t.Parallel()
 
 	p := mustEgressPolicy(t, nil, nil)
+
 	for _, addr := range []string{"8.8.8.8:443", "10.0.0.1:80", "[::ffff:127.0.0.1]:80", "169.254.169.254:80", "[fd00::1]:80"} {
 		want := httpclient.SSRFDialControl()("tcp", addr, nil)
 		got := p.Check("h", netip.MustParseAddrPort(addr))
@@ -233,21 +241,25 @@ func TestEgressPolicy_DialContext(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
+
 	go func() {
 		for {
 			conn, aerr := ln.Accept()
 			if aerr != nil {
 				return
 			}
+
 			_ = conn.Close()
 		}
 	}()
+
 	addr := ln.Addr().String()
 
 	t.Run("allowed address is the dialed one", func(t *testing.T) {
 		t.Parallel()
 
 		var seen atomic.Value
+
 		d := &net.Dialer{Control: func(_, address string, _ syscall.RawConn) error {
 			seen.Store(address)
 			return nil
@@ -265,6 +277,7 @@ func TestEgressPolicy_DialContext(t *testing.T) {
 		t.Parallel()
 
 		var hook atomic.Int32
+
 		d := &net.Dialer{ControlContext: func(context.Context, string, string, syscall.RawConn) error {
 			hook.Add(1)
 			return nil
@@ -314,6 +327,7 @@ func TestWithEgressPolicy_Client(t *testing.T) {
 			http.Redirect(w, r, r.URL.Query().Get("to"), http.StatusFound)
 			return
 		}
+
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(srv.Close)
@@ -363,6 +377,7 @@ func TestWithEgressPolicy_Client(t *testing.T) {
 		t.Parallel()
 
 		var finals atomic.Int32
+
 		final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			finals.Add(1)
 			w.WriteHeader(http.StatusNoContent)
@@ -411,6 +426,7 @@ func TestWithEgressPolicy_Proxy(t *testing.T) {
 		_, err := get(t, c, target)
 		require.ErrorIs(t, err, httpclient.ErrSSRFBlocked, target)
 	}
+
 	require.Empty(t, p.seen(), "a refused target never reaches the proxy")
 
 	// A host name outside the deny rules is resolved by the proxy; the
@@ -426,6 +442,7 @@ func TestSSRFError_Message(t *testing.T) {
 
 	plain := &httpclient.SSRFError{Host: "h", IP: "10.0.0.1"}
 	require.NotContains(t, plain.Error(), "rule")
+
 	ruled := &httpclient.SSRFError{Host: "h", IP: "8.8.8.8", Rule: "deny[0] port=25"}
 	require.Contains(t, ruled.Error(), "deny[0] port=25")
 	require.ErrorIs(t, ruled, httpclient.ErrSSRFBlocked)

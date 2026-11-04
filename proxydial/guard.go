@@ -43,17 +43,22 @@ func guardDial(dial DialContextFunc, guard AddrGuard, resolver Resolver) DialCon
 		if err != nil {
 			return nil, err
 		}
+
 		var errs []error
+
 		for _, target := range targets {
 			conn, dialErr := dial(ctx, network, target.String())
 			if dialErr == nil {
 				return conn, nil
 			}
+
 			errs = append(errs, dialErr)
+
 			if ctx.Err() != nil {
 				break
 			}
 		}
+
 		return nil, errors.Join(errs...)
 	}
 }
@@ -66,6 +71,7 @@ func approvedTargets(ctx context.Context, network, addr string, guard AddrGuard,
 	if err != nil {
 		return nil, fmt.Errorf("proxy destination %q: %w", addr, err)
 	}
+
 	port, err := strconv.ParseUint(portText, 10, 16)
 	if err != nil {
 		return nil, fmt.Errorf("proxy destination %q: invalid port: %w", addr, err)
@@ -79,6 +85,7 @@ func approvedTargets(ctx context.Context, network, addr string, guard AddrGuard,
 		if err != nil {
 			return nil, fmt.Errorf("resolve proxy destination %s: %w", host, err)
 		}
+
 		if len(ips) == 0 {
 			return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
 		}
@@ -90,8 +97,10 @@ func approvedTargets(ctx context.Context, network, addr string, guard AddrGuard,
 		if err := guard(host, dst); err != nil {
 			return nil, fmt.Errorf("proxy destination %s refused: %w", host, err)
 		}
+
 		targets = append(targets, dst)
 	}
+
 	return targets, nil
 }
 

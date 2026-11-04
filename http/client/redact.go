@@ -50,6 +50,7 @@ func redactedURL(u *url.URL) string {
 	if u == nil {
 		return ""
 	}
+
 	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path, RawPath: u.RawPath}).String()
 }
 
@@ -60,6 +61,7 @@ func redactedRawURL(raw string) string {
 	if err != nil {
 		return "(unparsable URL)"
 	}
+
 	return redactedURL(u)
 }
 
@@ -97,21 +99,26 @@ func RedactError(err error) error {
 		if redactedURLError(e) {
 			return err
 		}
+
 		return redactURLError(e)
 	}
+
 	if !errorGraphWithin(err) {
 		// Too large to search for *url.Errors, and to keep as a cause: errors.Is and errors.As on the result would not return.
 		return uninspectable()
 	}
+
 	urlErrs, _ := findURLErrors(err) // complete: findURLErrors visits a part of the graph errorGraphWithin bounded
 	if len(urlErrs) == 0 {
 		return err
 	}
+
 	texts := make([]string, len(urlErrs))
 	for i, ue := range urlErrs {
 		urlErrs[i] = redactURLError(ue)
 		texts[i] = urlErrs[i].Error()
 	}
+
 	return &transportError{cause: err, msg: strings.Join(texts, "\n"), urlErr: urlErrs[0]}
 }
 
@@ -139,8 +146,10 @@ func findURLErrors(err error) (urlErrs []*url.Error, complete bool) {
 		if visited >= maxRedactedErrors {
 			return nil, false
 		}
+
 		e := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
+
 		switch u := e.(type) { //nolint:errorlint // the tree is walked one layer at a time
 		case nil:
 		case *url.Error:
@@ -150,6 +159,7 @@ func findURLErrors(err error) (urlErrs []*url.Error, complete bool) {
 			if len(stack)+len(children) > maxRedactedErrors {
 				return nil, false
 			}
+
 			for _, child := range slices.Backward(children) { // pushed last to first, so the first child is visited first
 				stack = append(stack, child)
 			}
@@ -157,6 +167,7 @@ func findURLErrors(err error) (urlErrs []*url.Error, complete bool) {
 			stack = append(stack, u.Unwrap())
 		}
 	}
+
 	return urlErrs, true
 }
 
@@ -182,12 +193,15 @@ func redactTransportError(err error) error {
 	if err == nil {
 		return nil
 	}
+
 	if _, ok := err.(*transportError); ok { //nolint:errorlint // only the outermost layer is checked
 		return err
 	}
+
 	if !errorGraphWithin(err) {
 		return uninspectable()
 	}
+
 	return &transportError{cause: err, msg: renderTrusted(err)}
 }
 
@@ -215,6 +229,7 @@ func (e *transportError) As(target any) bool {
 		*p = e.urlErr
 		return true
 	}
+
 	return false
 }
 
@@ -224,10 +239,12 @@ func (e *transportError) Timeout() bool {
 	if !errorGraphWithin(e.cause) {
 		return false
 	}
+
 	t, ok := errors.AsType[interface {
 		error
 		Timeout() bool
 	}](e.cause)
+
 	return ok && t.Timeout()
 }
 
@@ -237,10 +254,12 @@ func (e *transportError) Temporary() bool {
 	if !errorGraphWithin(e.cause) {
 		return false
 	}
+
 	t, ok := errors.AsType[interface {
 		error
 		Temporary() bool
 	}](e.cause)
+
 	return ok && t.Temporary()
 }
 
@@ -251,6 +270,7 @@ func trustedMessage(err error) string {
 	if !errorGraphWithin(err) {
 		return "HTTP transport error (redacted)"
 	}
+
 	return renderTrusted(err)
 }
 
@@ -262,14 +282,17 @@ func errorGraphWithin(err error) bool {
 		if visited >= maxRedactedErrors {
 			return false
 		}
+
 		e := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
+
 		switch u := e.(type) { //nolint:errorlint // the graph is walked one layer at a time
 		case interface{ Unwrap() []error }:
 			children := u.Unwrap()
 			if len(stack)+len(children) > maxRedactedErrors {
 				return false
 			}
+
 			stack = append(stack, children...)
 		case interface{ Unwrap() error }:
 			if next := u.Unwrap(); next != nil {
@@ -277,6 +300,7 @@ func errorGraphWithin(err error) bool {
 			}
 		}
 	}
+
 	return true
 }
 
@@ -292,6 +316,7 @@ func renderTrusted(err error) string {
 			return msg
 		}
 	}
+
 	return fmt.Sprintf("HTTP transport error (%T)", rootCause(err))
 }
 
@@ -312,6 +337,7 @@ func renderRetryWrapper(err error) (string, bool) {
 	case *retryableStatusError:
 		return e.Error(), true
 	}
+
 	return "", false
 }
 
@@ -322,28 +348,36 @@ func renderOwnError(err error) (string, bool) {
 	if e, ok := errors.AsType[*transportError](err); ok {
 		return e.msg, true
 	}
+
 	if e, ok := errors.AsType[*SSRFError](err); ok {
 		rule := e.Rule
 		if rule != "" && !egressRuleLabelRe.MatchString(rule) {
 			rule = "(unlabeled rule)"
 		}
+
 		return (&SSRFError{Host: hostOnly(e.Host), IP: hostOnly(e.IP), Rule: rule}).Error(), true
 	}
+
 	if e, ok := errors.AsType[*ResponseSizeError](err); ok {
 		return e.Error(), true
 	}
+
 	if e, ok := errors.AsType[*CircuitBreakerError](err); ok {
 		return breakerMessage(e), true
 	}
+
 	if e, ok := errors.AsType[*UnexpectedStatusError](err); ok {
 		return statusMessage(*e), true
 	}
+
 	if e, ok := errors.AsType[UnexpectedStatusError](err); ok {
 		return statusMessage(e), true
 	}
+
 	if e, ok := errors.AsType[*limiters.RateLimitError](err); ok {
 		return rateLimitMessage(e), true
 	}
+
 	return "", false
 }
 
@@ -354,10 +388,12 @@ func breakerMessage(e *CircuitBreakerError) string {
 	if !breakerNameRe.MatchString(name) {
 		name = "(unnamed)"
 	}
+
 	state := e.State
 	if state != "open" && state != "too_many_requests" && state != "half-open" {
 		state = "unavailable"
 	}
+
 	return (&CircuitBreakerError{Name: name, State: state}).Error()
 }
 
@@ -368,9 +404,11 @@ func rateLimitMessage(e *limiters.RateLimitError) string {
 	if e.RetryAfter > 0 {
 		msg += fmt.Sprintf(", retry after %v", e.RetryAfter)
 	}
+
 	if e.Err != nil {
 		msg += ": " + trustedMessage(e.Err)
 	}
+
 	return msg
 }
 
@@ -384,6 +422,7 @@ func renderSentinel(err error) (string, bool) {
 			return sentinel.Error(), true
 		}
 	}
+
 	return "", false
 }
 
@@ -393,24 +432,31 @@ func renderNetError(err error) (string, bool) {
 	if e, ok := errors.AsType[*net.DNSError](err); ok {
 		return dnsMessage(e), true
 	}
+
 	if msg, ok := tlsMessage(err); ok {
 		return msg, true
 	}
+
 	if e, ok := errors.AsType[*net.OpError](err); ok {
 		return opMessage(e), true
 	}
+
 	if errno, ok := errors.AsType[syscall.Errno](err); ok {
 		return errno.Error(), true
 	}
+
 	if e, ok := errors.AsType[net.Error](err); ok && e.Timeout() {
 		return "i/o timeout", true
 	}
+
 	if errors.Is(err, io.ErrUnexpectedEOF) {
 		return io.ErrUnexpectedEOF.Error(), true
 	}
+
 	if errors.Is(err, io.EOF) {
 		return io.EOF.Error(), true
 	}
+
 	if unsupportedScheme(err) {
 		return "unsupported protocol scheme", true
 	}
@@ -419,6 +465,7 @@ func renderNetError(err error) (string, bool) {
 	if msg := rootCause(err).Error(); redirectLimitRe.MatchString(msg) {
 		return msg, true
 	}
+
 	return "", false
 }
 
@@ -432,14 +479,18 @@ func renderURLError(err error) (string, bool) {
 		if len(e) <= maxEscape {
 			return e.Error(), true
 		}
+
 		return "invalid URL escape", true
 	}
+
 	if e, ok := errors.AsType[url.InvalidHostError](err); ok {
 		if utf8.RuneCountInString(string(e)) <= 1 {
 			return e.Error(), true
 		}
+
 		return "invalid character in host name", true
 	}
+
 	return "", false
 }
 
@@ -458,6 +509,7 @@ func cutQuery(s string) string {
 	if i := strings.IndexAny(s, "?#"); i >= 0 {
 		return s[:i]
 	}
+
 	return s
 }
 
@@ -468,9 +520,11 @@ func hostOnly(s string) string {
 	if i := strings.IndexAny(s, "/?#"); i >= 0 {
 		s = s[:i]
 	}
+
 	if _, host, ok := strings.CutLast(s, "@"); ok {
 		s = host
 	}
+
 	return s
 }
 
@@ -478,12 +532,14 @@ func hostOnly(s string) string {
 // Err text.
 func dnsMessage(e *net.DNSError) string {
 	reason := "lookup failed"
+
 	switch {
 	case e.IsNotFound:
 		reason = "no such host"
 	case e.IsTimeout:
 		reason = "i/o timeout"
 	}
+
 	return "lookup " + hostOnly(e.Name) + ": " + reason
 }
 
@@ -499,6 +555,7 @@ func safeMethod(m string) string {
 	if methodRe.MatchString(m) {
 		return m
 	}
+
 	return "?"
 }
 
@@ -510,6 +567,7 @@ func safeOp(op string) string {
 	if urlOpRe.MatchString(op) {
 		return op
 	}
+
 	return "?"
 }
 
@@ -518,6 +576,7 @@ func safeToken(s string) string {
 	if safeTokenRe.MatchString(s) {
 		return s
 	}
+
 	return "?"
 }
 
@@ -531,21 +590,27 @@ func tlsMessage(err error) (string, bool) {
 		// Fixed text: Error() may append a CommonName chosen by the server.
 		return "x509: certificate signed by unknown authority", true
 	}
+
 	if e, ok := errors.AsType[x509.HostnameError](err); ok {
 		return "x509: certificate is not valid for " + hostOnly(e.Host), true
 	}
+
 	if _, ok := errors.AsType[x509.CertificateInvalidError](err); ok {
 		return "x509: certificate is not valid", true
 	}
+
 	if e, ok := errors.AsType[tls.AlertError](err); ok {
 		return e.Error(), true
 	}
+
 	if _, ok := errors.AsType[tls.RecordHeaderError](err); ok {
 		return "tls: invalid record header", true
 	}
+
 	if _, ok := errors.AsType[*tls.CertificateVerificationError](err); ok {
 		return "tls: failed to verify certificate", true
 	}
+
 	return "", false
 }
 
@@ -558,9 +623,11 @@ func opMessage(e *net.OpError) string {
 	if e.Net != "" {
 		msg += " " + safeToken(e.Net)
 	}
+
 	if e.Addr != nil {
 		msg += " " + hostOnly(e.Addr.String())
 	}
+
 	switch errno, ok := errors.AsType[syscall.Errno](e.Err); {
 	case ok:
 		return msg + ": " + errno.Error()
@@ -586,6 +653,7 @@ func rootCause(err error) error {
 		if next == nil {
 			return err
 		}
+
 		err = next
 	}
 }

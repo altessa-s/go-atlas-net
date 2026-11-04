@@ -35,8 +35,10 @@ func (j *countingJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 
 func newCountingJar(t *testing.T) *countingJar {
 	t.Helper()
+
 	jar, err := cookiejar.New(nil)
 	require.NoError(t, err)
+
 	return &countingJar{CookieJar: jar}
 }
 
@@ -47,6 +49,7 @@ func cookieValue(jar http.CookieJar, u *url.URL, name string) string {
 			return c.Value
 		}
 	}
+
 	return ""
 }
 
@@ -83,25 +86,33 @@ func TestRetryReadsTheJarAtAttemptTime(t *testing.T) {
 			t.Parallel()
 
 			jar := newCountingJar(t)
+
 			var (
 				mu   sync.Mutex
 				seen []string
 				u    *url.URL
 			)
+
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
+
 				seen = append(seen, strings.Join(r.Header.Values("Cookie"), "|"))
 				n := len(seen)
 				mu.Unlock()
+
 				if n == 1 {
 					tc.mutate(jar, u) // a concurrent request updates the shared jar
 					w.WriteHeader(http.StatusServiceUnavailable)
+
 					return
 				}
+
 				_, _ = io.WriteString(w, "ok")
 			}))
 			t.Cleanup(srv.Close)
+
 			var err error
+
 			u, err = url.Parse(srv.URL)
 			require.NoError(t, err)
 			jar.SetCookies(u, []*http.Cookie{{Name: "session", Value: "old", Path: "/"}})
@@ -117,6 +128,7 @@ func TestRetryReadsTheJarAtAttemptTime(t *testing.T) {
 
 			mu.Lock()
 			defer mu.Unlock()
+
 			require.Equal(t, []string{"user=1; session=old", tc.want}, seen)
 		})
 	}
@@ -129,7 +141,9 @@ func TestCancelDuringBackoffDoesNotRestoreCookies(t *testing.T) {
 	t.Parallel()
 
 	jar := newCountingJar(t)
+
 	var hits atomic.Int32
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
 		http.SetCookie(w, &http.Cookie{Name: "session", Value: "old", Path: "/", MaxAge: 3600})
@@ -143,16 +157,19 @@ func TestCancelDuringBackoffDoesNotRestoreCookies(t *testing.T) {
 		httpclient.WithRetryMax(3), httpclient.WithRetryWait(time.Hour, time.Hour))
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
+
 	go func() {
 		req, rerr := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
 		if rerr != nil {
 			done <- rerr
 			return
 		}
+
 		resp, derr := c.Do(req)
 		if resp != nil {
 			_ = resp.Body.Close()
 		}
+
 		done <- derr
 	}()
 
@@ -177,6 +194,7 @@ func TestRedirectHopCookies(t *testing.T) {
 		mu   sync.Mutex
 		seen []string
 	)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/from", func(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, &http.Cookie{Name: "hop", Value: "1", Path: "/"})
@@ -184,13 +202,17 @@ func TestRedirectHopCookies(t *testing.T) {
 	})
 	mux.HandleFunc("/to", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
+
 		seen = append(seen, strings.Join(r.Header.Values("Cookie"), "|"))
 		mu.Unlock()
+
 		if _, err := r.Cookie("challenge"); err != nil {
 			http.SetCookie(w, &http.Cookie{Name: "challenge", Value: "accepted", Path: "/"})
 			w.WriteHeader(http.StatusServiceUnavailable)
+
 			return
 		}
+
 		_, _ = io.WriteString(w, "ok")
 	})
 	srv := httptest.NewServer(mux)
@@ -205,6 +227,7 @@ func TestRedirectHopCookies(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
+
 	require.Equal(t, []string{"hop=1", "hop=1; challenge=accepted"}, seen)
 	require.Equal(t, int32(2), jar.sets.Load(), "each reply with cookies stored once: the 302 and the 503")
 }
@@ -228,6 +251,7 @@ func TestCookiesFollowTheHostHeader(t *testing.T) {
 				mu     sync.Mutex
 				header string
 			)
+
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				header = strings.Join(r.Header.Values("Cookie"), "|")
@@ -238,6 +262,7 @@ func TestCookiesFollowTheHostHeader(t *testing.T) {
 			t.Cleanup(srv.Close)
 			gateway, err := url.Parse(srv.URL)
 			require.NoError(t, err)
+
 			tenant := &url.URL{Scheme: "http", Host: "tenant.example", Path: "/"}
 
 			jar := newCountingJar(t)
@@ -246,6 +271,7 @@ func TestCookiesFollowTheHostHeader(t *testing.T) {
 
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
 			require.NoError(t, err)
+
 			req.Host = "tenant.example"
 			resp, err := c.Do(req)
 			require.NoError(t, err)
@@ -253,6 +279,7 @@ func TestCookiesFollowTheHostHeader(t *testing.T) {
 
 			mu.Lock()
 			defer mu.Unlock()
+
 			require.Empty(t, header, "the gateway's cookies are not sent to the tenant virtual host")
 			require.Equal(t, "t", cookieValue(jar, tenant, "tenant"), "the tenant's cookie is stored under the tenant host")
 			require.Empty(t, cookieValue(jar, gateway, "tenant"), "and not under the gateway")
@@ -281,6 +308,7 @@ func TestRedirectDropsInitialCookiesTheChainSet(t *testing.T) {
 				mu   sync.Mutex
 				seen []string
 			)
+
 			mux := http.NewServeMux()
 			mux.HandleFunc("/from", func(w http.ResponseWriter, r *http.Request) {
 				http.SetCookie(w, tc.set)
@@ -288,14 +316,17 @@ func TestRedirectDropsInitialCookiesTheChainSet(t *testing.T) {
 			})
 			mux.HandleFunc("/mid", func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
+
 				seen = append(seen, strings.Join(r.Header.Values("Cookie"), "|"))
 				mu.Unlock()
 				http.Redirect(w, r, "/to", http.StatusFound) // sets nothing: the drop persists along the chain
 			})
 			mux.HandleFunc("/to", func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
+
 				seen = append(seen, strings.Join(r.Header.Values("Cookie"), "|"))
 				mu.Unlock()
+
 				_, _ = io.WriteString(w, "ok")
 			})
 			srv := httptest.NewServer(mux)
@@ -311,6 +342,7 @@ func TestRedirectDropsInitialCookiesTheChainSet(t *testing.T) {
 
 			mu.Lock()
 			defer mu.Unlock()
+
 			require.Equal(t, []string{tc.want, tc.want}, seen, "no stale session on any later hop")
 		})
 	}
@@ -326,7 +358,9 @@ func TestCustomCheckRedirectHonored(t *testing.T) {
 		http.SetCookie(w, &http.Cookie{Name: "hop", Value: "1", Path: "/"})
 		http.Redirect(w, r, "/to", http.StatusFound)
 	})
+
 	var followed atomic.Int32
+
 	mux.HandleFunc("/to", func(w http.ResponseWriter, _ *http.Request) { followed.Add(1) })
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -334,6 +368,7 @@ func TestCustomCheckRedirectHonored(t *testing.T) {
 	require.NoError(t, err)
 
 	var checked atomic.Int32
+
 	jar := newCountingJar(t)
 	c := httpclient.New(loopback, httpclient.WithCookieJar(jar), httpclient.WithClient(&http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -386,6 +421,7 @@ func TestCheckRedirectCookiesKept(t *testing.T) {
 				mu   sync.Mutex
 				seen string
 			)
+
 			mux := http.NewServeMux()
 			mux.HandleFunc("/from", func(w http.ResponseWriter, r *http.Request) {
 				http.SetCookie(w, &http.Cookie{Name: "session", Path: "/", MaxAge: -1})
@@ -395,6 +431,7 @@ func TestCheckRedirectCookiesKept(t *testing.T) {
 				mu.Lock()
 				seen = strings.Join(r.Header.Values("Cookie"), "|")
 				mu.Unlock()
+
 				_, _ = io.WriteString(w, "ok")
 			})
 			srv := httptest.NewServer(mux)
@@ -404,15 +441,18 @@ func TestCheckRedirectCookiesKept(t *testing.T) {
 				httpclient.WithClient(&http.Client{CheckRedirect: tc.check}))
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/from", nil)
 			require.NoError(t, err)
+
 			if tc.initial != "" {
 				req.Header.Set("Cookie", tc.initial)
 			}
+
 			resp, err := c.Do(req)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = resp.Body.Close() })
 
 			mu.Lock()
 			defer mu.Unlock()
+
 			require.Equal(t, tc.want, seen)
 		})
 	}
@@ -424,6 +464,7 @@ func TestDefaultRedirectLimitWithJar(t *testing.T) {
 	t.Parallel()
 
 	var hits atomic.Int32
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		http.Redirect(w, r, "/loop", http.StatusFound)

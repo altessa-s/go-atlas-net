@@ -94,6 +94,7 @@ func TestFromURL_HTTPProxyServerFirst(t *testing.T) {
 	t.Parallel()
 
 	const greeting = "+OK POP3 ready\r\n"
+
 	proxyURL := startConnectProxy(t, serverFirstHandler("HTTP/1.1 200 Connection established\r\n\r\n", greeting, false))
 
 	dial, err := FromURL(proxyURL)

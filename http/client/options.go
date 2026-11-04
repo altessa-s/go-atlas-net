@@ -216,6 +216,7 @@ func WithCircuitBreakerSettings(hostname string, settings *CircuitBreakerSetting
 		if opts.hostBreakerSettings == nil {
 			opts.hostBreakerSettings = make(map[string]*CircuitBreakerSettings)
 		}
+
 		opts.hostBreakerSettings[hostname] = settings
 	}
 }
@@ -320,14 +321,17 @@ func WithProxy(host string, port int, auth *url.Userinfo) Option {
 	if host == "" {
 		return WithProxyFunc(failingProxy(errors.New("httpclient: WithProxy: empty host")))
 	}
+
 	if port < 1 || port > 65535 {
 		return WithProxyFunc(failingProxy(fmt.Errorf("httpclient: WithProxy: invalid port %d", port)))
 	}
+
 	u := &url.URL{
 		Scheme: "http",
 		User:   auth,
 		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
 	}
+
 	return WithProxyFunc(http.ProxyURL(u))
 }
 
@@ -343,6 +347,7 @@ func WithProxyURL(u *url.URL) Option {
 	if u == nil {
 		return WithProxyFunc(failingProxy(errors.New("httpclient: WithProxyURL: nil URL")))
 	}
+
 	return WithProxyFunc(http.ProxyURL(u))
 }
 

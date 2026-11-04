@@ -22,7 +22,9 @@ import (
 // on /target.
 func redirectServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
+
 	var targetHits atomic.Int32
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/start", func(w http.ResponseWriter, _ *http.Request) {
 		http.SetCookie(w, &http.Cookie{Name: "session", Value: "abc", Path: "/"})
@@ -32,10 +34,12 @@ func redirectServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
 	})
 	mux.HandleFunc("/target", func(w http.ResponseWriter, _ *http.Request) {
 		targetHits.Add(1)
+
 		_, _ = io.WriteString(w, "target")
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
+
 	return srv, &targetHits
 }
 
@@ -46,6 +50,7 @@ func getStart(t *testing.T, c *http.Client, srv *httptest.Server) *http.Response
 	resp, err := c.Do(req)
 	require.NoError(t, err, "a 3xx reply is not an error")
 	t.Cleanup(func() { _ = resp.Body.Close() })
+
 	return resp
 }
 

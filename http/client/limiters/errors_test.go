@@ -26,6 +26,7 @@ func TestRateLimitError(t *testing.T) {
 	t.Parallel()
 
 	cause := errors.New("quota exhausted")
+
 	tests := []struct {
 		name string
 		err  *limiters.RateLimitError
@@ -59,6 +60,7 @@ func TestRoundTripper_DenialIsRateLimitError(t *testing.T) {
 
 	errQuota := errors.New("quota exhausted")
 	preset := &limiters.RateLimitError{Host: "preset", RetryAfter: time.Second}
+
 	tests := []struct {
 		name      string
 		limiter   limiterFunc
@@ -75,6 +77,7 @@ func TestRoundTripper_DenialIsRateLimitError(t *testing.T) {
 			t.Parallel()
 
 			var hits atomic.Int32
+
 			next := httpx.RoundTripperFunc(func(*http.Request) (*http.Response, error) {
 				hits.Add(1)
 				return &http.Response{StatusCode: http.StatusOK}, nil
@@ -89,9 +92,11 @@ func TestRoundTripper_DenialIsRateLimitError(t *testing.T) {
 			require.NotNil(t, rl)
 			require.Equal(t, tc.wantHost, rl.Host)
 			require.Equal(t, tc.wantAfter, rl.RetryAfter)
+
 			if tc.wantCause != nil {
 				require.ErrorIs(t, err, tc.wantCause)
 			}
+
 			require.NotContains(t, err.Error(), "secret", "the error must not quote the request URL")
 			require.Zero(t, hits.Load())
 		})

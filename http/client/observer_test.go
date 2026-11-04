@@ -35,30 +35,35 @@ type recordingObserver struct {
 func (o *recordingObserver) Attach(b httpclient.Breakers) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+
 	o.breakers = b
 }
 
 func (o *recordingObserver) RequestDone(e httpclient.RequestEvent) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+
 	o.done = append(o.done, e)
 }
 
 func (o *recordingObserver) Retry(e httpclient.AttemptEvent) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+
 	o.retries = append(o.retries, e)
 }
 
 func (o *recordingObserver) BreakerRejected(e httpclient.AttemptEvent) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+
 	o.rejected = append(o.rejected, e)
 }
 
 func (o *recordingObserver) BreakerStateChanged(e httpclient.BreakerStateEvent) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+
 	o.states = append(o.states, e)
 }
 
@@ -76,10 +81,12 @@ func observeGet(t *testing.T, c *http.Client, url string) error {
 	t.Helper()
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
 	require.NoError(t, err)
+
 	resp, err := c.Do(req)
 	if resp != nil {
 		_ = resp.Body.Close()
 	}
+
 	return err
 }
 
@@ -179,6 +186,7 @@ func TestObserver_WithoutRetryFailure(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+
 			obs := &recordingObserver{}
 			opts := append([]httpclient.Option{
 				httpclient.WithoutSSRFProtection(),
@@ -204,6 +212,7 @@ func TestObserver_BreakerEvents(t *testing.T) {
 	t.Parallel()
 
 	passThrough := func(context.Context, *http.Response, error) (bool, error) { return false, nil }
+
 	policies := map[string]httpclient.Option{
 		"default":      httpclient.WithRetryMax(0),
 		"no retry":     httpclient.WithoutRetry(),
@@ -212,6 +221,7 @@ func TestObserver_BreakerEvents(t *testing.T) {
 	for name, policy := range policies {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
+
 			obs := &recordingObserver{}
 			c := httpclient.New(
 				httpclient.WithoutSSRFProtection(),
@@ -226,11 +236,13 @@ func TestObserver_BreakerEvents(t *testing.T) {
 			for range httpclient.DefaultBreakerMinRequests {
 				require.Error(t, observeGet(t, c, "http://down.test/"))
 			}
+
 			err := observeGet(t, c, "http://down.test/")
 			require.True(t, httpclient.IsCircuitBreakerOpen(err), "err = %v", err)
 
 			obs.mu.Lock()
 			defer obs.mu.Unlock()
+
 			require.Equal(t, []httpclient.AttemptEvent{{Method: http.MethodGet, Host: "down.test"}}, obs.rejected,
 				"one rejection, reported once")
 			require.Len(t, obs.states, 1)

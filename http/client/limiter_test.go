@@ -63,6 +63,7 @@ func TestNew_LimiterDenialIsRateLimitError(t *testing.T) {
 			t.Parallel()
 
 			var hits atomic.Int32
+
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				hits.Add(1)
 				w.WriteHeader(http.StatusOK)
@@ -77,6 +78,7 @@ func TestNew_LimiterDenialIsRateLimitError(t *testing.T) {
 			if resp != nil {
 				require.NoError(t, resp.Body.Close())
 			}
+
 			require.Error(t, err)
 			require.ErrorIs(t, err, limiters.ErrRateLimited)
 
@@ -84,6 +86,7 @@ func TestNew_LimiterDenialIsRateLimitError(t *testing.T) {
 			require.NotNil(t, rl)
 			require.Equal(t, tc.wantHost, rl.Host)
 			require.Equal(t, tc.wantAfter, rl.RetryAfter)
+
 			if tc.wantCause != nil {
 				require.ErrorIs(t, err, tc.wantCause)
 			}

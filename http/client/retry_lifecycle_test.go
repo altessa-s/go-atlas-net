@@ -36,9 +36,11 @@ func (b *countingBody) Read(p []byte) (int, error) {
 	if b.onRead != nil {
 		b.onRead()
 	}
+
 	if b.readErr != nil {
 		return 0, b.readErr
 	}
+
 	return b.r.Read(p)
 }
 
@@ -50,6 +52,7 @@ func (b *countingBody) Close() error {
 // unreachable is a transport the test expects never to be called.
 func unreachable(t *testing.T) http.RoundTripper {
 	t.Helper()
+
 	return httpx.RoundTripperFunc(func(*http.Request) (*http.Response, error) {
 		t.Error("no attempt may reach the transport")
 		return nil, errors.New("unreachable")
@@ -79,9 +82,11 @@ func TestRetry_ClosesUnsentBodyOnEndedContext(t *testing.T) {
 			c := httpclient.New(httpclient.WithoutSSRFProtection(), httpclient.WithClient(&http.Client{Transport: unreachable(t)}), tt.opt)
 			ctx, cancel := context.WithCancel(t.Context())
 			cancel()
+
 			body := &countingBody{r: strings.NewReader("payload")}
 			req, err := http.NewRequestWithContext(ctx, tt.method, "http://api.test/x", body)
 			require.NoError(t, err)
+
 			if tt.getBody {
 				req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(strings.NewReader("payload")), nil }
 			}
@@ -90,6 +95,7 @@ func TestRetry_ClosesUnsentBodyOnEndedContext(t *testing.T) {
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
+
 			require.ErrorIs(t, err, context.Canceled)
 			require.EqualValues(t, 1, body.closed.Load(), "the unsent request body is closed once")
 		})
@@ -129,16 +135,21 @@ func TestRetry_ErrorHandlerCountsAttemptsMade(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
+
 			if tt.cancelOn < 0 {
 				cancel()
 			}
+
 			var calls atomic.Int32
+
 			transport := httpx.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 				if calls.Add(1) == tt.cancelOn {
 					cancel()
 				}
+
 				return &http.Response{StatusCode: tt.status, Body: http.NoBody, Request: req}, nil
 			})
 			got := -1
@@ -156,10 +167,12 @@ func TestRetry_ErrorHandlerCountsAttemptsMade(t *testing.T) {
 
 			req, err := http.NewRequestWithContext(ctx, tt.method, "http://api.test/x", nil)
 			require.NoError(t, err)
+
 			resp, err := c.Do(req)
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
+
 			require.Error(t, err)
 			require.EqualValues(t, tt.want, calls.Load(), "attempts sent")
 			require.Equal(t, tt.want, got, "numTries counts the attempts sent")
@@ -191,11 +204,13 @@ func TestObserver_BufferingFailure(t *testing.T) {
 	if resp != nil {
 		_ = resp.Body.Close()
 	}
+
 	require.ErrorIs(t, err, readErr)
 	require.EqualValues(t, 1, body.closed.Load())
 
 	obs.mu.Lock()
 	defer obs.mu.Unlock()
+
 	require.Equal(t, []httpclient.RequestEvent{{
 		Method:      http.MethodPut,
 		Host:        "api.test",
@@ -215,8 +230,11 @@ type pipeBody struct {
 
 func newPipeBody(t *testing.T) *pipeBody {
 	t.Helper()
+
 	r, w := io.Pipe()
+
 	t.Cleanup(func() { _ = w.Close() })
+
 	return &pipeBody{r: r, reads: make(chan struct{}, 1)}
 }
 
@@ -225,6 +243,7 @@ func (b *pipeBody) Read(p []byte) (int, error) {
 	case b.reads <- struct{}{}:
 	default:
 	}
+
 	return b.r.Read(p)
 }
 
@@ -246,10 +265,14 @@ func TestRetry_BufferingHonorsContext(t *testing.T) {
 		if during {
 			name = "ended during buffering"
 		}
+
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
+
 			obs := &recordingObserver{}
+
 			var handled, tries atomic.Int32
+
 			c := httpclient.New(
 				httpclient.WithoutSSRFProtection(),
 				httpclient.WithClient(&http.Client{Transport: unreachable(t)}),
@@ -258,15 +281,20 @@ func TestRetry_BufferingHonorsContext(t *testing.T) {
 				httpclient.WithErrorHandler(func(resp *http.Response, err error, numTries int) (*http.Response, error) {
 					handled.Add(1)
 					tries.Store(int32(numTries)) //nolint:gosec // a small count
+
 					if resp != nil {
 						return nil, errors.New("the handler received a response")
 					}
+
 					return nil, err
 				}),
 			)
+
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
+
 			body := newPipeBody(t)
+
 			if during {
 				go func() {
 					<-body.reads
@@ -275,6 +303,7 @@ func TestRetry_BufferingHonorsContext(t *testing.T) {
 			} else {
 				cancel()
 			}
+
 			req, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://api.test/x", body)
 			require.NoError(t, err)
 
@@ -282,10 +311,12 @@ func TestRetry_BufferingHonorsContext(t *testing.T) {
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
+
 			require.ErrorIs(t, err, context.Canceled)
 			require.EqualValues(t, 1, body.closed.Load(), "the body is closed once")
 			require.EqualValues(t, 1, handled.Load(), "the ErrorHandler sees the failure once")
 			require.Zero(t, tries.Load(), "no attempt was sent")
+
 			select {
 			case <-body.reads:
 				require.True(t, during, "no read starts on an ended context")
@@ -294,6 +325,7 @@ func TestRetry_BufferingHonorsContext(t *testing.T) {
 
 			obs.mu.Lock()
 			defer obs.mu.Unlock()
+
 			require.Len(t, obs.done, 1, "one completion")
 			require.True(t, obs.done[0].Failed)
 		})

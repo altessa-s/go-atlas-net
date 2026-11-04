@@ -45,12 +45,14 @@ type itProxy struct {
 func (p *itProxy) record(dst string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	p.dsts = append(p.dsts, dst)
 }
 
 func (p *itProxy) seen() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	return slices.Clone(p.dsts)
 }
 
@@ -60,7 +62,9 @@ func serveLoopback(tb testing.TB, scheme string, serve func(p *itProxy, conn net
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(tb, err)
+
 	p := &itProxy{url: &url.URL{Scheme: scheme, Host: ln.Addr().String()}, conns: make(map[net.Conn]struct{})}
+
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		for {
@@ -68,12 +72,14 @@ func serveLoopback(tb testing.TB, scheme string, serve func(p *itProxy, conn net
 			if aerr != nil {
 				return
 			}
+
 			p.accepted.Add(1)
 			p.mu.Lock()
 			p.conns[conn] = struct{}{}
 			p.mu.Unlock()
 			wg.Go(func() {
 				defer func() { _ = conn.Close() }()
+
 				_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 				serve(p, conn)
 			})
@@ -81,6 +87,7 @@ func serveLoopback(tb testing.TB, scheme string, serve func(p *itProxy, conn net
 	})
 	tb.Cleanup(func() {
 		_ = ln.Close()
+
 		p.mu.Lock()
 		for conn := range p.conns {
 			_ = conn.Close()
@@ -88,17 +95,20 @@ func serveLoopback(tb testing.TB, scheme string, serve func(p *itProxy, conn net
 		p.mu.Unlock()
 		wg.Wait()
 	})
+
 	return p
 }
 
 // relay copies between the client and the upstream until either side ends.
 func relay(client net.Conn, clientReader io.Reader, upstream net.Conn) {
 	defer func() { _ = upstream.Close() }()
+
 	_ = upstream.SetDeadline(time.Now().Add(10 * time.Second))
 	go func() {
 		_, _ = io.Copy(upstream, clientReader)
 		_ = upstream.Close()
 	}()
+
 	_, _ = io.Copy(client, upstream)
 }
 
@@ -109,10 +119,12 @@ func startITConnectProxy(tb testing.TB, user, pass string) *itProxy {
 
 	return serveLoopback(tb, "http", func(p *itProxy, conn net.Conn) {
 		br := bufio.NewReader(conn)
+
 		req, err := http.ReadRequest(br)
 		if err != nil || req.Method != http.MethodConnect {
 			return
 		}
+
 		if user != "" {
 			want := "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
 			if req.Header.Get("Proxy-Authorization") != want {
@@ -120,16 +132,20 @@ func startITConnectProxy(tb testing.TB, user, pass string) *itProxy {
 				return
 			}
 		}
+
 		p.record(req.Host)
+
 		upstream, err := net.DialTimeout("tcp", req.Host, 5*time.Second)
 		if err != nil {
 			_, _ = io.WriteString(conn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
 			return
 		}
+
 		if _, err = io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
 			_ = upstream.Close()
 			return
 		}
+
 		relay(conn, br, upstream)
 	})
 }
@@ -143,20 +159,25 @@ func startITSOCKS5(tb testing.TB, user, pass string) *itProxy {
 		if !socks5Handshake(conn, user, pass) {
 			return
 		}
+
 		dst, ok := socks5ReadConnect(conn)
 		if !ok {
 			return
 		}
+
 		p.record(dst)
+
 		upstream, err := net.DialTimeout("tcp", dst, 5*time.Second)
 		if err != nil {
 			_, _ = conn.Write([]byte{5, 5, 0, 1, 0, 0, 0, 0, 0, 0}) // connection refused
 			return
 		}
+
 		if _, err = conn.Write([]byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0}); err != nil {
 			_ = upstream.Close()
 			return
 		}
+
 		relay(conn, conn, upstream)
 	})
 }
@@ -166,45 +187,57 @@ func socks5Handshake(conn net.Conn, user, pass string) bool {
 	if _, err := io.ReadFull(conn, head); err != nil || head[0] != 5 {
 		return false
 	}
+
 	methods := make([]byte, head[1])
 	if _, err := io.ReadFull(conn, methods); err != nil {
 		return false
 	}
+
 	method := byte(0)
 	if user != "" {
 		method = 2
 	}
+
 	if !slices.Contains(methods, method) {
 		_, _ = conn.Write([]byte{5, 0xff})
 		return false
 	}
+
 	if _, err := conn.Write([]byte{5, method}); err != nil {
 		return false
 	}
+
 	if method == 0 {
 		return true
 	}
+
 	ver := make([]byte, 2)
 	if _, err := io.ReadFull(conn, ver); err != nil {
 		return false
 	}
+
 	gotUser := make([]byte, ver[1])
 	if _, err := io.ReadFull(conn, gotUser); err != nil {
 		return false
 	}
+
 	plen := make([]byte, 1)
 	if _, err := io.ReadFull(conn, plen); err != nil {
 		return false
 	}
+
 	gotPass := make([]byte, plen[0])
 	if _, err := io.ReadFull(conn, gotPass); err != nil {
 		return false
 	}
+
 	status := byte(0)
 	if string(gotUser) != user || string(gotPass) != pass {
 		status = 1
 	}
+
 	_, err := conn.Write([]byte{1, status})
+
 	return err == nil && status == 0
 }
 
@@ -215,13 +248,16 @@ func socks5ReadConnect(conn net.Conn) (string, bool) {
 	if _, err := io.ReadFull(conn, req); err != nil || req[1] != 1 {
 		return "", false
 	}
+
 	var host string
+
 	switch req[3] {
 	case 1, 4:
 		ip := make([]byte, map[byte]int{1: 4, 4: 16}[req[3]])
 		if _, err := io.ReadFull(conn, ip); err != nil {
 			return "", false
 		}
+
 		a, _ := netip.AddrFromSlice(ip)
 		host = a.String()
 	case 3:
@@ -229,18 +265,22 @@ func socks5ReadConnect(conn net.Conn) (string, bool) {
 		if _, err := io.ReadFull(conn, n); err != nil {
 			return "", false
 		}
+
 		name := make([]byte, n[0])
 		if _, err := io.ReadFull(conn, name); err != nil {
 			return "", false
 		}
+
 		host = string(name)
 	default:
 		return "", false
 	}
+
 	port := make([]byte, 2)
 	if _, err := io.ReadFull(conn, port); err != nil {
 		return "", false
 	}
+
 	return net.JoinHostPort(host, strconv.Itoa(int(binary.BigEndian.Uint16(port)))), true
 }
 
@@ -252,6 +292,7 @@ func itTransport(dial proxydial.DialContextFunc, tlsTarget *httptest.Server) *ht
 	if tlsTarget != nil {
 		t.TLSClientConfig = tlsTarget.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
 	}
+
 	return t
 }
 
@@ -262,12 +303,16 @@ func itFetch(tb testing.TB, t *http.Transport, rawURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	resp, err := (&http.Client{Transport: t}).Do(req)
 	if err != nil {
 		return "", err
 	}
+
 	defer func() { _ = resp.Body.Close() }()
+
 	body, err := io.ReadAll(resp.Body)
+
 	return string(body), err
 }
 
@@ -284,8 +329,10 @@ func TestIntegration_HTTPTransportThroughProxies(t *testing.T) {
 
 	plain := httptest.NewServer(hostEcho())
 	t.Cleanup(plain.Close)
+
 	secure := httptest.NewTLSServer(hostEcho())
 	t.Cleanup(secure.Close)
+
 	plainHost := plain.Listener.Addr().String()
 	secureHost := secure.Listener.Addr().String()
 
@@ -363,8 +410,10 @@ func TestIntegration_SSRFGuardOverRealProxies(t *testing.T) {
 
 	permitted := httptest.NewServer(hostEcho())
 	t.Cleanup(permitted.Close)
+
 	forbidden := httptest.NewServer(hostEcho())
 	t.Cleanup(forbidden.Close)
+
 	permittedAddr := permitted.Listener.Addr().(*net.TCPAddr).AddrPort()
 	forbiddenPort := strconv.Itoa(forbidden.Listener.Addr().(*net.TCPAddr).Port)
 	permittedPort := strconv.Itoa(int(permittedAddr.Port()))
@@ -372,6 +421,7 @@ func TestIntegration_SSRFGuardOverRealProxies(t *testing.T) {
 	policy, err := httpclient.NewEgressPolicy(
 		[]httpclient.EgressRule{{CIDR: netip.PrefixFrom(permittedAddr.Addr(), 32), Port: permittedAddr.Port()}}, nil)
 	require.NoError(t, err)
+
 	resolver := &fakeResolver{answers: map[string][][]netip.Addr{
 		"app.test":      {addrs("127.0.0.1")},
 		"metadata.test": {addrs("169.254.169.254")},
@@ -388,6 +438,7 @@ func TestIntegration_SSRFGuardOverRealProxies(t *testing.T) {
 			proxy := start(t)
 			dial, err := proxydial.FromURL(proxy.url, proxydial.WithSSRFGuard(policy.Check), proxydial.WithResolver(resolver))
 			require.NoError(t, err)
+
 			tr := itTransport(dial, nil)
 
 			body, err := itFetch(t, tr, "http://app.test:"+permittedPort+"/ok")
@@ -403,6 +454,7 @@ func TestIntegration_SSRFGuardOverRealProxies(t *testing.T) {
 				_, err = itFetch(t, tr, refused)
 				require.ErrorIs(t, err, httpclient.ErrSSRFBlocked, refused)
 			}
+
 			require.Equal(t, int32(1), proxy.accepted.Load(), "refused destinations never reach the proxy")
 		})
 	}
@@ -415,6 +467,7 @@ func TestIntegration_ConcurrentTunnels(t *testing.T) {
 
 	target := httptest.NewServer(hostEcho())
 	t.Cleanup(target.Close)
+
 	const n = 16
 
 	starters := map[string]func(tb testing.TB) *itProxy{
@@ -428,9 +481,11 @@ func TestIntegration_ConcurrentTunnels(t *testing.T) {
 			proxy := start(t)
 			dial, err := proxydial.FromURL(proxy.url)
 			require.NoError(t, err)
+
 			tr := itTransport(dial, nil)
 
 			var wg sync.WaitGroup
+
 			errs := make(chan error, n)
 			for i := range n {
 				wg.Go(func() {
@@ -438,14 +493,18 @@ func TestIntegration_ConcurrentTunnels(t *testing.T) {
 					if ferr == nil && body != target.Listener.Addr().String()+"/"+strconv.Itoa(i) {
 						ferr = io.ErrUnexpectedEOF
 					}
+
 					errs <- ferr
 				})
 			}
+
 			wg.Wait()
 			close(errs)
+
 			for ferr := range errs {
 				require.NoError(t, ferr)
 			}
+
 			require.Equal(t, int32(n), proxy.accepted.Load())
 		})
 	}

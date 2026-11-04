@@ -29,6 +29,7 @@ func BenchmarkEgressPolicy_Check(b *testing.B) {
 			{Host: "api.example.com", Port: 8080},
 		},
 	)
+
 	cases := []struct {
 		name   string
 		policy *httpclient.EgressPolicy
@@ -45,6 +46,7 @@ func BenchmarkEgressPolicy_Check(b *testing.B) {
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
+
 			for b.Loop() {
 				_ = tc.policy.Check(tc.host, tc.dst)
 			}
@@ -56,12 +58,15 @@ func BenchmarkEgressPolicy_Check(b *testing.B) {
 // CIDRs, the size of a generated per-tenant configuration.
 func benchManyRulesPolicy(b *testing.B, n int) *httpclient.EgressPolicy {
 	b.Helper()
+
 	allow := make([]httpclient.EgressRule, 0, n)
+
 	deny := make([]httpclient.EgressRule, 0, n)
 	for i := range n {
 		allow = append(allow, httpclient.EgressRule{CIDR: netip.PrefixFrom(netip.AddrFrom4([4]byte{10, byte(i), 0, 0}), 16), Port: 443})
 		deny = append(deny, httpclient.EgressRule{Host: "*.svc" + strconv.Itoa(i) + ".internal"})
 	}
+
 	return mustEgressPolicy(b, allow, deny)
 }
 
@@ -70,13 +75,16 @@ func BenchmarkEgressPolicy_CheckManyRules(b *testing.B) {
 		p := benchManyRulesPolicy(b, n)
 		b.Run("rules_"+strconv.Itoa(n)+"/public", func(b *testing.B) {
 			b.ReportAllocs()
+
 			for b.Loop() {
 				_ = p.Check("api.example.com", netip.MustParseAddrPort("93.184.216.34:443"))
 			}
 		})
 		b.Run("rules_"+strconv.Itoa(n)+"/last_allow", func(b *testing.B) {
 			dst := netip.AddrPortFrom(netip.AddrFrom4([4]byte{10, byte(n - 1), 1, 1}), 443)
+
 			b.ReportAllocs()
+
 			for b.Loop() {
 				_ = p.Check("svc.corp.example", dst)
 			}
@@ -86,6 +94,7 @@ func BenchmarkEgressPolicy_CheckManyRules(b *testing.B) {
 
 func BenchmarkEgressPolicy_CheckHost(b *testing.B) {
 	p := benchManyRulesPolicy(b, 64)
+
 	cases := []struct {
 		name string
 		host string
@@ -99,6 +108,7 @@ func BenchmarkEgressPolicy_CheckHost(b *testing.B) {
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
+
 			for b.Loop() {
 				_ = p.CheckHost(tc.host, 443)
 			}
@@ -108,6 +118,7 @@ func BenchmarkEgressPolicy_CheckHost(b *testing.B) {
 
 func BenchmarkEgressPolicy_Explain(b *testing.B) {
 	p := benchManyRulesPolicy(b, 64)
+
 	cases := []struct {
 		name string
 		host string
@@ -121,6 +132,7 @@ func BenchmarkEgressPolicy_Explain(b *testing.B) {
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
+
 			for b.Loop() {
 				_ = p.Explain(tc.host, tc.dst)
 			}

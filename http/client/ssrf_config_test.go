@@ -21,6 +21,7 @@ import (
 
 func TestSSRFRejectsUnsafeTransport(t *testing.T) {
 	t.Parallel()
+
 	for _, tc := range []struct {
 		name string
 		opts []Option
@@ -34,8 +35,11 @@ func TestSSRFRejectsUnsafeTransport(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
 			var recovered any
+
 			func() { defer func() { recovered = recover() }(); New(tc.opts...) }()
+
 			err, ok := recovered.(error)
 			require.True(t, ok, "construction must panic with an error")
 			require.ErrorIs(t, err, ErrSSRFUnsafeTransport)
@@ -47,6 +51,7 @@ func TestSSRFDisablesEnvironmentProxy(t *testing.T) {
 	// Environment variables are process-global, so this test is serial.
 	t.Setenv("HTTP_PROXY", "http://proxy.example:8080")
 	t.Setenv("HTTPS_PROXY", "http://proxy.example:8080")
+
 	opts := newOptions()
 	c := newCircuitBreakerClient(*opts)
 	require.Nil(t, c.client.Transport.(*http.Transport).Proxy)
@@ -55,8 +60,10 @@ func TestSSRFDisablesEnvironmentProxy(t *testing.T) {
 
 func TestSSRFLoopbackPolicy(t *testing.T) {
 	t.Parallel()
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	t.Cleanup(srv.Close)
+
 	for _, tc := range []struct {
 		name    string
 		opts    []Option
@@ -69,13 +76,16 @@ func TestSSRFLoopbackPolicy(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
 			c := New(append(tc.opts, WithRetryMax(0), WithoutProxy())...)
 			t.Cleanup(c.CloseIdleConnections)
+
 			resp, err := c.Get(srv.URL)
 			if tc.blocked {
 				require.ErrorIs(t, err, ErrSSRFBlocked)
 				return
 			}
+
 			require.NoError(t, err)
 			require.NoError(t, resp.Body.Close())
 		})

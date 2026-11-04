@@ -26,6 +26,7 @@ func CloseBody(body io.ReadCloser) {
 	if body == nil {
 		return
 	}
+
 	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxDiscardDrain))
 	_ = body.Close()
 }

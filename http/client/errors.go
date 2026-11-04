@@ -94,8 +94,10 @@ func (se UnexpectedStatusError) Error() string {
 		if len(body) > DefaultMaxBodySizeInError {
 			body = body[:DefaultMaxBodySizeInError] + "... (truncated)"
 		}
+
 		msg += ". Details: " + body
 	}
+
 	return msg
 }
 
@@ -137,6 +139,7 @@ func (e *ResponseSizeError) Error() string {
 	if e.Status != 0 {
 		return fmt.Sprintf("response size %d exceeds limit %d (HTTP status %d)", e.Size, e.Limit, e.Status)
 	}
+
 	return fmt.Sprintf("response size %d exceeds limit %d", e.Size, e.Limit)
 }
 
@@ -260,6 +263,7 @@ func (e *SSRFError) Error() string {
 	if e.Rule != "" {
 		return fmt.Sprintf("ssrf: connection blocked by egress rule %s: host=%s ip=%s", e.Rule, e.Host, e.IP)
 	}
+
 	return fmt.Sprintf("ssrf: connection to private/local address blocked: host=%s ip=%s", e.Host, e.IP)
 }
 

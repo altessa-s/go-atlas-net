@@ -23,6 +23,7 @@ func TestEgressPolicy_MappedAddressesConnectOverIPv4(t *testing.T) {
 	t.Parallel()
 
 	prefix := netip.MustParsePrefix
+
 	tests := []struct {
 		name    string
 		allow   []httpclient.EgressRule
@@ -51,6 +52,7 @@ func TestEgressPolicy_MappedAddressesConnectOverIPv4(t *testing.T) {
 			dst := netip.MustParseAddrPort(tc.addr)
 			err := p.Check("example.com", dst)
 			require.Equal(t, tc.blocked, err != nil, err)
+
 			unmapped := netip.AddrPortFrom(dst.Addr().Unmap(), dst.Port())
 			require.Equal(t, err == nil, p.Check("example.com", unmapped) == nil, "the mapped and the IPv4 form decide alike")
 		})
@@ -82,6 +84,7 @@ func TestEgressPolicy_Explain(t *testing.T) {
 			{CIDR: netip.MustParsePrefix("10.1.9.0/24"), Port: 22, Name: "deny[7]"},
 		},
 	)
+
 	tests := []struct {
 		name    string
 		host    string
@@ -112,6 +115,7 @@ func TestEgressPolicy_Explain(t *testing.T) {
 
 			err := p.Check(tc.host, dst)
 			require.Equal(t, d.Err(), err, "Check is Explain without the details")
+
 			if !tc.allowed {
 				ssrfErr := httpclient.IsSSRFError(err)
 				require.NotNil(t, ssrfErr)
@@ -156,6 +160,7 @@ func TestEgressPolicy_CheckHost(t *testing.T) {
 		{CIDR: netip.MustParsePrefix("93.184.216.0/24")},
 		{CIDR: netip.MustParsePrefix("10.0.0.0/8"), Host: "db.example"},
 	})
+
 	tests := []struct {
 		name string
 		host string
@@ -183,6 +188,7 @@ func TestEgressPolicy_CheckHost(t *testing.T) {
 				require.NoError(t, err)
 				return
 			}
+
 			ssrfErr := httpclient.IsSSRFError(err)
 			require.NotNil(t, ssrfErr, err)
 			require.Equal(t, tc.host, ssrfErr.Host)
@@ -254,6 +260,7 @@ func TestNormalizeEgressHostGlob(t *testing.T) {
 		require.NoError(t, err, pattern)
 		require.Equal(t, want, got, pattern)
 	}
+
 	for _, pattern := range []string{
 		"",
 		"example.­",   // the soft hyphen label maps to nothing: "example."
@@ -267,6 +274,7 @@ func TestNormalizeEgressHostGlob(t *testing.T) {
 	} {
 		got, err := httpclient.NormalizeEgressHostGlob(pattern)
 		require.ErrorIs(t, err, httpclient.ErrInvalidEgressRule, "%q -> %q", pattern, got)
+
 		_, err = httpclient.NewEgressPolicy(nil, []httpclient.EgressRule{{Host: pattern}})
 		if pattern != "" { // an empty host is no matcher, rejected as such
 			require.ErrorIs(t, err, httpclient.ErrInvalidEgressRule, pattern)

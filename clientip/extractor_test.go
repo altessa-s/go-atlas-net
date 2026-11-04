@@ -23,6 +23,7 @@ func headerGetter(kv ...string) clientip.HeaderGetter {
 	for i := 0; i+1 < len(kv); i += 2 {
 		h.Add(kv[i], kv[i+1])
 	}
+
 	return httpx.NewHTTPHeaderGetter(&http.Request{Header: h})
 }
 
@@ -33,6 +34,7 @@ func TestExtract_DebugLoggingKeepsResult(t *testing.T) {
 	t.Parallel()
 
 	peer := netip.MustParseAddr("10.0.0.1")
+
 	cases := []struct {
 		name    string
 		peer    netip.Addr
@@ -107,6 +109,7 @@ func TestExtract_DebugLoggingKeepsResult(t *testing.T) {
 			require.Equal(t, tc.want, plain.Extract(t.Context(), p, tc.headers).String())
 
 			var buf bytes.Buffer
+
 			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 			logged, err := clientip.NewExtractor(append(tc.opts, clientip.WithLogger(logger))...)
 			require.NoError(t, err)
@@ -122,6 +125,7 @@ func TestExtract_MalformedHeaderNotLoggedAboveDebug(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
+
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	e, err := clientip.NewExtractor(
 		clientip.WithTrustedPeers(netip.MustParsePrefix("10.0.0.0/8")),
@@ -142,6 +146,7 @@ func TestExtract_SingleValueHeaderCache(t *testing.T) {
 	t.Parallel()
 
 	peer := netip.MustParseAddr("10.0.0.1")
+
 	cases := []struct {
 		name  string
 		value string
@@ -162,6 +167,7 @@ func TestExtract_SingleValueHeaderCache(t *testing.T) {
 					clientip.WithHeaders(clientip.HeaderCFConnectingIP),
 				)...)
 				require.NoError(t, err)
+
 				for range 3 {
 					got := e.Extract(t.Context(), peer, headerGetter(clientip.HeaderCFConnectingIP, tc.value))
 					require.Equal(t, tc.want, got.String())

@@ -18,6 +18,7 @@ import (
 
 func TestXFFTrustBoundary(t *testing.T) {
 	t.Parallel()
+
 	for _, tc := range []struct {
 		name string
 		hop  string
@@ -32,9 +33,11 @@ func TestXFFTrustBoundary(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
 			peer := netip.MustParseAddr("10.0.0.1")
 			extractor, err := clientip.NewExtractor(clientip.WithTrustedProxies(netip.MustParsePrefix("10.0.0.1/32")))
 			require.NoError(t, err)
+
 			headers := httpx.NewHTTPHeaderGetter(&http.Request{Header: http.Header{
 				"X-Forwarded-For": {"8.8.8.8, " + tc.hop + ", 10.0.0.1"},
 				"X-Real-Ip":       {"1.1.1.1"},
@@ -50,8 +53,10 @@ func TestXFFTrustBoundary(t *testing.T) {
 // pick its own address by sending a vendor header the proxy never sets.
 func TestVendorHeaderSpoofing(t *testing.T) {
 	t.Parallel()
+
 	peer := netip.MustParseAddr("10.0.0.1")
 	trusted := clientip.WithTrustedProxies(netip.MustParsePrefix("10.0.0.1/32"))
+
 	for _, tc := range []struct {
 		name    string
 		opts    []clientip.Option
@@ -105,8 +110,10 @@ func TestVendorHeaderSpoofing(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
 			extractor, err := clientip.NewExtractor(append([]clientip.Option{trusted}, tc.opts...)...)
 			require.NoError(t, err)
+
 			for range 2 { // Exercise cold and warm address caches.
 				require.Equal(t, tc.want, extractor.Extract(t.Context(), peer, httpx.NewHTTPHeaderGetter(&http.Request{Header: tc.headers})))
 			}

@@ -26,7 +26,9 @@ func TestFunc(t *testing.T) {
 	t.Parallel()
 
 	errDenied := errors.New("denied")
+
 	var got string
+
 	l := limiters.Func(func(_ context.Context, key string) error {
 		got = key
 		return errDenied
@@ -44,6 +46,7 @@ func TestChain(t *testing.T) {
 		t.Parallel()
 
 		var calls []string
+
 		c := limiters.Chain(recording(&calls, "budget", nil), recording(&calls, "pacer", nil))
 		require.NoError(t, c.Allow(t.Context(), "h"))
 		require.Equal(t, []string{"budget:h", "pacer:h"}, calls)
@@ -53,6 +56,7 @@ func TestChain(t *testing.T) {
 		t.Parallel()
 
 		var calls []string
+
 		c := limiters.Chain(recording(&calls, "budget", errBudget), recording(&calls, "pacer", nil))
 		require.ErrorIs(t, c.Allow(t.Context(), "h"), errBudget)
 		require.Equal(t, []string{"budget:h"}, calls, "a refused request takes nothing from the pacer")
@@ -62,10 +66,12 @@ func TestChain(t *testing.T) {
 		t.Parallel()
 
 		var typedNil limiters.Func
+
 		require.Nil(t, limiters.Chain())
 		require.Nil(t, limiters.Chain(nil, typedNil))
 
 		var calls []string
+
 		only := recording(&calls, "pacer", nil)
 		single := limiters.Chain(nil, only)
 		require.NoError(t, single.Allow(t.Context(), "h"))

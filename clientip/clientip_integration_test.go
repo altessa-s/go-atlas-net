@@ -32,6 +32,7 @@ func clientIPMiddleware(e *clientip.Extractor, next http.Handler) http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
 		ip := e.Extract(r.Context(), peer.Addr(), httpx.NewHTTPHeaderGetter(r))
 		next.ServeHTTP(w, r.WithContext(clientip.NewContext(r.Context(), ip)))
 	})
@@ -43,10 +44,12 @@ func startClientIPBackend(tb testing.TB, opts ...clientip.Option) *httptest.Serv
 
 	e, err := clientip.NewExtractor(opts...)
 	require.NoError(tb, err)
+
 	srv := httptest.NewServer(clientIPMiddleware(e, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, clientip.FromContext(r.Context()).String())
 	})))
 	tb.Cleanup(srv.Close)
+
 	return srv
 }
 
@@ -57,8 +60,10 @@ func startForwardingHop(tb testing.TB, target string) *httptest.Server {
 
 	u, err := url.Parse(target)
 	require.NoError(tb, err)
+
 	srv := httptest.NewServer(httputil.NewSingleHostReverseProxy(u))
 	tb.Cleanup(srv.Close)
+
 	return srv
 }
 
@@ -68,13 +73,17 @@ func fetchClientIP(tb testing.TB, rawURL string, header http.Header) string {
 
 	req, err := http.NewRequestWithContext(tb.Context(), http.MethodGet, rawURL, nil)
 	require.NoError(tb, err)
+
 	req.Header = header
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(tb, err)
+
 	defer func() { _ = resp.Body.Close() }()
+
 	require.Equal(tb, http.StatusOK, resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(tb, err)
+
 	return string(body)
 }
 
@@ -83,6 +92,7 @@ func longChain(n int) string {
 	for i := range parts {
 		parts[i] = "1.0.0." + strconv.Itoa(i%250+1)
 	}
+
 	return strings.Join(parts, ", ")
 }
 
@@ -93,6 +103,7 @@ func TestIntegration_ClientIPOverRealHTTP(t *testing.T) {
 	t.Parallel()
 
 	loopback := netip.MustParsePrefix("127.0.0.0/8")
+
 	cases := []struct {
 		name   string
 		opts   []clientip.Option
@@ -176,6 +187,7 @@ func TestIntegration_ClientIPOverRealHTTP(t *testing.T) {
 			for range tc.hops {
 				entry = startForwardingHop(t, entry).URL
 			}
+
 			require.Equal(t, tc.want, fetchClientIP(t, entry, tc.header))
 		})
 	}

@@ -25,7 +25,9 @@ func (c *rejectedConn) Read(p []byte) (int, error) {
 	if c.header.Len() > 0 {
 		return c.header.Read(p)
 	}
+
 	c.bodyReads++
+
 	return 0, io.EOF
 }
 func (*rejectedConn) Write(p []byte) (int, error) { return len(p), nil }
@@ -33,6 +35,7 @@ func (*rejectedConn) SetDeadline(time.Time) error { return nil }
 
 func TestConnectRejectionDoesNotDrainBody(t *testing.T) {
 	t.Parallel()
+
 	conn := &rejectedConn{header: strings.NewReader("HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 1000000\r\n\r\n")}
 	tunnel, err := sendConnect(t.Context(), conn, "target:443", nil)
 	require.Error(t, err)

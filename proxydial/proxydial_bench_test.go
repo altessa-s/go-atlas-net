@@ -26,6 +26,7 @@ func BenchmarkTLSConfig_NilUser(b *testing.B) {
 
 func BenchmarkTLSConfig_WithUserConfig(b *testing.B) {
 	u, _ := url.Parse("https://proxy.example.com:8443")
+
 	user := &tls.Config{RootCAs: x509.NewCertPool()}
 	for b.Loop() {
 		_ = TLSConfig(u, user)
@@ -74,19 +75,24 @@ func startLoopProxy(b *testing.B, greeting string) *url.URL {
 			if acceptErr != nil {
 				return
 			}
+
 			go func() {
 				defer func() { _ = conn.Close() }()
+
 				br := bufio.NewReader(conn)
 				if _, readErr := http.ReadRequest(br); readErr != nil {
 					return
 				}
+
 				if _, writeErr := io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n"+greeting); writeErr != nil {
 					return
 				}
+
 				_, _ = io.Copy(io.Discard, br)
 			}()
 		}
 	}()
+
 	return &url.URL{Scheme: "http", Host: ln.Addr().String()}
 }
 
@@ -102,14 +108,17 @@ func BenchmarkHTTPConnect(b *testing.B) {
 			proxyURL := startLoopProxy(b, bc.greeting)
 			dialer := &net.Dialer{}
 			buf := make([]byte, len(bc.greeting))
+
 			for b.Loop() {
 				conn, err := HTTPConnect(b.Context(), dialer, proxyURL, nil, "smtp.example:25")
 				if err != nil {
 					b.Fatal(err)
 				}
+
 				if _, err = io.ReadFull(conn, buf); err != nil {
 					b.Fatal(err)
 				}
+
 				_ = conn.Close()
 			}
 		})

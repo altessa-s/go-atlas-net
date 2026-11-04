@@ -37,8 +37,10 @@ func TestHTTPHeaderGetter_NilRequest(t *testing.T) {
 
 func TestHTTPHeaderGetter_NilReceiver(t *testing.T) {
 	var g *HTTPHeaderGetter
+
 	vals := g.GetHeader("X-Test")
 	require.Nil(t, vals)
+
 	got := g.GetSingleHeader("X-Test")
 	require.Equal(t, "", got)
 }
@@ -49,6 +51,7 @@ func TestHTTPHeaderGetter_MissingHeader(t *testing.T) {
 
 	vals := g.GetHeader("X-Missing")
 	require.Equal(t, 0, len(vals))
+
 	got := g.GetSingleHeader("X-Missing")
 	require.Equal(t, "", got)
 }

@@ -43,10 +43,12 @@ func itServer(tb testing.TB, h func(n int32, w http.ResponseWriter, r *http.Requ
 	tb.Helper()
 
 	var hits atomic.Int32
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h(hits.Add(1), w, r)
 	}))
 	tb.Cleanup(srv.Close)
+
 	return srv, &hits
 }
 
@@ -57,19 +59,25 @@ func TestIntegration_RetryAfterIsHonoredAndCapped(t *testing.T) {
 		mu       sync.Mutex
 		arrivals []time.Time
 	)
+
 	srv, hits := itServer(t, func(n int32, w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
+
 		arrivals = append(arrivals, time.Now())
 		mu.Unlock()
+
 		if n <= 2 {
 			w.Header().Set("Retry-After", "30")
 			http.Error(w, "busy", http.StatusServiceUnavailable)
+
 			return
 		}
+
 		_, _ = io.WriteString(w, "ok")
 	})
 
 	const capWait = 80 * time.Millisecond
+
 	c := httpclient.NewHTTPClient(itLoopback, httpclient.WithRetryMax(3),
 		httpclient.WithRetryWait(time.Millisecond, time.Millisecond), httpclient.WithRetryJitter(0),
 		httpclient.WithRetryAfterMax(capWait))
@@ -77,6 +85,7 @@ func TestIntegration_RetryAfterIsHonoredAndCapped(t *testing.T) {
 	start := time.Now()
 	status, body, err := itGet(t, c, srv.URL)
 	elapsed := time.Since(start)
+
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, status)
 	require.Equal(t, "ok", body)
@@ -85,6 +94,7 @@ func TestIntegration_RetryAfterIsHonoredAndCapped(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
+
 	for i := 1; i < len(arrivals); i++ {
 		require.GreaterOrEqual(t, arrivals[i].Sub(arrivals[i-1]), capWait, "retry %d came before the honored Retry-After", i)
 	}
@@ -98,8 +108,10 @@ func TestIntegration_AttemptTimeoutRetriesStalledAttempt(t *testing.T) {
 		if n == 1 {
 			<-r.Context().Done() // stall until the client abandons the attempt
 			close(firstCanceled)
+
 			return
 		}
+
 		_, _ = io.WriteString(w, "second")
 	})
 
@@ -111,6 +123,7 @@ func TestIntegration_AttemptTimeoutRetriesStalledAttempt(t *testing.T) {
 	require.Equal(t, http.StatusOK, status)
 	require.Equal(t, "second", body)
 	require.Equal(t, int32(2), hits.Load())
+
 	select {
 	case <-firstCanceled:
 	case <-time.After(5 * time.Second):
@@ -132,12 +145,14 @@ func (o *itBreakerEvents) Attach(b httpclient.Breakers) { o.breakers = b }
 func (o *itBreakerEvents) BreakerStateChanged(e httpclient.BreakerStateEvent) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+
 	o.changes = append(o.changes, e.From.String()+"->"+e.To.String())
 }
 
 func (o *itBreakerEvents) transitions() []string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+
 	return append([]string(nil), o.changes...)
 }
 
@@ -148,11 +163,13 @@ func TestIntegration_CircuitBreakerTripsAndRecovers(t *testing.T) {
 	t.Parallel()
 
 	var healthy atomic.Bool
+
 	srv, hits := itServer(t, func(_ int32, w http.ResponseWriter, _ *http.Request) {
 		if healthy.Load() {
 			_, _ = io.WriteString(w, "up")
 			return
 		}
+
 		conn, _, err := http.NewResponseController(w).Hijack()
 		if err == nil {
 			_ = conn.Close() // no reply at all: a transport failure
@@ -161,6 +178,7 @@ func TestIntegration_CircuitBreakerTripsAndRecovers(t *testing.T) {
 	host := strings.TrimPrefix(srv.URL, "http://")
 
 	const breakerTimeout = 200 * time.Millisecond
+
 	events := &itBreakerEvents{}
 	c := httpclient.NewHTTPClient(itLoopback, httpclient.WithRetryMax(0),
 		httpclient.WithBreakerTimeout(breakerTimeout), httpclient.WithBreakerMaxRequests(1), httpclient.WithObserver(events))
@@ -170,6 +188,7 @@ func TestIntegration_CircuitBreakerTripsAndRecovers(t *testing.T) {
 		require.Error(t, err)
 		require.False(t, httpclient.IsCircuitBreakerOpen(err))
 	}
+
 	require.Equal(t, gobreaker.StateOpen, events.breakers.HostState(host))
 
 	served := hits.Load()
@@ -179,6 +198,7 @@ func TestIntegration_CircuitBreakerTripsAndRecovers(t *testing.T) {
 
 	healthy.Store(true)
 	time.Sleep(breakerTimeout + 50*time.Millisecond)
+
 	status, body, err := itGet(t, c, srv.URL)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, status)
@@ -192,7 +212,9 @@ func TestIntegration_LimiterRefusalNeverReachesServer(t *testing.T) {
 
 	srv, hits := itServer(t, func(_ int32, w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	errQuota := errors.New("quota exhausted")
+
 	var keys []string
+
 	c := httpclient.NewHTTPClient(itLoopback, httpclient.WithRetryMax(3),
 		httpclient.WithLimiter(limiters.Func(func(_ context.Context, key string) error {
 			keys = append(keys, key)
@@ -220,14 +242,18 @@ func TestIntegration_HostPacerPacesEveryAttempt(t *testing.T) {
 			w.WriteHeader(http.StatusBadGateway)
 			return
 		}
+
 		w.WriteHeader(http.StatusNoContent)
 	})
 
 	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	fake := clock.NewFake(start)
+
 	const interval = time.Second
+
 	pacer, err := hostpacer.New(interval, 1, hostpacer.WithClock(fake))
 	require.NoError(t, err)
+
 	c := httpclient.NewHTTPClient(itLoopback, httpclient.WithRetryMax(1), httpclient.WithRetryWait(time.Nanosecond, time.Nanosecond),
 		httpclient.WithRetryJitter(0), httpclient.WithClock(fake), httpclient.WithLimiter(pacer), httpclient.WithLimiterPerAttempt())
 
@@ -236,6 +262,7 @@ func TestIntegration_HostPacerPacesEveryAttempt(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, http.StatusNoContent, status)
 	}
+
 	require.Equal(t, int32(3), hits.Load())
 	require.Equal(t, 1, pacer.Len())
 	require.InDelta(t, float64(2*interval), float64(fake.Now().Sub(start)), float64(time.Millisecond),
@@ -256,6 +283,7 @@ func TestIntegration_RedirectsAndCookieJar(t *testing.T) {
 			http.Error(w, "no session", http.StatusUnauthorized)
 			return
 		}
+
 		_, _ = io.WriteString(w, "welcome "+ck.Value)
 	})
 	srv := httptest.NewServer(mux)
@@ -266,6 +294,7 @@ func TestIntegration_RedirectsAndCookieJar(t *testing.T) {
 
 		jar, err := cookiejar.New(nil)
 		require.NoError(t, err)
+
 		c := httpclient.NewHTTPClient(itLoopback, httpclient.WithRetryMax(0), httpclient.WithCookieJar(jar))
 
 		status, body, err := itGet(t, c, srv.URL+"/login")
@@ -279,10 +308,12 @@ func TestIntegration_RedirectsAndCookieJar(t *testing.T) {
 
 		jar, err := cookiejar.New(nil)
 		require.NoError(t, err)
+
 		c := httpclient.NewHTTPClient(itLoopback, httpclient.WithRetryMax(0), httpclient.WithCookieJar(jar), httpclient.WithoutRedirects())
 
 		resp, err := c.Get(t.Context(), srv.URL+"/login")
 		require.NoError(t, err)
+
 		_ = resp.Body.Close()
 		require.Equal(t, http.StatusFound, resp.StatusCode)
 		require.Equal(t, "/home", resp.Header.Get("Location"))
@@ -306,6 +337,7 @@ func TestIntegration_BodyReplayedOnRetry(t *testing.T) {
 	payload := make([]byte, 256<<10)
 	_, err := rand.Read(payload)
 	require.NoError(t, err)
+
 	want := sha256.Sum256(payload)
 
 	cases := []struct {
@@ -322,15 +354,18 @@ func TestIntegration_BodyReplayedOnRetry(t *testing.T) {
 			t.Parallel()
 
 			var mismatches atomic.Int32
+
 			srv, hits := itServer(t, func(n int32, w http.ResponseWriter, r *http.Request) {
 				got, rerr := io.ReadAll(r.Body)
 				if rerr != nil || sha256.Sum256(got) != want {
 					mismatches.Add(1)
 				}
+
 				if n == 1 {
 					w.WriteHeader(http.StatusServiceUnavailable)
 					return
 				}
+
 				w.WriteHeader(http.StatusCreated)
 			})
 			c := httpclient.New(itLoopback, httpclient.WithRetryMax(2), httpclient.WithRetryWait(time.Millisecond, time.Millisecond))
@@ -338,15 +373,19 @@ func TestIntegration_BodyReplayedOnRetry(t *testing.T) {
 			// Hide the reader type so the body cannot be rewound by net/http.
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, struct{ io.Reader }{bytes.NewReader(payload)})
 			require.NoError(t, err)
+
 			req.Header = tc.header
+
 			resp, err := c.Do(req)
 			if tc.wantErr != nil {
 				require.ErrorIs(t, err, tc.wantErr)
 			} else {
 				require.NoError(t, err)
+
 				_ = resp.Body.Close()
 				require.Equal(t, http.StatusCreated, resp.StatusCode)
 			}
+
 			require.Equal(t, tc.wantHits, hits.Load())
 			require.Zero(t, mismatches.Load(), "every attempt must carry the full body")
 		})
@@ -359,17 +398,21 @@ func TestIntegration_CancelWhileReadingBody(t *testing.T) {
 	handlerDone := make(chan struct{})
 	srv, _ := itServer(t, func(_ int32, w http.ResponseWriter, r *http.Request) {
 		defer close(handlerDone)
+
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = io.WriteString(w, "first chunk;")
 		_ = http.NewResponseController(w).Flush()
+
 		<-r.Context().Done()
 	})
 	c := httpclient.NewHTTPClient(itLoopback, httpclient.WithRetryMax(0))
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+
 	resp, err := c.Get(ctx, srv.URL)
 	require.NoError(t, err)
+
 	defer func() { _ = resp.Body.Close() }()
 
 	buf := make([]byte, len("first chunk;"))
@@ -378,8 +421,10 @@ func TestIntegration_CancelWhileReadingBody(t *testing.T) {
 	require.Equal(t, "first chunk;", string(buf))
 
 	cancel()
+
 	_, err = io.ReadAll(resp.Body)
 	require.ErrorIs(t, err, context.Canceled)
+
 	select {
 	case <-handlerDone:
 	case <-time.After(5 * time.Second):
@@ -391,9 +436,12 @@ func TestIntegration_ResponseSizeLimit(t *testing.T) {
 	t.Parallel()
 
 	const limit = 1 << 10
+
 	big := strings.Repeat("z", 2*limit)
 	mux := http.NewServeMux()
+
 	var hits atomic.Int32
+
 	mux.HandleFunc("/sized", func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
 		w.Header().Set("Content-Length", strconv.Itoa(len(big)))
@@ -401,6 +449,7 @@ func TestIntegration_ResponseSizeLimit(t *testing.T) {
 	})
 	mux.HandleFunc("/chunked", func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
+
 		for range 8 {
 			_, _ = io.WriteString(w, big[:limit/4])
 			_ = http.NewResponseController(w).Flush()
@@ -408,10 +457,12 @@ func TestIntegration_ResponseSizeLimit(t *testing.T) {
 	})
 	mux.HandleFunc("/small", func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
+
 		_, _ = io.WriteString(w, big[:limit])
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
+
 	c := httpclient.NewHTTPClient(itLoopback, httpclient.WithRetryMax(3), httpclient.WithMaxResponseSize(limit))
 
 	t.Run("content_length_over_limit", func(t *testing.T) {
@@ -429,7 +480,9 @@ func TestIntegration_ResponseSizeLimit(t *testing.T) {
 	t.Run("chunked_over_limit", func(t *testing.T) {
 		resp, err := c.Get(t.Context(), srv.URL+"/chunked")
 		require.NoError(t, err)
+
 		defer func() { _ = resp.Body.Close() }()
+
 		_, err = io.ReadAll(resp.Body)
 		require.ErrorIs(t, err, coreio.ErrReadLimitExceeded)
 	})
@@ -480,19 +533,23 @@ func TestIntegration_SSRFAndEgressPolicy(t *testing.T) {
 			t.Parallel()
 
 			c := httpclient.NewHTTPClient(append([]httpclient.Option{httpclient.WithRetryMax(2)}, tc.opts...)...)
+
 			status, body, err := itGet(t, c, tc.url)
 			if tc.wantBody != "" {
 				require.NoError(t, err)
 				require.Equal(t, http.StatusOK, status)
 				require.Equal(t, tc.wantBody, body)
+
 				return
 			}
+
 			require.ErrorIs(t, err, httpclient.ErrSSRFBlocked)
 			ssrf := httpclient.IsSSRFError(err)
 			require.NotNil(t, ssrf)
 			require.Equal(t, tc.wantRule, ssrf.Rule)
 		})
 	}
+
 	t.Cleanup(func() {
 		// Only the cases expecting a body may have reached a server.
 		require.Equal(t, int32(2), allowedHits.Load())

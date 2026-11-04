@@ -337,11 +337,13 @@ func doRequest(
 	}
 
 	cancel := cancelFromContext(req.Context()) //nolint:contextcheck // req.Context() inherits from ctx via NewRequestWithContext
+
 	resp, err := client.Do(req)
 	if err != nil {
 		if cancel != nil {
 			cancel()
 		}
+
 		return nil, coreerrs.Wrapf(RedactError(err), "%s request%s failed for %s", method, errContext, redactedURL(req.URL))
 	}
 
@@ -355,17 +357,21 @@ func attachCancel(resp *http.Response, cancel context.CancelFunc) *http.Response
 	if cancel == nil {
 		return resp
 	}
+
 	if resp.Body == nil {
 		cancel()
 		return resp
 	}
+
 	body := cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
 	if w, ok := resp.Body.(io.Writer); ok {
 		// 101 Switching Protocols bodies are writable; keep that capability.
 		resp.Body = cancelOnCloseReadWriteBody{cancelOnCloseBody: body, Writer: w}
 		return resp
 	}
+
 	resp.Body = body
+
 	return resp
 }
 
@@ -378,6 +384,7 @@ type cancelOnCloseBody struct {
 func (b cancelOnCloseBody) Close() error {
 	err := b.ReadCloser.Close()
 	b.cancel()
+
 	return err
 }
 
@@ -627,11 +634,13 @@ func WithBearerToken(token string) RequestOption {
 func WithQueryParams(params url.Values) RequestOption {
 	return func(req *http.Request) {
 		q := req.URL.Query()
+
 		for k, values := range params {
 			for _, v := range values {
 				q.Add(k, v)
 			}
 		}
+
 		req.URL.RawQuery = q.Encode()
 	}
 }
@@ -679,6 +688,7 @@ var cancelContextKey = cancelContextKeyType{}
 // closed (or at once when the request fails).
 func boundRequestContext(ctx context.Context, timeout *time.Duration, deadline *time.Time) context.Context {
 	var cancel context.CancelFunc
+
 	switch {
 	case timeout != nil:
 		ctx, cancel = corecontext.WithMaxTimeout(ctx, *timeout)
@@ -687,6 +697,7 @@ func boundRequestContext(ctx context.Context, timeout *time.Duration, deadline *
 	default:
 		return ctx
 	}
+
 	return context.WithValue(ctx, cancelContextKey, cancel)
 }
 
@@ -694,5 +705,6 @@ func cancelFromContext(ctx context.Context) context.CancelFunc {
 	if cancel, ok := ctx.Value(cancelContextKey).(context.CancelFunc); ok {
 		return cancel
 	}
+
 	return nil
 }

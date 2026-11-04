@@ -92,6 +92,7 @@ type circuitBreakerClient struct {
 // or consecutive failures reach the limit.
 func defaultReadyToTrip(counts gobreaker.Counts) bool {
 	failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
+
 	return counts.Requests >= DefaultBreakerMinRequests &&
 		(failureRatio >= DefaultBreakerFailureRatioThreshold ||
 			counts.ConsecutiveFailures >= DefaultBreakerConsecutiveFailuresLimit)
@@ -110,10 +111,12 @@ func applyProxy(httpClient *http.Client, opts options) *http.Client {
 	if opts.proxy == nil {
 		return httpClient
 	}
+
 	t, ok := transportOf(httpClient).(*http.Transport)
 	if !ok {
 		return httpClient
 	}
+
 	cloned := t.Clone()
 	if opts.proxyTLSConfig != nil {
 		// Custom DialContext handles TCP+TLS+CONNECT manually
@@ -126,6 +129,7 @@ func applyProxy(httpClient *http.Client, opts options) *http.Client {
 	} else {
 		cloned.Proxy = opts.proxy
 	}
+
 	return withClientTransport(httpClient, opts.client, cloned)
 }
 
@@ -136,11 +140,14 @@ func applySSRFProtection(httpClient *http.Client, opts options) *http.Client {
 	if !opts.ssrfProtection {
 		return httpClient
 	}
+
 	t, ok := transportOf(httpClient).(*http.Transport)
 	if !ok {
 		return httpClient
 	}
+
 	wrapped := newSSRFSafeTransport(t, opts.ssrfAllowedCIDRs, opts.proxy, opts.egressPolicy)
+
 	return withClientTransport(httpClient, opts.client, wrapped)
 }
 
@@ -150,6 +157,7 @@ func transportOf(c *http.Client) http.RoundTripper {
 	if c.Transport == nil {
 		return http.DefaultTransport
 	}
+
 	return c.Transport
 }
 
@@ -161,6 +169,7 @@ func withClientTransport(httpClient, callerClient *http.Client, transport http.R
 		httpClient.Transport = transport
 		return httpClient
 	}
+
 	return &http.Client{
 		Transport:     transport,
 		CheckRedirect: httpClient.CheckRedirect,
@@ -266,6 +275,7 @@ func (c *circuitBreakerClient) getBreakerForHost(hostname string) *gobreaker.Cir
 	if exists {
 		return breaker
 	}
+
 	if full {
 		c.sharedUsed.Store(true)
 		return c.CircuitBreaker
@@ -280,13 +290,17 @@ func (c *circuitBreakerClient) getBreakerForHost(hostname string) *gobreaker.Cir
 	if exists {
 		return breaker
 	}
+
 	if !explicit && c.lazyBreakers >= c.maxHostBreakers {
 		c.sharedUsed.Store(true)
 		return c.CircuitBreaker
 	}
 
-	var st gobreaker.Settings
-	var userCb func(name string, from gobreaker.State, to gobreaker.State)
+	var (
+		st     gobreaker.Settings
+		userCb func(name string, from gobreaker.State, to gobreaker.State)
+	)
+
 	if explicit {
 		// Set defaults if not provided
 		st = gobreaker.Settings{
@@ -299,6 +313,7 @@ func (c *circuitBreakerClient) getBreakerForHost(hostname string) *gobreaker.Cir
 		if st.Name == "" {
 			st.Name = fmt.Sprintf("httpclient-cb-%s-%d", hostname, circuitBreakerCounter.Add(1))
 		}
+
 		userCb = settings.OnStateChange
 	} else {
 		st = gobreaker.Settings{
@@ -308,12 +323,14 @@ func (c *circuitBreakerClient) getBreakerForHost(hostname string) *gobreaker.Cir
 			Timeout:     c.breakerTimeout,
 		}
 	}
+
 	if st.ReadyToTrip == nil {
 		st.ReadyToTrip = defaultReadyToTrip
 	}
 
 	st.OnStateChange = func(n string, from gobreaker.State, to gobreaker.State) {
 		c.observer.BreakerStateChanged(BreakerStateEvent{Name: n, Host: hostname, From: from, To: to})
+
 		if userCb != nil {
 			userCb(n, from, to)
 		}
@@ -326,6 +343,7 @@ func (c *circuitBreakerClient) getBreakerForHost(hostname string) *gobreaker.Cir
 	if !explicit {
 		c.lazyBreakers++
 	}
+
 	return breaker
 }
 
@@ -373,7 +391,6 @@ func (c *circuitBreakerClient) newCircuitBreakerRoundTripper(next http.RoundTrip
 			// cause graph bounded, before anything formats or searches it.
 			return res, redactTransportError(err)
 		})
-
 		if err != nil {
 			// The URL omits user info and the query string: both may carry
 			// credentials.

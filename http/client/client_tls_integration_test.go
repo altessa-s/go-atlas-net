@@ -48,6 +48,7 @@ func newITPKI(tb testing.TB) *itPKI {
 
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(tb, err)
+
 	caTmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: "go-atlas-net integration CA"},
@@ -65,6 +66,7 @@ func newITPKI(tb testing.TB) *itPKI {
 	issue := func(serial int64, cn string, usage x509.ExtKeyUsage, ips []net.IP, dns []string) tls.Certificate {
 		key, kerr := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		require.NoError(tb, kerr)
+
 		tmpl := &x509.Certificate{
 			SerialNumber: big.NewInt(serial),
 			Subject:      pkix.Name{CommonName: cn},
@@ -77,11 +79,13 @@ func newITPKI(tb testing.TB) *itPKI {
 		}
 		der, cerr := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caKey)
 		require.NoError(tb, cerr)
+
 		return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 	}
 
 	roots := x509.NewCertPool()
 	roots.AddCert(caCert)
+
 	return &itPKI{
 		roots:  roots,
 		server: issue(2, "localhost", x509.ExtKeyUsageServerAuth, []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback}, []string{"localhost"}),
@@ -95,11 +99,14 @@ func itTLSServer(tb testing.TB, pki *itPKI, h http.Handler, tweak func(*tls.Conf
 	tb.Helper()
 
 	var handshakes atomic.Int32
+
 	srv := httptest.NewUnstartedServer(h)
+
 	cfg := &tls.Config{Certificates: []tls.Certificate{pki.server}, MinVersion: tls.VersionTLS12}
 	if tweak != nil {
 		tweak(cfg)
 	}
+
 	cfg.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
 		handshakes.Add(1)
 		return nil, nil //nolint:nilnil // nil config means "use the server config"
@@ -108,6 +115,7 @@ func itTLSServer(tb testing.TB, pki *itPKI, h http.Handler, tweak func(*tls.Conf
 	srv.Config.ErrorLog = log.New(io.Discard, "", 0) // rejected handshakes are expected
 	srv.StartTLS()
 	tb.Cleanup(srv.Close)
+
 	return srv, &handshakes
 }
 
@@ -116,6 +124,7 @@ func itTLSServer(tb testing.TB, pki *itPKI, h http.Handler, tweak func(*tls.Conf
 func itTransport(pki *itPKI, certs ...tls.Certificate) *http.Transport {
 	t := httpclient.DefaultPooledTransport()
 	t.TLSClientConfig = &tls.Config{RootCAs: pki.roots, Certificates: certs, MinVersion: tls.VersionTLS12}
+
 	return t
 }
 
@@ -129,7 +138,9 @@ func itGet(tb testing.TB, c httpclient.HTTPClient, rawURL string) (int, string, 
 		return 0, "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
+
 	body, err := io.ReadAll(resp.Body)
+
 	return resp.StatusCode, string(body), err
 }
 
@@ -159,6 +170,7 @@ func TestIntegration_TLSCustomRootCA(t *testing.T) {
 		before := handshakes.Load()
 		c := httpclient.NewHTTPClient(itLoopback, httpclient.WithRetryMax(3), httpclient.WithRetryWait(time.Millisecond, time.Millisecond))
 		_, _, err := itGet(t, c, srv.URL)
+
 		var verr *tls.CertificateVerificationError
 		require.ErrorAs(t, err, &verr)
 		require.Equal(t, int32(1), handshakes.Load()-before, "a rejected certificate must not be retried")
@@ -169,9 +181,12 @@ func TestIntegration_MutualTLS(t *testing.T) {
 	t.Parallel()
 
 	pki := newITPKI(t)
+
 	var served atomic.Int32
+
 	srv, _ := itTLSServer(t, pki, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		served.Add(1)
+
 		_, _ = io.WriteString(w, r.TLS.PeerCertificates[0].Subject.CommonName)
 	}), func(cfg *tls.Config) {
 		cfg.ClientAuth = tls.RequireAndVerifyClientCert
@@ -210,6 +225,7 @@ type itConnectProxy struct {
 func (p *itConnectProxy) seen() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	return slices.Clone(p.connects)
 }
 
@@ -219,6 +235,7 @@ func startITConnectProxy(tb testing.TB, user, pass string) *itConnectProxy {
 	p := &itConnectProxy{user: user, pass: pass, open: make(map[net.Conn]struct{})}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(tb, err)
+
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		for {
@@ -226,6 +243,7 @@ func startITConnectProxy(tb testing.TB, user, pass string) *itConnectProxy {
 			if aerr != nil {
 				return
 			}
+
 			p.mu.Lock()
 			p.open[conn] = struct{}{}
 			p.mu.Unlock()
@@ -242,44 +260,58 @@ func startITConnectProxy(tb testing.TB, user, pass string) *itConnectProxy {
 		p.mu.Unlock()
 		wg.Wait()
 	})
+
 	p.url = &url.URL{Scheme: "http", Host: ln.Addr().String()}
+
 	return p
 }
 
 func (p *itConnectProxy) serve(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
+
 	deadline := time.Now().Add(10 * time.Second)
 	_ = conn.SetDeadline(deadline)
 	br := bufio.NewReader(conn)
+
 	req, err := http.ReadRequest(br)
 	if err != nil || req.Method != http.MethodConnect {
 		return
 	}
+
 	if p.user != "" {
 		want := "Basic " + base64.StdEncoding.EncodeToString([]byte(p.user+":"+p.pass))
 		if req.Header.Get("Proxy-Authorization") != want {
 			p.denied.Add(1)
+
 			_, _ = io.WriteString(conn, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"it\"\r\nContent-Length: 0\r\n\r\n")
+
 			return
 		}
 	}
+
 	p.mu.Lock()
 	p.connects = append(p.connects, req.Host)
 	p.mu.Unlock()
+
 	upstream, err := net.DialTimeout("tcp", req.Host, 5*time.Second)
 	if err != nil {
 		_, _ = io.WriteString(conn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
 		return
 	}
+
 	defer func() { _ = upstream.Close() }()
+
 	_ = upstream.SetDeadline(deadline)
+
 	if _, err = io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
 		return
 	}
+
 	go func() {
 		_, _ = io.Copy(upstream, br)
 		_ = upstream.Close() // the client side is gone: end the other direction too
 	}()
+
 	_, _ = io.Copy(conn, upstream)
 }
 

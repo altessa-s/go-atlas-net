@@ -12,6 +12,7 @@ import (
 
 func BenchmarkParseBaseURL(b *testing.B) {
 	b.ReportAllocs()
+
 	for b.Loop() {
 		if _, err := urlx.ParseBaseURL("https://api.example.org/v1/"); err != nil {
 			b.Fatal(err)
@@ -26,6 +27,7 @@ func BenchmarkJoinPath(b *testing.B) {
 	}
 
 	b.ReportAllocs()
+
 	for b.Loop() {
 		if _, err := urlx.JoinPath(base, "chat/completions"); err != nil {
 			b.Fatal(err)
@@ -40,6 +42,7 @@ func BenchmarkCanonical(b *testing.B) {
 	}
 
 	b.ReportAllocs()
+
 	for b.Loop() {
 		_ = urlx.Canonical(base)
 	}
@@ -65,8 +68,10 @@ func BenchmarkJoinPath_Shapes(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
+
 			for b.Loop() {
 				if _, err := urlx.JoinPath(base, tc.elem...); err != nil {
 					b.Fatal(err)

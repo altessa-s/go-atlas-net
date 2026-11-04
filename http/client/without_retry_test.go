@@ -30,6 +30,7 @@ func TestWithoutRetry_ReturnsEveryStatusOnce(t *testing.T) {
 			t.Parallel()
 
 			var hits atomic.Int32
+
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				hits.Add(1)
 				w.Header().Set("Retry-After", "1")
@@ -68,12 +69,16 @@ func TestWithoutRetry_TransportErrorOnce(t *testing.T) {
 	t.Parallel()
 
 	var hits atomic.Int32
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
+
 		hj, ok := w.(http.Hijacker)
 		require.True(t, ok)
+
 		conn, _, err := hj.Hijack()
 		require.NoError(t, err)
+
 		_ = conn.Close() // drop the connection without a reply
 	}))
 	t.Cleanup(srv.Close)
@@ -81,10 +86,12 @@ func TestWithoutRetry_TransportErrorOnce(t *testing.T) {
 	c := httpclient.New(loopback, httpclient.WithoutRetry())
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, nil)
 	require.NoError(t, err)
+
 	resp, err := c.Do(req)
 	if resp != nil {
 		_ = resp.Body.Close()
 	}
+
 	require.Error(t, err)
 	require.Nil(t, httpclient.IsUnexpectedStatusError(err))
 	require.Equal(t, int32(1), hits.Load(), "a transport error is not retried")

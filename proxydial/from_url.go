@@ -48,6 +48,7 @@ func FromURL(proxyURL *url.URL, opts ...Option) (DialContextFunc, error) {
 	o := newOptions(opts...)
 
 	var dial DialContextFunc
+
 	switch proxyURL.Scheme {
 	case "http", "https":
 		dialer := o.dialer
@@ -70,5 +71,6 @@ func FromURL(proxyURL *url.URL, opts ...Option) (DialContextFunc, error) {
 	if o.ssrfGuard != nil {
 		dial = guardDial(dial, o.ssrfGuard, o.resolver)
 	}
+
 	return dial, nil
 }

@@ -29,24 +29,30 @@ func validateSSRFTransport(opts *options) error {
 	if !opts.ssrfProtection {
 		return nil
 	}
+
 	transport := http.DefaultTransport
 	if opts.client != nil && opts.client.Transport != nil {
 		transport = opts.client.Transport
 	}
+
 	if opts.transport != nil {
 		transport = opts.transport
 	}
+
 	t, ok := transport.(*http.Transport)
 	if !ok || t == nil {
 		return fmt.Errorf("%w: requires a non-nil *http.Transport", ErrSSRFUnsafeTransport)
 	}
+
 	if t.DialTLS != nil || t.DialTLSContext != nil { //nolint:staticcheck // deprecated dialers can still bypass the guard
 		return fmt.Errorf("%w: custom TLS dialer", ErrSSRFUnsafeTransport)
 	}
+
 	if opts.proxyTLSConfig != nil {
 		// The proxy TLS dialer connects to the proxy outside the guarded dialer.
 		return fmt.Errorf("%w: proxy TLS configuration", ErrSSRFUnsafeTransport)
 	}
+
 	if opts.proxy == nil && t.Proxy != nil {
 		// Only these named, non-closure resolvers are recognized; this does
 		// not attempt to compare arbitrary callback behavior.
@@ -55,6 +61,7 @@ func validateSSRFTransport(opts *options) error {
 			return fmt.Errorf("%w: proxy resolver on the transport", ErrSSRFUnsafeTransport)
 		}
 	}
+
 	return nil
 }
 
@@ -82,20 +89,25 @@ func newSSRFSafeTransport(base *http.Transport, allowedPrefixes []netip.Prefix, 
 		Timeout:   ssrfDialTimeout,
 		KeepAlive: ssrfDialKeepAlive,
 	}
+
 	if policy != nil {
 		policy = policy.withAllowedCIDRs(allowedPrefixes)
 		if proxy != nil {
 			t.Proxy = policy.guardProxy(proxy)
 		}
+
 		t.DialContext = policy.DialContext(dialer)
+
 		return t
 	}
 
 	if proxy != nil {
 		t.Proxy = guardedProxy(proxy, allowedPrefixes)
 	}
+
 	dialer.Control = SSRFDialControl(allowedPrefixes...)
 	t.DialContext = dialer.DialContext
+
 	return t
 }
 
@@ -106,16 +118,19 @@ func newSSRFSafeTransport(base *http.Transport, allowedPrefixes []netip.Prefix, 
 // names are resolved by the proxy and cannot be checked here.
 func guardedProxy(proxy ProxyFunc, allowedPrefixes []netip.Prefix) ProxyFunc {
 	check := SSRFDialControl(allowedPrefixes...)
+
 	return func(req *http.Request) (*url.URL, error) {
 		u, err := proxy(req)
 		if err != nil || u == nil {
 			return u, err
 		}
+
 		if ip, perr := netip.ParseAddr(egressrule.NormalizeHost(req.URL.Hostname())); perr == nil {
 			if cerr := check("tcp", net.JoinHostPort(ip.String(), "0"), nil); cerr != nil {
 				return nil, cerr
 			}
 		}
+
 		return u, nil
 	}
 }
@@ -133,12 +148,14 @@ func guardedProxy(proxy ProxyFunc, allowedPrefixes []netip.Prefix) ProxyFunc {
 // dialer.
 func SSRFDialControl(allowed ...netip.Prefix) func(network, address string, c syscall.RawConn) error {
 	const mappedIPv4PrefixBits = 96
+
 	allowedPrefixes := slices.Clone(allowed)
 	for i, prefix := range allowedPrefixes {
 		if prefix.Addr().Is4In6() && prefix.Bits() >= mappedIPv4PrefixBits {
 			allowedPrefixes[i] = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-mappedIPv4PrefixBits)
 		}
 	}
+
 	return func(_, address string, _ syscall.RawConn) error {
 		host, _, err := net.SplitHostPort(address)
 		if err != nil {

@@ -18,6 +18,7 @@ import (
 
 func TestSSRFControl_BlocksLoopback(t *testing.T) {
 	t.Parallel()
+
 	ctrl := SSRFDialControl()
 
 	for _, addr := range []string{"127.0.0.1:80", "127.1.2.3:80", "[::1]:80", "[::ffff:127.0.0.1]:80", "[::ffff:10.0.0.1]:80"} {
@@ -28,6 +29,7 @@ func TestSSRFControl_BlocksLoopback(t *testing.T) {
 
 func TestSSRFControl_AllowedCIDRsExemptLoopback(t *testing.T) {
 	t.Parallel()
+
 	ctrl := SSRFDialControl(netip.MustParsePrefix("127.0.0.0/8"),
 		netip.MustParsePrefix("::1/128"))
 
@@ -207,14 +209,17 @@ func TestSSRFControlSignature(t *testing.T) {
 
 func TestSSRFControlBlocksZonedAddresses(t *testing.T) {
 	t.Parallel()
+
 	for _, addr := range []string{"[fe80::1%en0]:80", "[::1%lo0]:80", "[fd00::1%en0]:80"} {
 		require.ErrorIs(t, SSRFDialControl()("tcp6", addr, nil), ErrSSRFBlocked, addr)
 	}
+
 	require.NoError(t, SSRFDialControl(netip.MustParsePrefix("fe80::/10"))("tcp6", "[fe80::1%en0]:80", nil))
 }
 
 func TestSSRFControl_BlocksNAT64(t *testing.T) {
 	t.Parallel()
+
 	ctrl := SSRFDialControl()
 	for _, addr := range []string{
 		"[64:ff9b::a9fe:a9fe]:80",   // well-known prefix → 169.254.169.254
@@ -223,5 +228,6 @@ func TestSSRFControl_BlocksNAT64(t *testing.T) {
 	} {
 		require.ErrorIs(t, ctrl("tcp", addr, nil), ErrSSRFBlocked, addr)
 	}
+
 	require.NoError(t, ctrl("tcp", "[64:ff9b::808:808]:443", nil))
 }

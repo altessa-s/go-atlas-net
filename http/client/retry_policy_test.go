@@ -37,6 +37,7 @@ func TestDefaultRetryableStatuses(t *testing.T) {
 		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout,
 	}, got)
 	got[0] = http.StatusTeapot
+
 	require.Equal(t, http.StatusRequestTimeout, httpclient.DefaultRetryableStatuses()[0], "every call returns a fresh slice")
 }
 
@@ -45,6 +46,7 @@ func TestDefaultRetryPolicyTransportErrors(t *testing.T) {
 
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
+
 	generic := errors.New("connection reset")
 	// The error net/http's Transport returns for a scheme it does not support,
 	// bare, as a round tripper receives it.
@@ -52,8 +54,10 @@ func TestDefaultRetryPolicyTransportErrors(t *testing.T) {
 	resp, schemeErr := (&http.Transport{}).RoundTrip(ftp) //nolint:bodyclose // the round trip fails without a reply
 	require.Nil(t, resp)
 	require.Error(t, schemeErr)
+
 	verifyErr := &tls.CertificateVerificationError{Err: errors.New("custom verification failed")}
 	invalidErr := x509.CertificateInvalidError{Reason: x509.Expired}
+
 	tests := []struct {
 		name  string
 		ctx   context.Context
@@ -90,6 +94,7 @@ func TestDefaultRetryPolicyReplies(t *testing.T) {
 	t.Parallel()
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.test/v1/items?token=secret", nil)
+
 	tests := []struct {
 		name   string
 		resp   *http.Response
@@ -112,13 +117,16 @@ func TestDefaultRetryPolicyReplies(t *testing.T) {
 
 			retry, err := httpclient.DefaultRetryPolicy(t.Context(), tc.resp, nil)
 			require.Equal(t, tc.retry, retry)
+
 			if tc.status == 0 {
 				require.NoError(t, err)
 				return
 			}
+
 			se := httpclient.IsUnexpectedStatusError(err)
 			require.NotNil(t, se, "%v", err)
 			require.Equal(t, max(tc.status, 0), se.Status)
+
 			if tc.resp.Request != nil {
 				require.Equal(t, "api.test", se.Host)
 				require.Equal(t, "/v1/items", se.URI, "the query string is omitted")
@@ -148,15 +156,19 @@ func TestDefaultRetryPolicyAsHandler(t *testing.T) {
 // flakyServer answers failures times with status, then 200, counting hits.
 func flakyServer(t *testing.T, status int, failures int32) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
+
 	var hits atomic.Int32
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if hits.Add(1) <= failures {
 			w.WriteHeader(status)
 			return
 		}
+
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
+
 	return srv, &hits
 }
 
@@ -180,16 +192,20 @@ func TestWithRetryableStatuses(t *testing.T) {
 			t.Parallel()
 
 			srv, hits := flakyServer(t, tc.status, 2)
+
 			opts := []httpclient.Option{loopback, httpclient.WithRetryMax(3), fastRetries}
 			if tc.statuses != nil {
 				opts = append(opts, httpclient.WithRetryableStatuses(tc.statuses...))
 			}
+
 			err := doGet(t, httpclient.New(opts...), t.Context(), srv.URL)
 			require.Equal(t, tc.hits, hits.Load())
+
 			if !tc.failed {
 				require.NoError(t, err)
 				return
 			}
+
 			se := httpclient.IsUnexpectedStatusError(err)
 			require.NotNil(t, se, "%v", err)
 			require.Equal(t, tc.status, se.Status)
@@ -216,6 +232,7 @@ func TestSSRFRefusalNotRetried(t *testing.T) {
 			t.Parallel()
 
 			var calls atomic.Int32
+
 			refusing := httpx.RoundTripperFunc(func(*http.Request) (*http.Response, error) {
 				calls.Add(1)
 				return nil, tc.err
@@ -227,6 +244,7 @@ func TestSSRFRefusalNotRetried(t *testing.T) {
 			require.ErrorIs(t, err, httpclient.ErrSSRFBlocked)
 			require.ErrorIs(t, err, httpclient.ErrNonRetryable)
 			require.ErrorIs(t, err, tc.err)
+
 			var urlErr *url.Error
 			require.ErrorAs(t, err, &urlErr)
 		})
@@ -240,6 +258,7 @@ func TestRetryRejectedCertificateIsNotRetried(t *testing.T) {
 	t.Parallel()
 
 	var conns atomic.Int32
+
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("the request reached the handler over an untrusted certificate")
 	}))

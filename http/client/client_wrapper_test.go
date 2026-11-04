@@ -48,9 +48,12 @@ func echoServer(tb testing.TB) (*httptest.Server, *atomic.Int32) {
 	tb.Helper()
 
 	var hits atomic.Int32
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
+
 		body, _ := io.ReadAll(r.Body)
+
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(echoedRequest{
 			Method:      r.Method,
@@ -62,6 +65,7 @@ func echoServer(tb testing.TB) (*httptest.Server, *atomic.Int32) {
 		})
 	}))
 	tb.Cleanup(srv.Close)
+
 	return srv, &hits
 }
 
@@ -69,10 +73,14 @@ func decodeEcho(tb testing.TB, resp *http.Response, err error) echoedRequest {
 	tb.Helper()
 
 	require.NoError(tb, err)
+
 	defer func() { _ = resp.Body.Close() }()
+
 	require.Equal(tb, http.StatusOK, resp.StatusCode)
+
 	var got echoedRequest
 	require.NoError(tb, json.NewDecoder(resp.Body).Decode(&got))
+
 	return got
 }
 
@@ -82,6 +90,7 @@ func TestHTTPClient_VerbHelpers(t *testing.T) {
 	srv, _ := echoServer(t)
 	c := httpclient.NewHTTPClient(loopback, httpclient.WithRetryMax(0))
 	payload := map[string]string{"name": "ada"}
+
 	const jsonBody = "{\"name\":\"ada\"}\n"
 
 	cases := []struct {
@@ -230,10 +239,12 @@ func TestHTTPClient_JSONHelpersRejectUnencodableBody(t *testing.T) {
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
+
 			var jerr *json.UnsupportedTypeError
 			require.ErrorAs(t, err, &jerr)
 		})
 	}
+
 	t.Cleanup(func() { require.Zero(t, hits.Load(), "a body that cannot be encoded must not be sent") })
 }
 
@@ -298,8 +309,11 @@ func TestCloseBody(t *testing.T) {
 
 	t.Run("drains_short_body", func(t *testing.T) {
 		t.Parallel()
+
 		r := strings.NewReader("leftover")
+
 		var closed atomic.Bool
+
 		httpclient.CloseBody(readCloser{Reader: r, close: func() error { closed.Store(true); return nil }})
 		require.Zero(t, r.Len(), "a short body is drained so the connection can be reused")
 		require.True(t, closed.Load())
@@ -307,6 +321,7 @@ func TestCloseBody(t *testing.T) {
 
 	t.Run("bounds_endless_body", func(t *testing.T) {
 		t.Parallel()
+
 		body := &trackingBody{}
 		httpclient.CloseBody(body)
 		require.True(t, body.closed.Load())
@@ -326,6 +341,7 @@ func TestUnexpectedStatusError_BodyPreview(t *testing.T) {
 	t.Parallel()
 
 	long := strings.Repeat("x", httpclient.DefaultMaxBodySizeInError+10)
+
 	cases := []struct {
 		name         string
 		body         []byte
@@ -347,10 +363,12 @@ func TestUnexpectedStatusError_BodyPreview(t *testing.T) {
 			err := httpclient.UnexpectedStatusError{Status: http.StatusTooManyRequests, Host: "api.example", URI: "/v1", Method: http.MethodGet, Body: tc.body}
 			msg := err.Error()
 			require.True(t, strings.HasPrefix(msg, "unexpected response status: 429 (Too Many Requests); request: GET api.example/v1"), msg)
+
 			if tc.wantNoDetail {
 				require.NotContains(t, msg, "Details")
 				return
 			}
+
 			require.True(t, strings.HasSuffix(msg, tc.wantSuffix))
 		})
 	}
@@ -368,6 +386,7 @@ func (c *sleepRecorder) Sleep(ctx context.Context, d time.Duration) error {
 	c.mu.Lock()
 	c.sleeps = append(c.sleeps, d)
 	c.mu.Unlock()
+
 	return c.Fake.Sleep(ctx, d)
 }
 
@@ -403,6 +422,7 @@ func TestRetryBackoffOptions(t *testing.T) {
 			t.Parallel()
 
 			var hits atomic.Int32
+
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				hits.Add(1)
 				w.WriteHeader(http.StatusBadGateway)
@@ -419,10 +439,12 @@ func TestRetryBackoffOptions(t *testing.T) {
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
+
 			require.ErrorIs(t, err, httpclient.ErrMaxRetriesExceeded)
 			require.Equal(t, int32(4), hits.Load())
 			clk.mu.Lock()
 			defer clk.mu.Unlock()
+
 			require.Equal(t, tc.want, clk.sleeps)
 		})
 	}
@@ -462,10 +484,12 @@ func TestBreakerMaxRequests(t *testing.T) {
 
 			synctest.Test(t, func(t *testing.T) {
 				var healthy atomic.Bool
+
 				rt := httpx.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 					if !healthy.Load() {
 						return nil, errors.New("connection reset")
 					}
+
 					return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
 				})
 				probe := &breakerProbe{}
@@ -480,16 +504,19 @@ func TestBreakerMaxRequests(t *testing.T) {
 				do := func() error {
 					req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://svc.test/", nil)
 					require.NoError(t, err)
+
 					resp, err := c.Do(req)
 					if resp != nil {
 						_ = resp.Body.Close()
 					}
+
 					return err
 				}
 
 				for range httpclient.DefaultBreakerMinRequests {
 					require.Error(t, do())
 				}
+
 				err := do()
 				require.True(t, httpclient.IsCircuitBreakerOpen(err), "the tripped breaker must reject: %v", err)
 				require.Equal(t, int32(1), probe.rejected.Load())
@@ -497,9 +524,11 @@ func TestBreakerMaxRequests(t *testing.T) {
 
 				time.Sleep(time.Minute + time.Second)
 				healthy.Store(true)
+
 				for range tc.successes {
 					require.NoError(t, do())
 				}
+
 				require.Equal(t, tc.want, probe.breakers.HostState("svc.test"))
 			})
 		})
@@ -515,12 +544,14 @@ type syncWriter struct {
 func (w *syncWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
 	return w.buf.Write(p)
 }
 
 func (w *syncWriter) String() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
 	return w.buf.String()
 }
 
@@ -531,6 +562,7 @@ func TestDefaultOnStateChange(t *testing.T) {
 		t.Parallel()
 
 		var out syncWriter
+
 		logger := slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		rt := httpx.RoundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("connection reset") })
 		c := httpclient.New(
@@ -543,15 +575,19 @@ func TestDefaultOnStateChange(t *testing.T) {
 				OnStateChange: httpclient.DefaultOnStateChange(logger),
 			}),
 		)
+
 		for range httpclient.DefaultBreakerMinRequests {
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://svc.test/", nil)
 			require.NoError(t, err)
+
 			resp, err := c.Do(req)
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
+
 			require.Error(t, err)
 		}
+
 		require.Contains(t, out.String(), "circuit [svc] change state from closed to open")
 		require.Contains(t, out.String(), "level=DEBUG")
 	})

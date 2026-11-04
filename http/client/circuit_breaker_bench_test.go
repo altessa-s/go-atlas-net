@@ -15,6 +15,7 @@ func BenchmarkGetBreakerForHost(b *testing.B) {
 		cb := newCB()
 		cb.getBreakerForHost("a.test")
 		b.ReportAllocs()
+
 		for b.Loop() {
 			cb.getBreakerForHost("a.test")
 		}
@@ -22,7 +23,9 @@ func BenchmarkGetBreakerForHost(b *testing.B) {
 
 	b.Run("overflow", func(b *testing.B) {
 		cb := newCB(WithMaxHostBreakers(0))
+
 		b.ReportAllocs()
+
 		for b.Loop() {
 			cb.getBreakerForHost("a.test")
 		}

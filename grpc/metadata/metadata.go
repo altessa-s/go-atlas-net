@@ -40,6 +40,7 @@ func (g *HeaderGetter) GetHeader(name string) []string {
 	if g == nil || g.ctx == nil {
 		return nil
 	}
+
 	return grpcmd.ValueFromIncomingContext(g.ctx, name)
 }
 
@@ -53,8 +54,10 @@ func (g *HeaderGetter) GetSingleHeader(name string) string {
 	if g == nil || g.ctx == nil {
 		return ""
 	}
+
 	if vals := grpcmd.ValueFromIncomingContext(g.ctx, name); len(vals) > 0 {
 		return vals[0]
 	}
+
 	return ""
 }

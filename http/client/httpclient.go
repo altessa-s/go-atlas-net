@@ -90,6 +90,7 @@ func (c *Client) retractableClient() *http.Client {
 	if err := validateSSRFTransport(&c.options); err != nil {
 		panic(err)
 	}
+
 	cbClient := newCircuitBreakerClient(c.options)
 	c.options.observer.Attach(cbClient)
 
@@ -103,6 +104,7 @@ func (c *Client) retractableClient() *http.Client {
 	if jar == nil {
 		jar = stdClient.Jar
 	}
+
 	stdClient.Jar = nil
 	if jar != nil {
 		stdClient.CheckRedirect = redirectPolicy(stdClient.CheckRedirect)
@@ -130,6 +132,7 @@ func (c *Client) retractableClient() *http.Client {
 	// retried. With WithLimiterPerAttempt the limiter sits under the retry
 	// layer, so every attempt passes it; otherwise it wraps the whole retry loop.
 	next := newResponseSizeRoundTripper(stdClient.Transport, c.options.maxResponseSize)
+
 	perAttempt := c.options.limiter != nil && c.options.limiterPerAttempt
 	if perAttempt {
 		next = limiters.NewRoundTripper(next, c.options.limiter)

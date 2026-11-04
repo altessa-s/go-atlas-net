@@ -32,8 +32,10 @@ func TestHeaderGetter_GetSingleHeader(t *testing.T) {
 
 func TestHeaderGetter_NilReceiver(t *testing.T) {
 	var g *HeaderGetter
+
 	vals := g.GetHeader("x-test")
 	require.Nil(t, vals)
+
 	got := g.GetSingleHeader("x-test")
 	require.Equal(t, "", got)
 }

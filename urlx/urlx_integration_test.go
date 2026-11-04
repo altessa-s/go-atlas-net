@@ -34,16 +34,20 @@ func startPathRecorder(tb testing.TB) (*httptest.Server, func() []wireRequest) {
 		mu   sync.Mutex
 		seen []wireRequest
 	)
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
+
 		seen = append(seen, wireRequest{escapedPath: r.URL.EscapedPath(), path: r.URL.Path, rawQuery: r.URL.RawQuery})
 		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
 	tb.Cleanup(srv.Close)
+
 	return srv, func() []wireRequest {
 		mu.Lock()
 		defer mu.Unlock()
+
 		return append([]wireRequest(nil), seen...)
 	}
 }
@@ -55,6 +59,7 @@ func sendGet(tb testing.TB, rawURL string) {
 	require.NoError(tb, err)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(tb, err)
+
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 	require.Equal(tb, http.StatusOK, resp.StatusCode)
@@ -123,11 +128,13 @@ func TestIntegration_JoinedPathsOnTheWire(t *testing.T) {
 			srv, seen := startPathRecorder(t)
 			base, err := urlx.ParseBaseURL(srv.URL+tc.base, tc.opts...)
 			require.NoError(t, err)
+
 			target := base.String()
 			if len(tc.elem) > 0 {
 				target, err = urlx.JoinPath(base, tc.elem...)
 				require.NoError(t, err)
 			}
+
 			sendGet(t, target)
 
 			got := seen()
@@ -152,10 +159,12 @@ func TestIntegration_RejectedURLsNeverSent(t *testing.T) {
 		_, err := urlx.JoinPath(base, elem)
 		require.ErrorIs(t, err, urlx.ErrDotSegment, elem)
 	}
+
 	for _, raw := range []string{srv.URL + "/v1?token=x", srv.URL + "/v1#frag", strings.Replace(srv.URL, "http://", "http://user:pw@", 1)} {
 		_, err := urlx.ParseBaseURL(raw)
 		require.ErrorIs(t, err, urlx.ErrInvalidURL)
 	}
+
 	_, err = urlx.ParseBaseURL(srv.URL, urlx.WithAllowedSchemes("https"))
 	require.ErrorIs(t, err, urlx.ErrSchemeNotAllowed)
 	require.Empty(t, seen())
@@ -176,6 +185,7 @@ func TestIntegration_CanonicalMatchesServedEndpoint(t *testing.T) {
 	for _, base := range []string{lower.String(), upper.String()} {
 		sendGet(t, base)
 	}
+
 	got := seen()
 	require.Len(t, got, 2)
 	require.Equal(t, got[0], got[1])

@@ -31,6 +31,7 @@ func FuzzRoundTripper_RoundTrip(f *testing.F) {
 		if err != nil {
 			return // Invalid URL, skip
 		}
+
 		_, _ = rt.RoundTrip(req)
 	})
 }

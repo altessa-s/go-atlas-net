@@ -87,11 +87,14 @@ func DefaultRetryPolicy(ctx context.Context, resp *http.Response, err error) (bo
 			// non-retryable itself.
 			return false, nr.Err
 		}
+
 		return false, classified
 	}
+
 	if resp == nil {
 		return false, nil
 	}
+
 	return classifyStatus(resp, defaultRetryableStatuses)
 }
 
@@ -102,8 +105,10 @@ func classifyStatus(resp *http.Response, retryable []int) (bool, error) {
 	if slices.Contains(retryable, resp.StatusCode) {
 		return true, nil
 	}
+
 	if resp.StatusCode == 0 || resp.StatusCode >= http.StatusBadRequest {
 		return false, unexpectedStatus(resp)
 	}
+
 	return false, nil
 }

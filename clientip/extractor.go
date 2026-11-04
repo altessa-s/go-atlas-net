@@ -118,6 +118,7 @@ func (e *Extractor) Extract(ctx context.Context, peerIP netip.Addr, headers Head
 		if e.debugEnabled(ctx) {
 			e.opts.logger.DebugContext(ctx, "using peer IP as real IP", slog.String("ip", peerIP.String()))
 		}
+
 		return peerIP
 	}
 
@@ -127,6 +128,7 @@ func (e *Extractor) Extract(ctx context.Context, peerIP netip.Addr, headers Head
 			e.opts.logger.DebugContext(ctx, "headers processing disabled, falling back to peer IP",
 				slog.String("ip", peerIP.String()))
 		}
+
 		return peerIP
 	}
 
@@ -145,14 +147,17 @@ func (e *Extractor) Extract(ctx context.Context, peerIP netip.Addr, headers Head
 					e.opts.logger.DebugContext(ctx, "found IP from X-Forwarded-For",
 						slog.String("ip", ip.String()))
 				}
+
 				return ip
 			}
+
 			return peerIP
 		}
 
 		if addr, ok := e.parseAndCheckIP(ctx, ips[0], header); ok {
 			return addr
 		}
+
 		return peerIP
 	}
 
@@ -203,10 +208,12 @@ func (e *Extractor) getIPsFromHeader(ctx context.Context, header string, headers
 		ips = forwardedForIPs(headerValues)
 	} else {
 		last := headerValues[len(headerValues)-1]
+
 		entry := strings.TrimSpace(last[strings.LastIndexByte(last, ',')+1:])
 		if len(entry) > MaxIPLength {
 			entry = "" // Overlong: keep the header decisive, but never parse it.
 		}
+
 		ips = []string{entry}
 	}
 
@@ -228,26 +235,33 @@ func (e *Extractor) getIPsFromHeader(ctx context.Context, header string, headers
 // their positions as empty placeholders so proxy counts cannot shift left.
 func forwardedForIPs(values []string) []string {
 	ips := make([]string, 0, MaxIPsPerHeader)
+
 	parts := 0
 	for _, value := range slices.Backward(values) {
 		for parts < MaxIPsPerHeader {
 			i := strings.LastIndexByte(value, ',')
 			parts++
+
 			if trimmed := strings.TrimSpace(value[i+1:]); trimmed != "" && len(trimmed) <= MaxIPLength {
 				ips = append(ips, trimmed)
 			} else {
 				ips = append(ips, "")
 			}
+
 			if i < 0 {
 				break
 			}
+
 			value = value[:i]
 		}
+
 		if parts >= MaxIPsPerHeader {
 			break
 		}
 	}
+
 	slices.Reverse(ips)
+
 	return ips
 }
 
@@ -258,9 +272,11 @@ func (e *Extractor) parseAndCheckIP(ctx context.Context, ip, header string) (net
 				slog.String("ip", cachedAddr.String()),
 				slog.Bool("is_private", netipx.IsPrivate(cachedAddr)))
 		}
+
 		if !netipx.IsPrivate(cachedAddr) {
 			return cachedAddr, true
 		}
+
 		return netip.Addr{}, false
 	}
 
@@ -273,6 +289,7 @@ func (e *Extractor) parseAndCheckIP(ctx context.Context, ip, header string) (net
 				slog.String("ip", ip),
 				slog.String("error", err.Error()))
 		}
+
 		return netip.Addr{}, false
 	}
 
@@ -290,6 +307,7 @@ func (e *Extractor) parseAndCheckIP(ctx context.Context, ip, header string) (net
 				slog.String("ip", addr.String()),
 				slog.String("header", header))
 		}
+
 		return addr, true
 	}
 
@@ -329,6 +347,7 @@ func (e *Extractor) parseXForwardedForHeader(ctx context.Context, ips []string) 
 	if e.opts.trustedProxiesCount > 0 {
 		return e.xffByProxyCount(ctx, ips)
 	}
+
 	return e.xffRightmostUntrusted(ips)
 }
 
@@ -338,10 +357,12 @@ func (e *Extractor) xffByProxyCount(ctx context.Context, ips []string) netip.Add
 	if uint(len(ips)) <= e.opts.trustedProxiesCount {
 		return netip.Addr{}
 	}
+
 	index := len(ips) - int(e.opts.trustedProxiesCount) - 1 // #nosec G115 -- proxy count is small
 	if index < 0 || index >= len(ips) {
 		return netip.Addr{}
 	}
+
 	ip := ips[index]
 	if e.debugEnabled(ctx) {
 		e.opts.logger.DebugContext(ctx, "checking IP by trusted proxy count",
@@ -353,10 +374,12 @@ func (e *Extractor) xffByProxyCount(ctx context.Context, ips []string) netip.Add
 	if err != nil || netipx.IsPrivate(addr) {
 		return netip.Addr{}
 	}
+
 	if e.debugEnabled(ctx) {
 		e.opts.logger.DebugContext(ctx, "found IP by trusted proxy count",
 			slog.String("ip", addr.String()))
 	}
+
 	return addr
 }
 
@@ -368,13 +391,16 @@ func (e *Extractor) xffRightmostUntrusted(ips []string) netip.Addr {
 		if len(ip) > MaxIPLength {
 			return netip.Addr{}
 		}
+
 		addr, ok := e.xffAddr(ip)
 		if !ok {
 			return netip.Addr{}
 		}
+
 		if netipx.IsTrusted(addr, e.opts.trustedProxies) {
 			continue
 		}
+
 		if netipx.IsPrivate(addr) {
 			return netip.Addr{}
 		}
@@ -403,6 +429,7 @@ func (e *Extractor) xffAddr(ip string) (netip.Addr, bool) {
 	}
 
 	e.cachePut(ip, addr)
+
 	return addr, true
 }
 
@@ -415,6 +442,7 @@ func (e *Extractor) cacheGet(ip string) (netip.Addr, bool) {
 	if e.cache == nil {
 		return netip.Addr{}, false
 	}
+
 	return e.cache.Get(ip)
 }
 

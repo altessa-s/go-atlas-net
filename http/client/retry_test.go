@@ -37,6 +37,7 @@ func newTestRetryOpts(maxAttempts int) []coreretry.Option {
 
 func TestRetryRoundTripper_Success(t *testing.T) {
 	t.Parallel()
+
 	rt := &retryRoundTripper{
 		observer:          NoopObserver{},
 		retryableStatuses: DefaultRetryableStatuses(),
@@ -55,7 +56,9 @@ func TestRetryRoundTripper_Success(t *testing.T) {
 
 func TestRetryRoundTripper_RetryThenSuccess(t *testing.T) {
 	t.Parallel()
+
 	var calls atomic.Int32
+
 	rt := &retryRoundTripper{
 		observer:          NoopObserver{},
 		retryableStatuses: DefaultRetryableStatuses(),
@@ -64,6 +67,7 @@ func TestRetryRoundTripper_RetryThenSuccess(t *testing.T) {
 			if n < 3 {
 				return nil, errors.New("transient")
 			}
+
 			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
 		}),
 		retryOpts:   newTestRetryOpts(5),
@@ -79,7 +83,9 @@ func TestRetryRoundTripper_RetryThenSuccess(t *testing.T) {
 
 func TestRetryRoundTripper_Exhaustion(t *testing.T) {
 	t.Parallel()
+
 	var calls atomic.Int32
+
 	rt := &retryRoundTripper{
 		observer:          NoopObserver{},
 		retryableStatuses: DefaultRetryableStatuses(),
@@ -99,7 +105,9 @@ func TestRetryRoundTripper_Exhaustion(t *testing.T) {
 
 func TestRetryRoundTripper_NonRetryableStops(t *testing.T) {
 	t.Parallel()
+
 	var calls atomic.Int32
+
 	rt := &retryRoundTripper{
 		observer:          NoopObserver{},
 		retryableStatuses: DefaultRetryableStatuses(),
@@ -114,22 +122,27 @@ func TestRetryRoundTripper_NonRetryableStops(t *testing.T) {
 	req, _ := http.NewRequestWithContext(t.Context(), "GET", "http://example.com", nil)
 	_, err := rt.RoundTrip(req)
 	require.Error(t, err)
+
 	got := calls.Load()
 	require.Equal(t, int32(1), got)
 }
 
 func TestRetryRoundTripper_BodyReplay(t *testing.T) {
 	t.Parallel()
+
 	var bodies []string
+
 	rt := &retryRoundTripper{
 		observer:          NoopObserver{},
 		retryableStatuses: DefaultRetryableStatuses(),
 		next: httpx.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			b, _ := io.ReadAll(req.Body)
+
 			bodies = append(bodies, string(b))
 			if len(bodies) < 3 {
 				return nil, errors.New("transient")
 			}
+
 			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
 		}),
 		retryOpts:   newTestRetryOpts(5),
@@ -140,6 +153,7 @@ func TestRetryRoundTripper_BodyReplay(t *testing.T) {
 	resp, err := rt.RoundTrip(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
+
 	for _, b := range bodies {
 		require.Equal(t, "payload", b)
 	}
@@ -148,7 +162,9 @@ func TestRetryRoundTripper_BodyReplay(t *testing.T) {
 func TestRetryRoundTripper_ContextCancel(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
+
 	var calls atomic.Int32
+
 	rt := &retryRoundTripper{
 		observer:          NoopObserver{},
 		retryableStatuses: DefaultRetryableStatuses(),
@@ -156,6 +172,7 @@ func TestRetryRoundTripper_ContextCancel(t *testing.T) {
 			if calls.Add(1) >= 1 {
 				cancel()
 			}
+
 			return nil, errors.New("transient")
 		}),
 		retryOpts:   newTestRetryOpts(10),
@@ -169,7 +186,9 @@ func TestRetryRoundTripper_ContextCancel(t *testing.T) {
 
 func TestRetryRoundTripper_RetryableStatus(t *testing.T) {
 	t.Parallel()
+
 	var calls atomic.Int32
+
 	rt := &retryRoundTripper{
 		observer:          NoopObserver{},
 		retryableStatuses: DefaultRetryableStatuses(),
@@ -182,6 +201,7 @@ func TestRetryRoundTripper_RetryableStatus(t *testing.T) {
 					Request:    req,
 				}, nil
 			}
+
 			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
 		}),
 		retryOpts:   newTestRetryOpts(5),
@@ -196,6 +216,7 @@ func TestRetryRoundTripper_RetryableStatus(t *testing.T) {
 
 func TestRetryRoundTripper_UnexpectedStatus(t *testing.T) {
 	t.Parallel()
+
 	rt := &retryRoundTripper{
 		observer:          NoopObserver{},
 		retryableStatuses: DefaultRetryableStatuses(),
@@ -214,6 +235,7 @@ func TestRetryRoundTripper_UnexpectedStatus(t *testing.T) {
 	resp, err := rt.RoundTrip(req) //nolint:bodyclose // asserted nil
 	require.Error(t, err)
 	require.Nil(t, resp, "a response must never accompany an error")
+
 	statusErr, ok := errors.AsType[*UnexpectedStatusError](err)
 	require.True(t, ok)
 	require.Equal(t, http.StatusForbidden, statusErr.Status)
@@ -221,6 +243,7 @@ func TestRetryRoundTripper_UnexpectedStatus(t *testing.T) {
 
 func TestRetryRoundTripper_ErrorHandler(t *testing.T) {
 	t.Parallel()
+
 	handlerCalled := false
 	rt := &retryRoundTripper{
 		observer:          NoopObserver{},
@@ -238,12 +261,15 @@ func TestRetryRoundTripper_ErrorHandler(t *testing.T) {
 
 	req, _ := http.NewRequestWithContext(t.Context(), "GET", "http://example.com", nil)
 	_, _ = rt.RoundTrip(req)
+
 	require.True(t, handlerCalled, "ErrorHandler was not called")
 }
 
 func TestRetryRoundTripper_RetryPolicyHandler(t *testing.T) {
 	t.Parallel()
+
 	var calls atomic.Int32
+
 	rt := &retryRoundTripper{
 		observer:          NoopObserver{},
 		retryableStatuses: DefaultRetryableStatuses(),
@@ -258,6 +284,7 @@ func TestRetryRoundTripper_RetryPolicyHandler(t *testing.T) {
 			if calls.Load() < 3 {
 				return true, nil
 			}
+
 			return false, nil
 		},
 	}
@@ -271,7 +298,9 @@ func TestRetryRoundTripper_RetryPolicyHandler(t *testing.T) {
 
 func TestRetryRoundTripper_ZeroRetries(t *testing.T) {
 	t.Parallel()
+
 	var calls atomic.Int32
+
 	rt := &retryRoundTripper{
 		observer:          NoopObserver{},
 		retryableStatuses: DefaultRetryableStatuses(),
@@ -294,6 +323,7 @@ func TestRetryRoundTripper_OneRetryReplaysStreamingBody(t *testing.T) {
 	t.Parallel()
 
 	var bodies []string
+
 	rt := &retryRoundTripper{
 		observer:          NoopObserver{},
 		retryableStatuses: DefaultRetryableStatuses(),
@@ -301,11 +331,14 @@ func TestRetryRoundTripper_OneRetryReplaysStreamingBody(t *testing.T) {
 			b, err := io.ReadAll(req.Body)
 			require.NoError(t, err)
 			require.NoError(t, req.Body.Close())
+
 			bodies = append(bodies, string(b))
+
 			status := http.StatusOK
 			if len(bodies) == 1 {
 				status = http.StatusServiceUnavailable
 			}
+
 			return &http.Response{StatusCode: status, Body: http.NoBody, Request: req}, nil
 		}),
 		retryOpts:   newTestRetryOpts(1), // one retry: two attempts
@@ -328,6 +361,7 @@ func TestRetryRoundTripper_RetryableResponseWithoutBody(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int32
+
 	rt := &retryRoundTripper{
 		observer:          NoopObserver{},
 		retryableStatuses: DefaultRetryableStatuses(),
@@ -336,6 +370,7 @@ func TestRetryRoundTripper_RetryableResponseWithoutBody(t *testing.T) {
 				// A custom transport may omit Body on a retryable status.
 				return &http.Response{StatusCode: http.StatusServiceUnavailable, Request: req}, nil
 			}
+
 			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
 		}),
 		retryOpts:   newTestRetryOpts(1),
@@ -367,6 +402,7 @@ func TestClient_ErrorResponsesAreClosed(t *testing.T) {
 	t.Parallel()
 
 	errHandled := errors.New("handled")
+
 	tests := []struct {
 		name         string
 		status       int
@@ -390,6 +426,7 @@ func TestClient_ErrorResponsesAreClosed(t *testing.T) {
 				return func(_ *http.Response, _ error, _ int) (*http.Response, error) {
 					b := newTrackedBody()
 					*bodies = append(*bodies, b)
+
 					return &http.Response{StatusCode: http.StatusTeapot, Body: b}, errHandled
 				}
 			},
@@ -405,14 +442,19 @@ func TestClient_ErrorResponsesAreClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			var bodies []*trackedBody
-			var attempts int
+			var (
+				bodies   []*trackedBody
+				attempts int
+			)
+
 			transport := httpx.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 				attempts++
 				b := newTrackedBody()
 				bodies = append(bodies, b)
+
 				return &http.Response{StatusCode: tc.status, Body: b, Request: req}, nil
 			})
+
 			opts := []Option{
 				WithoutSSRFProtection(), WithClient(&http.Client{Transport: transport}),
 				WithRetryMax(tc.retryMax),
@@ -421,10 +463,12 @@ func TestClient_ErrorResponsesAreClosed(t *testing.T) {
 			if tc.handler != nil {
 				opts = append(opts, WithErrorHandler(tc.handler(&bodies)))
 			}
+
 			c := New(opts...)
 
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com/x", nil)
 			require.NoError(t, err)
+
 			resp, err := c.Do(req)
 			if tc.wantErr {
 				require.Error(t, err)
@@ -433,14 +477,17 @@ func TestClient_ErrorResponsesAreClosed(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, resp)
 			}
+
 			require.Equal(t, tc.wantAttempts, attempts)
 
 			for i, b := range bodies {
 				if tc.wantOpenLast && i == len(bodies)-1 {
 					require.False(t, b.closed.Load(), "returned body must stay open")
 					require.NoError(t, resp.Body.Close())
+
 					continue
 				}
+
 				require.True(t, b.closed.Load(), "body %d leaked", i)
 			}
 		})
@@ -465,10 +512,12 @@ func TestClient_CircuitBreakerOpenDetected(t *testing.T) {
 	do := func() error {
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://breaker.test/", nil)
 		require.NoError(t, err)
+
 		resp, err := c.Do(req)
 		if resp != nil {
 			_ = resp.Body.Close()
 		}
+
 		return err
 	}
 
@@ -508,11 +557,13 @@ func TestClient_DiscardedResponseReusesConnection(t *testing.T) {
 			t.Parallel()
 
 			var calls, conns atomic.Int64
+
 			srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				if calls.Add(1) == 1 {
 					tc.write503(w)
 					return
 				}
+
 				w.WriteHeader(http.StatusOK)
 			}))
 			srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
@@ -524,8 +575,10 @@ func TestClient_DiscardedResponseReusesConnection(t *testing.T) {
 			t.Cleanup(srv.Close)
 
 			c := New(WithSSRFAllowedCIDRs(netip.MustParsePrefix("127.0.0.0/8")), WithRetryMax(1), WithRetryWait(time.Nanosecond, time.Nanosecond))
+
 			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 			defer cancel()
+
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
 			require.NoError(t, err)
 			resp, err := c.Do(req)
@@ -544,7 +597,9 @@ func TestRetryRoundTripper_ReleasesDiscardedResponseBeforeBackoff(t *testing.T) 
 	t.Parallel()
 
 	body := newTrackedBody()
+
 	var calls atomic.Int32
+
 	rt := &retryRoundTripper{
 		observer:          NoopObserver{},
 		retryableStatuses: DefaultRetryableStatuses(),
@@ -552,6 +607,7 @@ func TestRetryRoundTripper_ReleasesDiscardedResponseBeforeBackoff(t *testing.T) 
 			if calls.Add(1) == 1 {
 				return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: body, Request: req}, nil
 			}
+
 			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
 		}),
 		retryOpts: []coreretry.Option{
@@ -563,12 +619,14 @@ func TestRetryRoundTripper_ReleasesDiscardedResponseBeforeBackoff(t *testing.T) 
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
+
 	go func() {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
 		if err != nil {
 			done <- err
 			return
 		}
+
 		_, err = rt.RoundTrip(req) //nolint:bodyclose // the round trip fails with ctx canceled
 		done <- err
 	}()
@@ -586,7 +644,9 @@ func TestRetryRoundTripper_ErrorHandlerReceivesReadableResponse(t *testing.T) {
 	t.Parallel()
 
 	attempted := make(chan struct{})
+
 	var got string
+
 	rt := &retryRoundTripper{
 		observer:          NoopObserver{},
 		retryableStatuses: DefaultRetryableStatuses(),
@@ -602,16 +662,20 @@ func TestRetryRoundTripper_ErrorHandlerReceivesReadableResponse(t *testing.T) {
 		errorHandler: func(resp *http.Response, err error, _ int) (*http.Response, error) {
 			b, rerr := io.ReadAll(resp.Body)
 			require.NoError(t, rerr)
+
 			got = string(b)
+
 			return nil, err
 		},
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
+
 	go func() {
 		<-attempted
 		cancel()
 	}()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
 	require.NoError(t, err)
 	_, err = rt.RoundTrip(req) //nolint:bodyclose // the round trip fails with ctx canceled
@@ -641,13 +705,16 @@ func TestRetryRoundTripper_ReplaysOnlyIdempotentRequests(t *testing.T) {
 			t.Parallel()
 
 			var bodies []string
+
 			rt := &retryRoundTripper{
 				observer:          NoopObserver{},
 				retryableStatuses: DefaultRetryableStatuses(),
 				next: httpx.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 					b, err := io.ReadAll(req.Body)
 					require.NoError(t, err)
+
 					bodies = append(bodies, string(b))
+
 					return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Request: req}, nil
 				}),
 				retryOpts:   newTestRetryOpts(2),
@@ -656,6 +723,7 @@ func TestRetryRoundTripper_ReplaysOnlyIdempotentRequests(t *testing.T) {
 
 			req, err := http.NewRequestWithContext(t.Context(), tc.method, "http://example.com", strings.NewReader("payload"))
 			require.NoError(t, err)
+
 			if tc.header != "" {
 				req.Header.Set(tc.header, "key-1")
 			}
@@ -665,6 +733,7 @@ func TestRetryRoundTripper_ReplaysOnlyIdempotentRequests(t *testing.T) {
 			require.True(t, ok, "error %v", err)
 			require.Equal(t, tc.attempts, exhaustedErr.Attempts)
 			require.Len(t, bodies, tc.attempts)
+
 			for _, b := range bodies {
 				require.Equal(t, "payload", b)
 			}

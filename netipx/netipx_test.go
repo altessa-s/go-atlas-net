@@ -13,6 +13,7 @@ import (
 
 func TestIsPrivate(t *testing.T) {
 	t.Parallel()
+
 	tests := []struct {
 		ip   string
 		want bool
@@ -42,6 +43,7 @@ func TestIsPrivate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.ip, func(t *testing.T) {
 			t.Parallel()
+
 			addr := netip.MustParseAddr(tt.ip)
 			got := IsPrivate(addr)
 			require.Equal(t, tt.want, got)
@@ -51,6 +53,7 @@ func TestIsPrivate(t *testing.T) {
 
 func TestIsTrusted(t *testing.T) {
 	t.Parallel()
+
 	trusted := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
 
 	tests := []struct {
@@ -65,6 +68,7 @@ func TestIsTrusted(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.ip, func(t *testing.T) {
 			t.Parallel()
+
 			addr := netip.MustParseAddr(tt.ip)
 			got := IsTrusted(addr, trusted)
 			require.Equal(t, tt.want, got)
@@ -79,6 +83,7 @@ func TestInList(t *testing.T) {
 
 func TestIsPrivate_SpecialPurposeIPv6(t *testing.T) {
 	t.Parallel()
+
 	for _, tc := range []struct {
 		addr string
 		want bool

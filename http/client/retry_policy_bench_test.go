@@ -17,6 +17,7 @@ func BenchmarkDefaultRetryPolicy(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+
 	cases := []struct {
 		name string
 		resp *http.Response
@@ -31,6 +32,7 @@ func BenchmarkDefaultRetryPolicy(b *testing.B) {
 		b.Run(bc.name, func(b *testing.B) {
 			ctx := b.Context()
 			b.ReportAllocs()
+
 			for b.Loop() {
 				_, _ = httpclient.DefaultRetryPolicy(ctx, bc.resp, bc.err)
 			}

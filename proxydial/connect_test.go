@@ -42,12 +42,16 @@ func startTLSConnectProxy(tb testing.TB, handle func(conn net.Conn, rw *bufio.Re
 			http.Error(w, "CONNECT only", http.StatusMethodNotAllowed)
 			return
 		}
+
 		p.connects.Add(1)
+
 		conn, rw, err := http.NewResponseController(w).Hijack()
 		if err != nil {
 			return
 		}
+
 		defer func() { _ = conn.Close() }()
+
 		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 		handle(conn, rw)
 	}))
@@ -55,9 +59,11 @@ func startTLSConnectProxy(tb testing.TB, handle func(conn net.Conn, rw *bufio.Re
 
 	u, err := url.Parse(srv.URL)
 	require.NoError(tb, err)
+
 	p.url = u
 	p.roots = x509.NewCertPool()
 	p.roots.AddCert(srv.Certificate())
+
 	return p
 }
 
@@ -73,10 +79,12 @@ func TestHTTPConnect_HTTPSProxy(t *testing.T) {
 			if _, err := io.WriteString(conn, established); err != nil {
 				return
 			}
+
 			line, err := rw.ReadString('\n')
 			if err != nil {
 				return
 			}
+
 			_, _ = io.WriteString(conn, "pong:"+line)
 		})
 
@@ -97,13 +105,16 @@ func TestHTTPConnect_HTTPSProxy(t *testing.T) {
 		t.Parallel()
 
 		const greeting = "220 smtp.example ESMTP\r\n"
+
 		proxy := startTLSConnectProxy(t, func(conn net.Conn, rw *bufio.ReadWriter) {
 			if _, err := io.WriteString(conn, established+greeting); err != nil {
 				return
 			}
+
 			if _, err := io.Copy(io.Discard, rw); err != nil {
 				return
 			}
+
 			_, _ = io.WriteString(conn, "bye")
 		})
 
@@ -135,6 +146,7 @@ func TestHTTPConnect_HTTPSProxyUntrustedCertificate(t *testing.T) {
 	proxy := startTLSConnectProxy(t, func(net.Conn, *bufio.ReadWriter) {})
 
 	_, err := proxydial.HTTPConnect(t.Context(), &net.Dialer{}, proxy.url, nil, "api.example:443")
+
 	var verr *tls.CertificateVerificationError
 	require.ErrorAs(t, err, &verr, "the proxy certificate is not signed by a system root")
 	require.Zero(t, proxy.connects.Load(), "no CONNECT may be sent over an unverified connection")
@@ -152,6 +164,7 @@ func TestFromURL_ProxyTLSConfig(t *testing.T) {
 	require.NoError(t, err)
 	conn, err := dial(t.Context(), "tcp", "api.example:443")
 	require.NoError(t, err)
+
 	_ = conn.Close()
 
 	require.Equal(t, int32(1), proxy.connects.Load())
@@ -164,6 +177,7 @@ func TestHTTPConnect_ProxyUnreachable(t *testing.T) {
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
+
 	addr := ln.Addr().String()
 	require.NoError(t, ln.Close())
 
@@ -189,23 +203,30 @@ func TestHTTPConnect_BufferedTunnelCloseRead(t *testing.T) {
 	received := make(chan string, 1)
 	go func() {
 		defer close(received)
+
 		conn, aerr := ln.Accept()
 		if aerr != nil {
 			return
 		}
+
 		defer func() { _ = conn.Close() }()
+
 		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
 		br := bufio.NewReader(conn)
 		if _, rerr := http.ReadRequest(br); rerr != nil {
 			return
 		}
+
 		if _, werr := io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\nSSH-2.0-test\r\n"); werr != nil {
 			return
 		}
+
 		line, rerr := br.ReadString('\n')
 		if rerr != nil {
 			return
 		}
+
 		received <- line
 	}()
 
@@ -220,6 +241,7 @@ func TestHTTPConnect_BufferedTunnelCloseRead(t *testing.T) {
 
 	_, err = io.WriteString(conn, "SSH-2.0-client\r\n")
 	require.NoError(t, err)
+
 	select {
 	case line := <-received:
 		require.Equal(t, "SSH-2.0-client\r\n", line)
@@ -238,18 +260,23 @@ func TestSSRFGuard_CancelStopsTryingAddresses(t *testing.T) {
 	t.Cleanup(func() { _ = ln.Close() })
 
 	arrived := make(chan struct{})
+
 	go func() {
 		conn, aerr := ln.Accept()
 		if aerr != nil {
 			return
 		}
 		defer func() { _ = conn.Close() }()
+
 		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
 		br := bufio.NewReader(conn)
 		if _, rerr := http.ReadRequest(br); rerr != nil {
 			return
 		}
+
 		close(arrived)
+
 		_, _ = br.ReadByte() // stall until the client gives up
 	}()
 
@@ -258,12 +285,15 @@ func TestSSRFGuard_CancelStopsTryingAddresses(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+
 	result := make(chan error, 1)
+
 	go func() {
 		conn, derr := dial(ctx, "tcp", "multi.example:443")
 		if conn != nil {
 			_ = conn.Close()
 		}
+
 		result <- derr
 	}()
 
@@ -272,6 +302,7 @@ func TestSSRFGuard_CancelStopsTryingAddresses(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("CONNECT never reached the proxy")
 	}
+
 	cancel()
 
 	select {
@@ -279,6 +310,7 @@ func TestSSRFGuard_CancelStopsTryingAddresses(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the dial did not return after cancellation")
 	}
+
 	require.ErrorIs(t, err, context.Canceled)
 	joined, ok := err.(interface{ Unwrap() []error })
 	require.True(t, ok, "the dial joins the errors of the addresses it tried")

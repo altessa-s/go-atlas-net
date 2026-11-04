@@ -23,6 +23,7 @@ func TestParseRetryAfter(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+
 	tests := []struct {
 		name   string
 		value  string
@@ -52,6 +53,7 @@ func TestParseRetryAfter(t *testing.T) {
 			if tc.value != "" {
 				h.Set("Retry-After", tc.value)
 			}
+
 			got, ok := httpclient.ParseRetryAfter(h, now, tc.max)
 			require.Equal(t, tc.wantOK, ok)
 			require.Equal(t, tc.want, got)
@@ -63,16 +65,21 @@ func TestParseRetryAfter(t *testing.T) {
 // every later one with 200.
 func retryAfterServer(t *testing.T, status int, retryAfter string) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
+
 	var hits atomic.Int32
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if hits.Add(1) == 1 {
 			w.Header().Set("Retry-After", retryAfter)
 			w.WriteHeader(status)
+
 			return
 		}
+
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
+
 	return srv, &hits
 }
 
@@ -81,12 +88,16 @@ func timedGet(t *testing.T, c *http.Client, url string) time.Duration {
 	t.Helper()
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
 	require.NoError(t, err)
+
 	start := time.Now()
 	resp, err := c.Do(req)
 	elapsed := time.Since(start)
+
 	require.NoError(t, err)
+
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
+
 	return elapsed
 }
 
@@ -94,6 +105,7 @@ func TestRetryHonorsRetryAfter(t *testing.T) {
 	t.Parallel()
 
 	const capDelay = 150 * time.Millisecond
+
 	for _, status := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			t.Parallel()
@@ -140,6 +152,7 @@ func TestWithRetryAfterStatuses(t *testing.T) {
 	t.Parallel()
 
 	const capDelay = 150 * time.Millisecond
+
 	statuses := []int{http.StatusRequestTimeout, http.StatusInternalServerError, http.StatusBadGateway, http.StatusGatewayTimeout}
 	for _, status := range statuses {
 		t.Run(http.StatusText(status), func(t *testing.T) {
