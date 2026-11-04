@@ -5,7 +5,6 @@
 package hmacsign
 
 import (
-	"math"
 	"testing"
 	"time"
 
@@ -32,12 +31,4 @@ func TestMemoryReplayCacheSweepsShortEntriesBehindLongOnes(t *testing.T) {
 	defer c.mu.Unlock()
 	require.NotContains(t, c.entries, "short", "the expired short-TTL entry was not swept")
 	require.Len(t, c.entries, 2)
-}
-
-func TestReplayTTLSaturates(t *testing.T) {
-	t.Parallel()
-
-	require.Equal(t, 10*time.Minute, replayTTL(5*time.Minute))
-	require.Equal(t, time.Duration(math.MaxInt64), replayTTL(time.Duration(math.MaxInt64)/2+1))
-	require.Equal(t, time.Duration(math.MaxInt64), replayTTL(time.Duration(math.MaxInt64)))
 }

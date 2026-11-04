@@ -7,6 +7,7 @@ package hmacsign_test
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -157,4 +158,16 @@ func (c *recordingCache) CheckAndStore(_ string, ttl time.Duration) (bool, error
 	c.calls++
 	c.ttl = ttl
 	return false, c.err
+}
+
+func TestNewVerifierRejectsToleranceTooLargeForReplayCache(t *testing.T) {
+	t.Parallel()
+
+	huge := time.Duration(math.MaxInt64)/2 + 1
+	_, err := hmacsign.NewVerifier(hmacsign.Stripe(), []byte(replaySecret),
+		hmacsign.WithTolerance(huge), hmacsign.WithReplayCache(hmacsign.NewMemoryReplayCache()))
+	require.ErrorIs(t, err, hmacsign.ErrToleranceTooLarge)
+
+	_, err = hmacsign.NewVerifier(hmacsign.Stripe(), []byte(replaySecret), hmacsign.WithTolerance(huge))
+	require.NoError(t, err, "without a replay cache the tolerance is not limited")
 }

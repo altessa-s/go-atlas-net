@@ -32,4 +32,9 @@ var (
 	// [ReplayCache] had already accepted inside the tolerance window: the same
 	// request was delivered twice.
 	ErrReplayed = errors.New("hmacsign: signature replayed")
+	// ErrToleranceTooLarge is returned by [NewVerifier] when a [ReplayCache]
+	// is configured with a tolerance whose window, twice the tolerance, does
+	// not fit a time.Duration: the cache could not keep an entry for the
+	// whole window.
+	ErrToleranceTooLarge = errors.New("hmacsign: tolerance too large for the replay cache")
 )
