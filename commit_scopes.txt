@@ -13,6 +13,8 @@ docs                        # Documentation
 clientip                         # Real client IP extraction
 egressrule                       # Egress rule grammar
 grpc/metadata                    # Incoming gRPC metadata getter
+hmacsign                         # HMAC signing and verification of request bodies
+hmacsign/httpsign                # net/http adapter for hmacsign
 http/client                      # Outbound HTTP client
 http/client/limiters             # Client-side rate limiters
 http/client/limiters/hostpacer   # Waiting per-host request limiter
