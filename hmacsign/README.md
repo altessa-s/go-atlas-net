@@ -89,7 +89,7 @@ signature.
 
 | Sentinel                     | Meaning                                                                              |
 |------------------------------|--------------------------------------------------------------------------------------|
-| `ErrMalformedSignature`      | The header could not be parsed (missing digest, bad hex, missing/non-numeric `t`).   |
+| `ErrMalformedSignature`      | The header could not be parsed (missing `sha256=` prefix, missing or empty digest, bad hex, missing/non-numeric `t`). |
 | `ErrTimestampOutOfTolerance` | A timestamped scheme's timestamp fell outside the tolerance window (likely a replay). |
 | `ErrSignatureMismatch`       | The header was well-formed but authentic to no configured secret.                    |
 | `ErrSecretTooShort`          | `NewSigner`/`NewVerifier` got a secret shorter than `MinSecretLength` (construction). |

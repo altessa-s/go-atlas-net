@@ -127,9 +127,13 @@ func TestVerifyMalformedHeader(t *testing.T) {
 	}{
 		{"github_not_hex", hmacsign.GitHub(), "sha256=zzzz"},
 		{"github_empty", hmacsign.GitHub(), ""},
+		{"github_prefix_only", hmacsign.GitHub(), "sha256="},
+		{"github_wrong_prefix", hmacsign.GitHub(), "sha1=abcd"},
 		{"stripe_no_timestamp", hmacsign.Stripe(), "v1=abcd"},
 		{"stripe_no_signature", hmacsign.Stripe(), "t=123"},
 		{"stripe_bad_timestamp", hmacsign.Stripe(), "t=notanumber,v1=abcd"},
+		{"stripe_empty_v1", hmacsign.Stripe(), "t=123,v1="},
+		{"stripe_empty_v1_before_valid", hmacsign.Stripe(), "t=123,v1=,v1=abcd"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -137,6 +141,30 @@ func TestVerifyMalformedHeader(t *testing.T) {
 			require.ErrorIs(t, err, hmacsign.ErrMalformedSignature)
 		})
 	}
+}
+
+func TestVerifyGitHubRequiresPrefix(t *testing.T) {
+	t.Parallel()
+
+	secret := []byte("whsec_test_secret_0123")
+	body := []byte("payload")
+	header := mustSigner(t, hmacsign.GitHub(), secret).Sign(body)
+	bare, ok := strings.CutPrefix(header, "sha256=")
+	require.True(t, ok)
+
+	err := mustVerifier(t, hmacsign.GitHub(), secret).Verify(bare, body)
+	require.ErrorIs(t, err, hmacsign.ErrMalformedSignature)
+}
+
+func TestVerifyStripeRejectsEmptyDigest(t *testing.T) {
+	t.Parallel()
+
+	secret := []byte("whsec_test_secret_0123")
+	body := []byte("payload")
+	header := mustSigner(t, hmacsign.Stripe(), secret).Sign(body)
+
+	err := mustVerifier(t, hmacsign.Stripe(), secret).Verify(header+",v1=", body)
+	require.ErrorIs(t, err, hmacsign.ErrMalformedSignature)
 }
 
 func TestStripeTimestampTolerance(t *testing.T) {

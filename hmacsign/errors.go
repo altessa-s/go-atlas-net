@@ -8,8 +8,9 @@ import "errors"
 
 var (
 	// ErrMalformedSignature indicates the signature header could not be parsed:
-	// a missing digest, an unparsable hex value, or (for schemes that sign a
-	// timestamp) a missing or non-numeric timestamp field.
+	// a missing scheme prefix, a missing or empty digest, an unparsable hex
+	// value, or (for schemes that sign a timestamp) a missing or non-numeric
+	// timestamp field.
 	ErrMalformedSignature = errors.New("hmacsign: malformed signature header")
 
 	// ErrSignatureMismatch indicates the header was well-formed but no configured

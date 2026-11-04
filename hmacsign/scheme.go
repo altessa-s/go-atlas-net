@@ -75,7 +75,12 @@ func (githubScheme) FormatHeader(_ time.Time, digest []byte) string {
 }
 
 func (githubScheme) ParseHeader(header string) (time.Time, [][]byte, error) {
-	raw, err := hex.DecodeString(strings.TrimPrefix(strings.TrimSpace(header), githubPrefix))
+	hexDigest, ok := strings.CutPrefix(strings.TrimSpace(header), githubPrefix)
+	if !ok {
+		return time.Time{}, nil, fmt.Errorf("%w: missing %q prefix", ErrMalformedSignature, githubPrefix)
+	}
+
+	raw, err := hex.DecodeString(hexDigest)
 	if err != nil || len(raw) == 0 {
 		return time.Time{}, nil, fmt.Errorf("%w: bad digest", ErrMalformedSignature)
 	}
@@ -120,7 +125,7 @@ func (stripeScheme) ParseHeader(header string) (time.Time, [][]byte, error) {
 			tsUnix, haveTS = n, true
 		case "v1":
 			raw, err := hex.DecodeString(val)
-			if err != nil {
+			if err != nil || len(raw) == 0 {
 				return time.Time{}, nil, fmt.Errorf("%w: bad v1 digest", ErrMalformedSignature)
 			}
 
