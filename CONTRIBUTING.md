@@ -106,8 +106,9 @@ and get no exemption.
   `golangci-lint fmt` over every `*_gen.go`; the standalone `gci` binary is not used.
 - Maximum line length: **156 characters** (enforced by `lll` linter).
 - `wsl_v5` enforces blank lines around blocks and statements, and `godoclint` requires a doc comment on every exported symbol.
-- Test files are formatted like any other file and are linted by `asciicheck`, `copyloopvar`, `goprintffuncname`, `ineffassign`, `misspell`, `modernize`, `predeclared`, `unused`, `whitespace`, `wsl_v5` only; every other linter skips
-  `_test.go` files. Code behind test-only build tags (`integration` and the repository's other test tags) is linted too.
+- Test files are formatted like any other file and are linted only by
+  `asciicheck`, `copyloopvar`, `goprintffuncname`, `ineffassign`, `misspell`, `modernize`, `predeclared`, `unused`, `whitespace`, `wsl_v5`;
+  every other linter skips `_test.go` files. Code behind test-only build tags (`integration` and the repository's other test tags) is linted too.
 
 ### Import Ordering
 
@@ -166,13 +167,16 @@ All `.go` files must include the copyright header. Run `make copyright` to add i
 | `make dupl` | Find code duplication |
 | `make dupl-check` | Fail on code duplication |
 | `make copyright` | Add copyright headers |
+| `make clean` | Remove generated artifacts (`coverage.out`, `bench.txt`) |
 | `make generate` | Build pinned optgen and golangci-lint into `bin/`, regenerate options and format them |
 | `make generate-check` | Fail when `make generate` changes, adds or removes generated files (as CI does) |
 | `make tidy` | Run go mod tidy |
 | `make govulncheck` | Run govulncheck |
 | `make gosec` | Run gosec |
 | `make security-scan` | Run govulncheck and gosec |
-| `make nested-build-check` | Build every sub-module of `NESTED_CHECK_MODULES` (and its latest released tag) against the root without `replace` directives (a no-op when it is empty) |
+| `make ci` | Run the full CI checks locally, one step after the other (lint, vet, generated files, tests, security, dupl, nested modules) |
+| `make nested-build-check` | Vet every sub-module of `NESTED_CHECK_MODULES` and build its latest released tag against the root without `replace` directives (a no-op when it is empty) |
+| `make print-nested-check-modules` | Print the sub-module directories `make nested-build-check` checks against the root |
 | `make release` | Tag and push `VERSION` (clean `main` equal to `origin/main` only, one push URL for `origin`) |
 
 ## Generated options

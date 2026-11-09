@@ -214,21 +214,35 @@ test-coverage-func: ## Run tests and show formatted per-package coverage
 
 .PHONY: coverage
 coverage: ## Run tests with race detector and shuffle, writing the profile to coverage.out
-	@echo "mode: atomic" > coverage.out
+	@# The profile is assembled in coverage.tmp and moved to coverage.out only
+	@# when the tests of every module passed and each module wrote its own
+	@# profile with the atomic header, so a failed or skipped run (GOFLAGS=-n,
+	@# say) leaves no profile.
+	@rm -f coverage.out coverage.part coverage.tmp
 	@for m in $(MODULES); do \
-	  (cd $$m && go test -race -shuffle=on -covermode=atomic -coverpkg=./... -coverprofile="$$REPO_ROOT/coverage.part" ./...) || { rm -f coverage.part; exit 1; }; \
-	  if [ -f coverage.part ]; then tail -n +2 coverage.part >> coverage.out; rm -f coverage.part; fi; \
-	done
+	  (cd $$m && go test -race -shuffle=on -covermode=atomic -coverpkg=./... -coverprofile="$$REPO_ROOT/coverage.part" ./...) || { rm -f coverage.part coverage.tmp; exit 1; }; \
+	  if [ "$$(head -n 1 coverage.part 2>/dev/null)" != "mode: atomic" ]; then echo "coverage: no atomic profile from module $$m" >&2; rm -f coverage.part coverage.tmp; exit 1; fi; \
+	  if [ -f coverage.tmp ]; then tail -n +2 coverage.part >> coverage.tmp; else cp coverage.part coverage.tmp; fi || { rm -f coverage.part coverage.tmp; exit 1; }; \
+	  rm -f coverage.part; \
+	done; \
+	mv coverage.tmp coverage.out
 
 # go tool cover cannot resolve packages of other modules from the root, so the
 # total is computed from the profile: covered statements over all statements,
 # printed in go tool cover's "total:" format. With -coverpkg every test binary
 # reports every block of its module, so each block counts once and is covered
-# when any test binary covered it.
+# when any test binary covered it. Every line is validated: the header must
+# name a cover mode and each block must read "file:l.c,l.c statements count";
+# a malformed or empty profile fails, and so does a profile without blocks
+# (go test writes the header even when no test runs).
 .PHONY: coverage-total
 coverage-total: ## Print the total statement coverage of coverage.out
-	@awk 'NR > 1 { size[$$1] = $$2; if ($$3 > 0) hit[$$1] = 1 } \
-	  END { for (b in size) { stmts += size[b]; if (b in hit) covered += size[b] } \
+	@awk 'NR == 1 { if ($$0 !~ /^mode: (set|count|atomic)$$/) bad = NR; next } \
+	  $$0 !~ /^[^ ]+:[0-9]+\.[0-9]+,[0-9]+\.[0-9]+ [0-9]+ [0-9]+$$/ { if (!bad) bad = NR; next } \
+	  { size[$$1] = $$2; if ($$3 > 0) hit[$$1] = 1 } \
+	  END { if (NR == 0) { print "coverage-total: coverage.out is empty" > "/dev/stderr"; exit 1 } \
+	        if (bad) { printf "coverage-total: malformed coverage.out line %d\n", bad > "/dev/stderr"; exit 1 } \
+	        for (b in size) { stmts += size[b]; if (b in hit) covered += size[b] } \
 	        if (stmts == 0) { print "coverage-total: no statements in coverage.out" > "/dev/stderr"; exit 1 } \
 	        printf "total:\t(statements)\t%.1f%%\n", covered * 100 / stmts }' coverage.out
 
@@ -361,8 +375,8 @@ dupl-check: $(BIN)/dupl ## Fail if dupl finds duplicates (ignoring generated fil
 # ci runs its steps one after the other even under make -j: lint rewrites
 # files that fmt-check and generate-check read, so they must not overlap. Each
 # step may still use -j inside.
-CI_STEPS := lint fmt-check generate-check test-all test-integration security-scan dupl-check nested-build-check
-ci: ## Run full CI checks locally, one step after the other (lint, generated files, test, security, dupl, nested modules)
+CI_STEPS := lint vet fmt-check generate-check test-all test-integration security-scan dupl-check nested-build-check
+ci: ## Run full CI checks locally, one step after the other (lint, vet, generated files, test, security, dupl, nested modules)
 	@for step in $(CI_STEPS); do $(MAKE) --no-print-directory $$step || exit 1; done
 
 .PHONY: clean
@@ -379,11 +393,11 @@ print-nested-modules: ## Print the nested module directories released with the r
 	@printf '%s\n' $(NESTED_MODULES)
 
 .PHONY: print-nested-check-modules
-print-nested-check-modules: ## Print the sub-module directories nested-build-check builds against the root, one per line
+print-nested-check-modules: ## Print the sub-module directories nested-build-check checks against the root, one per line
 	@printf '%s\n' $(NESTED_CHECK_MODULES)
 
 .PHONY: nested-build-check
-nested-build-check: ## Build every sub-module of NESTED_CHECK_MODULES against the root without replace directives; a no-op when it is empty (see .github/scripts/nested-build-check.sh)
+nested-build-check: ## Vet every sub-module of NESTED_CHECK_MODULES and build its latest released tag against the root without replace directives; a no-op when it is empty (see .github/scripts/nested-build-check.sh)
 	@bash .github/scripts/nested-build-check.sh
 
 # release-preflight refuses a release from anything but a clean main that
