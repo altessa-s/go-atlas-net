@@ -119,6 +119,14 @@ golangci: $(BIN)/golangci-lint ## Run golangci-lint without rewriting files (as 
 tidy: ## Run go mod tidy
 	@for m in $(MODULES); do (cd $$m && go mod tidy) || exit 1; done
 
+.PHONY: tidy-check
+# CI runs go with the default -mod=readonly and never tidies, so a go.mod or
+# go.sum that go mod tidy would change fails there ("updates to go.mod
+# needed"); make lint tidies first and would hide it, so make ci runs this
+# check before lint.
+tidy-check: ## Fail when go mod tidy would change go.mod or go.sum (as CI does)
+	@for m in $(MODULES); do (cd $$m && go mod tidy -diff) || { echo "go.mod or go.sum in $$m is not tidy: run make tidy"; exit 1; }; done
+
 .PHONY: generate
 generate: $(BIN)/optgen $(BIN)/golangci-lint ## Build the pinned optgen and golangci-lint into bin/, run go generate and format the output
 	@for m in $(MODULES); do (cd $$m && PATH="$$REPO_BIN:$$PATH" go generate ./...) || exit 1; done
@@ -374,9 +382,9 @@ dupl-check: $(BIN)/dupl ## Fail if dupl finds duplicates (ignoring generated fil
 .PHONY: ci
 # ci runs its steps one after the other even under make -j: lint rewrites
 # files that fmt-check and generate-check read, so they must not overlap. Each
-# step may still use -j inside.
-CI_STEPS := lint vet fmt-check generate-check test-all test-integration security-scan dupl-check nested-build-check
-ci: ## Run full CI checks locally, one step after the other (lint, vet, generated files, test, security, dupl, nested modules)
+# step may still use -j inside. tidy-check runs before lint, which tidies.
+CI_STEPS := tidy-check lint vet fmt-check generate-check test-all test-integration security-scan dupl-check nested-build-check
+ci: ## Run full CI checks locally, one step after the other (tidy check, lint, vet, generated files, test, security, dupl, nested modules)
 	@for step in $(CI_STEPS); do $(MAKE) --no-print-directory $$step || exit 1; done
 
 .PHONY: clean

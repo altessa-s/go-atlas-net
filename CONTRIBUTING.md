@@ -171,10 +171,11 @@ All `.go` files must include the copyright header. Run `make copyright` to add i
 | `make generate` | Build pinned optgen and golangci-lint into `bin/`, regenerate options and format them |
 | `make generate-check` | Fail when `make generate` changes, adds or removes generated files (as CI does) |
 | `make tidy` | Run go mod tidy |
+| `make tidy-check` | Fail when `go mod tidy` would change `go.mod` or `go.sum` (as CI does) |
 | `make govulncheck` | Run govulncheck |
 | `make gosec` | Run gosec |
 | `make security-scan` | Run govulncheck and gosec |
-| `make ci` | Run the full CI checks locally, one step after the other (lint, vet, generated files, tests, security, dupl, nested modules) |
+| `make ci` | Run the full CI checks locally, one step after the other (tidy check, lint, vet, generated files, tests, security, dupl, nested modules) |
 | `make nested-build-check` | Vet every sub-module of `NESTED_CHECK_MODULES` and build its latest released tag against the root without `replace` directives (a no-op when it is empty) |
 | `make print-nested-check-modules` | Print the sub-module directories `make nested-build-check` checks against the root |
 | `make release` | Tag and push `VERSION` (clean `main` equal to `origin/main` only, one push URL for `origin`) |
