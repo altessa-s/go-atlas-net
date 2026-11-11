@@ -37,6 +37,10 @@ jobs:
           # Shared runners are noisy: only a significant increase above
           # BENCH_THRESHOLD fails. The script's header documents its defaults.
           BENCH_REPORT: benchstat.txt
+          # Shared runners are noisy: the same commit has measured from -23%
+          # to +40% sec/op between runs, so the local default of 20% fails on
+          # noise here.
+          BENCH_THRESHOLD: "50"
         run: bash .github/scripts/bench-regression.sh "origin/${BASE_REF}"
 
       - name: Upload benchstat report
