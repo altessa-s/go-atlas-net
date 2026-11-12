@@ -76,7 +76,9 @@ type EgressRule struct {
 // exempt addresses from the default private denial, which is why each one
 // needs a CIDR; host and port narrow it. Every refusal is an [*SSRFError]
 // matching [ErrSSRFBlocked]; [EgressPolicy.Explain] reports the decision
-// with its reason and rule.
+// with its reason and rule. [EgressPolicy.AllowPrivateDestinations] derives
+// a policy without the default private denial. Never enable it for
+// user-supplied destinations in production.
 //
 // IPv4-mapped IPv6 addresses are decided as the IPv4 address they connect
 // to (net.Dialer and proxydial both reach them over IPv4), so a policy
@@ -87,8 +89,25 @@ type EgressRule struct {
 // [EgressPolicy.DialContext] in a caller-built transport, or as a
 // proxydial.AddrGuard through [EgressPolicy.Check].
 type EgressPolicy struct {
-	allow []egressRule
-	deny  []egressRule
+	allow        []egressRule
+	deny         []egressRule
+	allowPrivate bool
+}
+
+// AllowPrivateDestinations returns a derived policy that also admits private,
+// loopback, link-local and reserved addresses. Deny rules still win, and
+// configured allow rules still report their own labels. Only destinations
+// admitted by this switch report [EgressAllowPrivate], with an empty Rule.
+// The original policy is unchanged; both policies are safe for concurrent use.
+//
+// Never enable this for user-supplied destinations in production. It removes
+// the default private-address SSRF protection, including at dial time and for
+// proxy addresses and literal proxy targets. Transport safety checks remain.
+func (p *EgressPolicy) AllowPrivateDestinations() *EgressPolicy {
+	out := *p
+	out.allowPrivate = true
+
+	return &out
 }
 
 // egressRule is a validated, normalized [EgressRule].
@@ -115,6 +134,9 @@ const (
 	EgressPrivateDefault
 	// EgressPublic allows a public address no rule matches.
 	EgressPublic
+	// EgressAllowPrivate admits a private or reserved address only because
+	// [EgressPolicy.AllowPrivateDestinations] enabled it.
+	EgressAllowPrivate
 )
 
 // egressReasonNames are the log names of the reasons, by value.
@@ -124,6 +146,7 @@ var egressReasonNames = [...]string{
 	EgressAllowRule:      "allow_rule",
 	EgressPrivateDefault: "private_default",
 	EgressPublic:         "public",
+	EgressAllowPrivate:   "allow_private",
 }
 
 // String returns the reason in snake case ("deny_rule"), for logs, or
@@ -245,7 +268,7 @@ func compileEgressRule(list egressrule.List, index int, m egressrule.Matcher) eg
 
 	name := m.Name
 	if name == "" {
-		name = fmt.Sprintf("%s[%d]", list, index)
+		name = egressrule.Label(list, index)
 	}
 
 	c.label = egressRuleLabel(name, c)
@@ -328,7 +351,8 @@ func (p *EgressPolicy) Check(host string, dst netip.AddrPort) error {
 // Explain decides whether host, resolved to dst, may be reached, as
 // [EgressPolicy.Check] does, and reports why: the deny rule that refuses it,
 // the allow rule that admits it, the default private denial, a public
-// address, or an invalid one. An IPv4-mapped address is decided as the IPv4
+// address, an address admitted by [EgressPolicy.AllowPrivateDestinations],
+// or an invalid one. An IPv4-mapped address is decided as the IPv4
 // address it connects to.
 func (p *EgressPolicy) Explain(host string, dst netip.AddrPort) EgressDecision {
 	ip := dst.Addr().WithZone("").Unmap()
@@ -350,6 +374,10 @@ func (p *EgressPolicy) Explain(host string, dst netip.AddrPort) EgressDecision {
 	}
 
 	if netipx.IsPrivate(ip) {
+		if p.allowPrivate {
+			return EgressDecision{Allowed: true, Reason: EgressAllowPrivate, Host: host, IP: ip}
+		}
+
 		return EgressDecision{Reason: EgressPrivateDefault, Host: host, IP: ip}
 	}
 
@@ -439,7 +467,8 @@ func (p *EgressPolicy) withAllowedCIDRs(prefixes []netip.Prefix) *EgressPolicy {
 		return p
 	}
 
-	out := &EgressPolicy{deny: p.deny, allow: make([]egressRule, 0, len(p.allow)+len(prefixes))}
+	out := *p
+	out.allow = make([]egressRule, 0, len(p.allow)+len(prefixes))
 	out.allow = append(out.allow, p.allow...)
 
 	for i, prefix := range prefixes {
@@ -452,7 +481,7 @@ func (p *EgressPolicy) withAllowedCIDRs(prefixes []netip.Prefix) *EgressPolicy {
 		out.allow = append(out.allow, r)
 	}
 
-	return out
+	return &out
 }
 
 // guardProxy wraps proxy so a request whose target is refused by p fails

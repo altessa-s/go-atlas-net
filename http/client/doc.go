@@ -115,6 +115,12 @@
 // rebinding cannot swap it. Every refusal is an [*SSRFError] matching
 // [ErrSSRFBlocked]; for a deny rule its Rule field names the rule.
 //
+// [EgressPolicy.AllowPrivateDestinations] derives an immutable policy that
+// admits private and reserved destinations unless a deny rule matches. Explicit
+// allow rules retain their labels; admission only by this switch reports
+// [EgressAllowPrivate] with an empty Rule. Never enable it for user-supplied
+// destinations in production. Dial-time and proxy checks still enforce denies.
+//
 //	policy, err := client.NewEgressPolicy(
 //	    []client.EgressRule{{CIDR: netip.MustParsePrefix("10.20.0.0/16"), Host: "*.corp.example"}},
 //	    []client.EgressRule{{Host: "*.internal"}, {Port: 25}},

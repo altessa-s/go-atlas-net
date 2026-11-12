@@ -10,8 +10,11 @@
 // A [Rule] is the textual form a configuration file or a stored document
 // holds: an optional name, a host glob, a CIDR and a port. [Rule.Parse]
 // validates it and returns its [Matcher], the parsed and normalized form the
-// engine compiles; [Check] validates a parsed matcher. A deny rule needs at
-// least one matcher; an allow rule needs a CIDR, because allow rules only
+// engine compiles; [Check] validates a parsed matcher. [Matcher.Rule] returns
+// its normalized textual form for storage or another enforcer. [Label] supplies
+// a positional name to preserve original indices when compiling a subset.
+// A deny rule needs at least one matcher; an allow rule needs a CIDR, because
+// allow rules only
 // exempt resolved addresses from the default private denial.
 //
 // Host globs are [path.Match] patterns, case insensitive, "*" crossing dots.

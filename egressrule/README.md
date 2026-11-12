@@ -21,6 +21,8 @@ internationalized host names.
 | Function            | Description                                                                                                         |
 |---------------------|---------------------------------------------------------------------------------------------------------------------|
 | `Rule.Parse`        | Parses the CIDR and bounds the port (0 = any, 1 to 65535), then `Check`                                              |
+| `Matcher.Rule`      | Returns a checked matcher as a normalized textual rule; parsing it with the same list preserves the matcher |
+| `Label`             | Positional name (`deny[3]`), valid as a rule name for `Allow` and `Deny` |
 | `Validate`          | Parses every allow and deny rule, returning the first error (deny rules first)                                      |
 | `Check`             | Deny needs a matcher, allow needs a CIDR; name shape; host glob; prefix validity (an IPv4-mapped one is /96 or more) |
 | `NormalizeHostGlob` | Validates a host glob and returns its matching form: lower case, ASCII dots, punycode labels                         |
@@ -44,3 +46,9 @@ if err != nil {
     return err // "deny[0].host: ..."
 }
 ```
+
+Use `m.Rule()` after `Parse` or `Check` to store or forward the exact normalized rule, including its name and port. An absent CIDR stays empty.
+This conversion does not validate unchecked matchers; an entirely empty matcher produces an empty rule, which parsing still rejects.
+
+When compiling a subset, set an unnamed rule's `Name` to `egressrule.Label(list, originalIndex)` before filtering. An existing `Name` wins;
+validation errors continue to identify the position in the list being parsed.
