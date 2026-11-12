@@ -72,12 +72,26 @@ type Matcher struct {
 	Port uint16
 }
 
+// Rule returns m in textual form, preserving its name and port. For a
+// normalized matcher returned by [Rule.Parse] or [Check], parsing the result
+// with the same list yields the same matcher. Rule does not validate or
+// normalize an unchecked Matcher; the zero prefix becomes an empty CIDR.
+// An entirely empty matcher becomes an empty Rule, which parsing rejects.
+func (m Matcher) Rule() Rule {
+	r := Rule{Name: m.Name, Host: m.Host, Port: int(m.Port)}
+	if m.CIDR != (netip.Prefix{}) {
+		r.CIDR = m.CIDR.String()
+	}
+
+	return r
+}
+
 // Parse validates r as rule index of list and returns its normalized
 // [Matcher]. It rejects a CIDR that does not parse, a port outside 0 to
 // 65535 and everything [Check] rejects. Errors name the rule
 // ("allow[2].cidr").
 func (r Rule) Parse(list List, index int) (Matcher, error) {
-	name := label(list, index)
+	name := Label(list, index)
 
 	m := Matcher{Name: r.Name, Host: r.Host}
 	if r.CIDR != "" {
@@ -123,7 +137,7 @@ func Validate(allow, deny []Rule) error {
 // [NormalizeHostGlob]; a non-zero prefix is valid, and an IPv4-mapped one is
 // at least 96 bits long. Errors name the rule ("deny[1].host").
 func Check(list List, index int, m Matcher) (Matcher, error) {
-	name := label(list, index)
+	name := Label(list, index)
 	switch list {
 	case Deny:
 		if m.Host == "" && m.CIDR == (netip.Prefix{}) && m.Port == 0 {
@@ -166,8 +180,11 @@ func Check(list List, index int, m Matcher) (Matcher, error) {
 	return m, nil
 }
 
-// label names rule index of list ("deny[0]").
-func label(list List, index int) string {
+// Label names rule index of list ("deny[0]"). For [Allow] and [Deny], the
+// result is a valid [Rule.Name]. A non-empty Rule.Name takes precedence in
+// decisions; validation errors always use the positional label. Set Name to
+// Label with the original index before compiling a subset to keep labels stable.
+func Label(list List, index int) string {
 	return string(list) + "[" + strconv.Itoa(index) + "]"
 }
 

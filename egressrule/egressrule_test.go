@@ -103,3 +103,49 @@ func TestNormalizePrefix(t *testing.T) {
 	require.Equal(t, netip.MustParsePrefix("0.0.0.0/0"), egressrule.NormalizePrefix(netip.MustParsePrefix("::ffff:0:0/96")))
 	require.Equal(t, netip.MustParsePrefix("fd00::/8"), egressrule.NormalizePrefix(netip.MustParsePrefix("fd12::/8")))
 }
+
+func TestMatcherRule(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		list egressrule.List
+		in   egressrule.Rule
+		want egressrule.Rule
+	}{
+		{egressrule.Deny, egressrule.Rule{Host: "*.BÜCHER。example"}, egressrule.Rule{Host: "*.xn--bcher-kva.example"}},
+		{egressrule.Allow, egressrule.Rule{Name: "named", CIDR: "::ffff:10.1.2.3/104", Port: 443},
+			egressrule.Rule{Name: "named", CIDR: "10.0.0.0/8", Port: 443}},
+		{egressrule.Allow, egressrule.Rule{CIDR: "fd12::1/8"}, egressrule.Rule{CIDR: "fd00::/8"}},
+		{egressrule.Deny, egressrule.Rule{Port: 22}, egressrule.Rule{Port: 22}},
+	} {
+		m, err := tc.in.Parse(tc.list, 0)
+		require.NoError(t, err)
+		require.Equal(t, tc.want, m.Rule())
+		again, err := m.Rule().Parse(tc.list, 0)
+		require.NoError(t, err)
+		require.Equal(t, m, again)
+	}
+
+	empty := (egressrule.Matcher{}).Rule()
+	require.Equal(t, egressrule.Rule{}, empty)
+
+	for _, list := range []egressrule.List{egressrule.Allow, egressrule.Deny} {
+		_, err := empty.Parse(list, 0)
+		require.Error(t, err)
+	}
+}
+
+func TestLabelIsValidName(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "deny[3]", egressrule.Label(egressrule.Deny, 3))
+
+	for _, list := range []egressrule.List{egressrule.Allow, egressrule.Deny} {
+		for _, index := range []int{0, 3, -1, int(^uint(0) >> 1), -int(^uint(0)>>1) - 1} {
+			name := egressrule.Label(list, index)
+			m, err := (egressrule.Rule{Name: name, CIDR: "0.0.0.0/0"}).Parse(list, 0)
+			require.NoError(t, err)
+			require.Equal(t, name, m.Name)
+		}
+	}
+}

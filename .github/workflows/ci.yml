@@ -28,6 +28,11 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: "**/go.sum"
 
+      - name: Check that every module is tidy
+        # Every later go command runs with -mod=readonly and would fail with
+        # "updates to go.mod needed"; this names the module and shows the diff.
+        run: make tidy-check
+
       - name: Run golangci-lint
         # make golangci builds the linter from devtools/go.mod (its module
         # graph pins a golang.org/x/tools that reads Go 1.27 export data; the

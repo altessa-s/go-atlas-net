@@ -27,6 +27,8 @@ dist/
 
 # Test & coverage
 coverage.out
+coverage.part
+coverage.tmp
 coverage.html
 *.coverprofile
 bench.txt

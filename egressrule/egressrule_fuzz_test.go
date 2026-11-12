@@ -138,6 +138,10 @@ func FuzzRuleParse(f *testing.F) {
 			require.False(t, m.CIDR.Addr().Is4In6(), "IPv4-mapped prefix not unmapped")
 		}
 
+		roundTrip, err := m.Rule().Parse(egressrule.List(list), 0)
+		require.NoError(t, err)
+		require.Equal(t, m, roundTrip)
+
 		again, err := egressrule.Check(egressrule.List(list), 0, m)
 		require.NoError(t, err)
 		require.Equal(t, m, again, "Check of a parsed matcher is not idempotent")

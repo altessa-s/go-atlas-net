@@ -30,12 +30,14 @@ cleanup() {
 trap cleanup EXIT
 
 # run_benchmarks DIR OUT runs every benchmark of every module of the tree at
-# DIR (each tracked go.mod outside devtools) and writes the lines benchstat
-# reads to OUT. A failing run prints its output and fails; a tree without
-# benchmarks yields an empty OUT.
+# DIR (each tracked go.mod outside devtools and testdata) and writes the lines
+# benchstat reads to OUT. Modules under testdata are generator inputs that need
+# not compile on their own; their generated output is checked by the tests.
+# A failing run prints its output and fails; a tree without benchmarks yields
+# an empty OUT.
 run_benchmarks() {
     local modules m
-    modules=$(git -C "$1" ls-files -- go.mod '*/go.mod' | grep -v '^devtools/' | xargs -n1 dirname)
+    modules=$(git -C "$1" ls-files -- go.mod '*/go.mod' | grep -Ev '^devtools/|(^|/)testdata/' | xargs -n1 dirname)
     : >"$2"
     for m in $modules; do
         if ! go -C "$1/$m" test -run='^$' -bench=. -benchmem -count="$count" -benchtime="$benchtime" ./... >"$2.raw" 2>&1; then

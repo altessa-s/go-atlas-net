@@ -227,6 +227,20 @@ loopback, link-local and reserved resolved addresses with an `SSRFError`, checks
 
 ### Egress policy
 
+**Security:** Never enable `policy.AllowPrivateDestinations()` for user-supplied destinations in production. It derives an immutable policy
+that admits private, loopback, link-local and reserved addresses. Deny rules still win, followed by configured allow rules with their original
+labels. Otherwise private addresses report `EgressAllowPrivate` (`allow_private`), an empty `Rule`, and a nil `Err()`; public addresses retain
+`EgressPublic`. Invalid addresses remain refused. The original policy is unchanged.
+
+```go
+internalPolicy := policy.AllowPrivateDestinations()
+c := client.New(client.WithEgressPolicy(internalPolicy))
+```
+
+The switch applies to `CheckHost`, resolved addresses at dial time, proxy addresses and literal proxy targets, including when
+`WithSSRFAllowedCIDRs` extends the policy. It keeps transport safety validation and deny enforcement active. Host names resolved by an HTTP
+proxy retain the proxy-resolution limitations described above.
+
 `NewEgressPolicy(allow, deny []EgressRule)` compiles rules once; an `EgressRule` matches a host glob (`path.Match` syntax, case-insensitive, `*` also
 matches dots), a `netip.Prefix` and a port, ANDed, zero matchers matching anything. A destination is refused when a deny rule matches (deny wins),
 allowed when an allow rule matches, and otherwise refused only when its resolved address is private, loopback, link-local or reserved. Allow rules only
@@ -255,8 +269,9 @@ Every refusal is an `*SSRFError` matching `ErrSSRFBlocked` and is never retried;
 numbering; it is not a matcher, and it must be 1 to 64 characters of `A-Z a-z 0-9 _ . - [ ]`, so the label survives the redaction of client errors.
 `NormalizeEgressHostGlob(glob)` validates a host glob and returns the form the policy matches (lower case, punycode labels, Unicode full stops as dots);
 the normalized form is validated again, so a glob such as `example.` plus a soft hyphen, which IDNA maps to `example.`, is rejected. Hand rules on to
-another enforcer (a proxy, a browser) in this form. `policy.Explain(host, dst)` returns the `EgressDecision` behind `Check`: `Allowed`, a `Reason`
-(`EgressDenyRule`, `EgressAllowRule`, `EgressPrivateDefault`, `EgressPublic`, `EgressInvalidAddress`; `String()` gives `deny_rule`, ...), the matching
+another enforcer (a proxy, a browser) in this form. For a complete normalized textual rule, use `egressrule.Rule.Parse` then `Matcher.Rule`.
+Use `egressrule.Label(list, originalIndex)` as an unnamed rule's `Name` to preserve its label when compiling a subset. `policy.Explain(host, dst)` returns the `EgressDecision` behind `Check`: `Allowed`, a `Reason`
+(`EgressDenyRule`, `EgressAllowRule`, `EgressAllowPrivate`, `EgressPrivateDefault`, `EgressPublic`, `EgressInvalidAddress`; `String()` gives `deny_rule`, ...), the matching
 rule's label for deny and allow rules (`allowedCIDRs[i]` for `WithSSRFAllowedCIDRs`), the host and the decided (unmapped) address; `Err()` is the
 `Check` result. `policy.CheckHost(host, port)` decides a destination before its host is resolved: a host name against the deny rules without a CIDR, a
 literal IP host (in any form net/http sends) in full. With an explicit client proxy, a target host name is resolved by the proxy and checked only

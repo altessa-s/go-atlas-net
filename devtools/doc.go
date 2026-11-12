@@ -10,8 +10,7 @@
 //
 // tools.go (build tag tools) blank-imports the commands the Makefile runs:
 // golangci-lint, optgen, gosec, govulncheck, dupl, benchstat and the copyright
-// checker.
-// Their versions are the ones this module's go.mod requires.
+// checker. Their versions are the ones this module's go.mod requires.
 //
 // # Usage
 //

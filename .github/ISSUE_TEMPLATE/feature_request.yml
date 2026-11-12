@@ -33,6 +33,8 @@ body:
         - clientip
         - egressrule
         - grpc/metadata
+        - hmacsign
+        - hmacsign/httpsign
         - http/client
         - http/client/limiters
         - http/client/limiters/hostpacer
