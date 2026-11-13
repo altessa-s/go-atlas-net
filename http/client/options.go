@@ -64,8 +64,13 @@ type CircuitBreakerSettings struct {
 // options holds the internal configuration state for the HTTP client.
 // This struct is not exported and is modified through Option functions.
 type options struct {
-	client             *http.Client `optgen:"default=defaultClient()"`
-	transport          *http.Transport
+	client    *http.Client `optgen:"default=defaultClient()"`
+	transport *http.Transport
+	// transportDriver builds HTTPS transports on core-owned guarded dials.
+	transportDriver TransportDriver `optgen:"notnil"`
+	// dialTimeout bounds the whole driver dial, including proxy negotiation.
+	// Nonpositive values use DefaultDialTimeout.
+	dialTimeout        time.Duration `optgen:"default=DefaultDialTimeout"`
 	retryMax           int           `optgen:"default=DefaultRetryMax"`
 	breakerMaxRequests uint32        `optgen:"default=DefaultBreakerMaxRequests"`
 	retryWaitMin       time.Duration `optgen:"default=DefaultRetryWaitMin"`
@@ -236,7 +241,7 @@ const DefaultSSRFProtection = true
 // only needed to re-enable it after a [WithoutSSRFProtection]. Use
 // [WithSSRFAllowedCIDRs] to exempt known internal networks. Environment proxies
 // are disabled; explicit proxy options are guarded as described on [ProxyFunc].
-// A proxy TLS configuration, custom TLS dialers, a proxy resolver set on a
+// A proxy TLS configuration (without a driver), custom TLS dialers, a proxy resolver set on a
 // caller transport and non-standard transports cause construction to panic
 // with an error wrapping [ErrSSRFUnsafeTransport].
 //
@@ -299,7 +304,9 @@ func WithSSRFAllowedCIDRs(cidrs ...netip.Prefix) Option {
 // [SSRFError] before the request reaches the proxy. With [WithEgressPolicy] a
 // host name target is also checked against the deny rules that need no
 // address; to resolve and pin targets locally, dial through proxydial with
-// its WithSSRFGuard option instead.
+// its WithSSRFGuard option instead. WithTransportDriver does this automatically
+// for HTTPS: proxy routes are selected per request, and destinations are resolved,
+// guarded and pinned locally before opening their tunnels.
 type ProxyFunc = func(*http.Request) (*url.URL, error)
 
 // WithProxy routes all requests through an HTTP proxy at host:port with
@@ -327,7 +334,7 @@ func WithProxy(host string, port int, auth *url.Userinfo) Option {
 	}
 
 	u := &url.URL{
-		Scheme: "http",
+		Scheme: schemeHTTP,
 		User:   auth,
 		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
 	}

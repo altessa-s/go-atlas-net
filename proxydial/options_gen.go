@@ -12,6 +12,20 @@ import (
 // Option is a functional option for configuring options.
 type Option func(o *options)
 
+// WithDialContext sets the dialContext option.
+//
+// dialContext overrides the connection path to the proxy. When set, it
+// takes precedence over dialer. It must honor context cancellation and
+// deadlines. This lets transports retain their caller-owned dial path.
+func WithDialContext(v DialContextFunc) Option {
+	return func(o *options) {
+		if v == nil {
+			return
+		}
+		o.dialContext = v
+	}
+}
+
 // WithDialer sets the dialer option.
 //
 // dialer overrides the underlying *net.Dialer used to reach the

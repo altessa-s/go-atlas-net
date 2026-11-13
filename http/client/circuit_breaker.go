@@ -205,8 +205,12 @@ func newCircuitBreakerClient(opts options) *circuitBreakerClient {
 		}
 	}
 
-	httpClient = applyProxy(httpClient, opts)
-	httpClient = applySSRFProtection(httpClient, opts)
+	if opts.transportDriver != nil {
+		httpClient = applyTransportDriver(httpClient, opts)
+	} else {
+		httpClient = applyProxy(httpClient, opts)
+		httpClient = applySSRFProtection(httpClient, opts)
+	}
 
 	// Generate circuit breaker name
 	var cbName string

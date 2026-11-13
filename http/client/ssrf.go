@@ -48,7 +48,7 @@ func validateSSRFTransport(opts *options) error {
 		return fmt.Errorf("%w: custom TLS dialer", ErrSSRFUnsafeTransport)
 	}
 
-	if opts.proxyTLSConfig != nil {
+	if opts.proxyTLSConfig != nil && opts.transportDriver == nil {
 		// The proxy TLS dialer connects to the proxy outside the guarded dialer.
 		return fmt.Errorf("%w: proxy TLS configuration", ErrSSRFUnsafeTransport)
 	}

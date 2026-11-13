@@ -32,8 +32,11 @@ const (
 	defaultHTTPSPort = 443
 )
 
-// schemeHTTPS is the URL scheme of HTTP over TLS.
-const schemeHTTPS = "https"
+// HTTP URL schemes used by transport routing.
+const (
+	schemeHTTP  = "http"
+	schemeHTTPS = "https"
+)
 
 // EgressRule matches an outbound destination. Every matcher that is set must
 // match (AND); a zero matcher matches anything.

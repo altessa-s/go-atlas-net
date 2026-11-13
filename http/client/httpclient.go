@@ -68,7 +68,9 @@ type Client struct {
 // protection is combined with a proxy TLS configuration, a custom TLS dialer, a
 // proxy resolver set on a caller transport or a non-standard transport. Use
 // [WithoutSSRFProtection] for trusted configurations that need them. Explicit
-// proxy options are allowed with SSRF protection (see [ProxyFunc]).
+// proxy options are allowed with SSRF protection (see [ProxyFunc]). With
+// [WithTransportDriver], proxy TLS configuration is supported under the guard;
+// insecure destination TLS and direct driver construction errors also panic.
 //
 // Example:
 //

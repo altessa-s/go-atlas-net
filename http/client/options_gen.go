@@ -128,6 +128,19 @@ func WithCookieJar(v http.CookieJar) Option {
 	}
 }
 
+// WithDialTimeout sets the dialTimeout option.
+//
+// dialTimeout bounds the whole driver dial, including proxy negotiation.
+// Nonpositive values use DefaultDialTimeout.
+func WithDialTimeout(v time.Duration) Option {
+	return func(o *options) {
+		if v <= 0 {
+			return
+		}
+		o.dialTimeout = v
+	}
+}
+
 // WithEgressPolicy sets the egressPolicy option.
 //
 // egressPolicy, set by the generated WithEgressPolicy, replaces the
@@ -421,6 +434,23 @@ func WithTransport(v *http.Transport) Option {
 	}
 }
 
+// WithTransportDriver sets the transportDriver option.
+//
+// transportDriver builds HTTPS transports on core-owned guarded dials.
+func WithTransportDriver(v TransportDriver) Option {
+	return func(o *options) {
+		switch rv := reflect.ValueOf(v); rv.Kind() {
+		case reflect.Invalid:
+			return
+		case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+			if rv.IsNil() {
+				return
+			}
+		}
+		o.transportDriver = v
+	}
+}
+
 // defaultOptions returns the default values for options.
 func defaultOptions() *options {
 	return &options{
@@ -429,6 +459,7 @@ func defaultOptions() *options {
 		breakerTimeout:     DefaultBreakerTimeout,
 		client:             defaultClient(),
 		clock:              clock.Real(),
+		dialTimeout:        DefaultDialTimeout,
 		logger:             slog.New(slog.DiscardHandler),
 		maxHostBreakers:    DefaultMaxHostBreakers,
 		observer:           defaultObserver(),

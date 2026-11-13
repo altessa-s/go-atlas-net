@@ -51,16 +51,26 @@ func FromURL(proxyURL *url.URL, opts ...Option) (DialContextFunc, error) {
 
 	switch proxyURL.Scheme {
 	case "http", "https":
-		dialer := o.dialer
+		dialProxy := o.dialContext
+		if dialProxy == nil {
+			dialProxy = o.dialer.DialContext
+		}
+
 		tlsCfg := o.proxyTLSConfig
 		u := proxyURL
 		dial = func(ctx context.Context, _, addr string) (net.Conn, error) {
-			return HTTPConnect(ctx, dialer, u, tlsCfg, addr)
+			return httpConnect(ctx, dialProxy, u, tlsCfg, addr)
 		}
 
 	case "socks5", "socks5h":
 		var err error
-		if dial, err = SOCKS5Dialer(proxyURL, o.dialer); err != nil {
+		if o.dialContext != nil {
+			dial, err = socks5Dialer(proxyURL, contextDialer{o.dialContext})
+		} else {
+			dial, err = SOCKS5Dialer(proxyURL, o.dialer)
+		}
+
+		if err != nil {
 			return nil, err
 		}
 

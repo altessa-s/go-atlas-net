@@ -288,3 +288,71 @@ if err != nil {
 }
 c := client.New(client.WithEgressPolicy(policy))
 ```
+
+## HTTPS transport drivers
+
+A trusted driver can supply destination TLS, ALPN dispatch, connection pooling,
+and HTTP framing while the client retains its connection guard and wrappers:
+
+```go
+base := client.DefaultPooledTransport()
+base.TLSClientConfig = destinationTLS // roots, versions, client certificates, pinning
+c := client.New(
+    client.WithTransport(base),
+    client.WithTransportDriver(driver), // implements client.TransportDriver
+    client.WithDialTimeout(30*time.Second),
+    client.WithoutRetry(), // optional: consumer owns retries
+)
+defer c.CloseIdleConnections()
+```
+
+`TransportDriver.NewTransport(DriverEnv)` receives a cloned TLS configuration,
+connection/idle limits and handshake/header timeouts. Every connection must come
+from `env.Dial`, including reconnects, fallback, and TLS session resumption. The
+driver must honor every non-default TLS setting with `crypto/tls` semantics or
+return a construction error. This includes roots, server name, TLS minimum and
+maximum versions, ALPN, client certificates and both verification callbacks.
+The core always rejects `InsecureSkipVerify`. Direct-route construction happens
+in `New` and errors panic; lazy proxy-route construction errors reach the request.
+
+Drivers are **trusted in-process code**, not a sandbox. Go cannot prevent a driver
+from opening its own sockets. Audit every connection-opening path in the driver
+and its dependencies, and run the exported local-server regression suite:
+
+```go
+func TestDriver(t *testing.T) {
+    drivertest.Run(t, func(t *testing.T) client.TransportDriver {
+        return newDriver(t)
+    })
+}
+```
+
+For each HTTPS request, including retries and redirects, the configured
+`ProxyFunc` and proxy policy guard run before transport selection. A bounded
+64-entry LRU isolates direct connections and each proxy URL, including user
+identity. Eviction and `CloseIdleConnections` close idle connections without
+interrupting active requests. Drivers must implement `CloseIdleConnections`.
+The core adds no transport replay; the existing retry layer remains above it.
+HTTP requests continue through the standard guarded transport.
+
+With SSRF protection enabled, driver-mode CONNECT and SOCKS5 tunnels resolve and
+check the destination locally and send an approved IP to the proxy. **This is
+stricter than the default proxy mode**, where the proxy resolves destination
+names: names visible only to a proxy will not resolve locally, and private
+addresses need explicit exemptions. The proxy's own address is also guarded.
+`WithProxyTLSConfig` configures `crypto/tls` to an HTTPS proxy independently of
+destination TLS. `WithDialTimeout` bounds resolution, TCP, proxy TLS and tunnel
+negotiation together (30 seconds by default; earlier context deadlines win).
+Setup deadlines are cleared on success. `WithoutSSRFProtection` opts out of the
+guard; direct and proxy TCP dials then use the base transport's dialer. Without a driver,
+existing transport behavior is unchanged.
+
+### Reusable keyed transport pool
+
+`http/client/transportpool.New(selector, transportpool.WithMaxEntries(64))`
+returns an `http.RoundTripper`. A `Selector` receives the request context and
+returns a key plus a lazy `func() http.RoundTripper` builder. Include every policy
+snapshot, route and profile identity in the key. Concurrent misses for one key
+build once; builders run serially and must not reenter the pool. Nonpositive
+limits use 64. Evicted requests finish on their original transport, with idle
+cleanup repeated when their response bodies finish. Always close response bodies.
