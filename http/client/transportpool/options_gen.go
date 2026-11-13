@@ -3,6 +3,10 @@
 
 package transportpool
 
+import (
+	"time"
+)
+
 // Option is a functional option for configuring options.
 type Option func(o *options)
 
@@ -15,10 +19,27 @@ func WithMaxEntries(v int) Option {
 	}
 }
 
+// WithRetireDelay sets the retireDelay option.
+//
+// retireDelay is the delay of the final cleanup of an evicted transport,
+// counted from the end of its last response. A transport may release a
+// connection only after the response body was closed (HTTP/2 cleans a
+// stream up asynchronously), so the idle connections are closed once more
+// after this delay. Nonpositive values use DefaultRetireDelay.
+func WithRetireDelay(v time.Duration) Option {
+	return func(o *options) {
+		if v <= 0 {
+			return
+		}
+		o.retireDelay = v
+	}
+}
+
 // defaultOptions returns the default values for options.
 func defaultOptions() *options {
 	return &options{
-		maxEntries: DefaultMaxEntries,
+		maxEntries:  DefaultMaxEntries,
+		retireDelay: DefaultRetireDelay,
 	}
 }
 

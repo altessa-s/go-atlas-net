@@ -7,6 +7,7 @@ package transportpool_test
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -151,6 +152,92 @@ func TestEvictedCleanupRepeatsAfterClose(t *testing.T) {
 
 	require.NoError(t, held.Body.Close())
 	require.Greater(t, a.closes.Load(), atEOF)
+}
+
+// closeNotifyConn reports its Close on a channel.
+type closeNotifyConn struct {
+	net.Conn
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (c *closeNotifyConn) Close() error {
+	c.once.Do(func() { close(c.closed) })
+
+	return c.Conn.Close()
+}
+
+// An HTTP/2 transport cleans a canceled stream up asynchronously, after
+// Body.Close has returned, so the cleanups at eviction and at Close can both
+// find the connection busy. The delayed cleanup of a retired transport closes
+// it even with idle timeouts disabled.
+func TestEvictedHTTP2ConnectionClosesAfterCancel(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush() //nolint:errcheck // The test server's writer flushes.
+
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+
+	defer srv.Close()
+	defer close(release)
+
+	closed := make(chan struct{})
+	h2 := &http.Transport{
+		TLSClientConfig:   srv.Client().Transport.(*http.Transport).TLSClientConfig.Clone(), //nolint:errcheck // httptest returns *http.Transport.
+		ForceAttemptHTTP2: true,
+		IdleConnTimeout:   0,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+
+			return &closeNotifyConn{Conn: conn, closed: closed}, nil
+		},
+	}
+	other := &transport{}
+	p := transportpool.New(func(ctx context.Context) (string, func() http.RoundTripper) {
+		key := ctx.Value(keyType{}).(string) //nolint:errcheck // The tests always set the key.
+
+		return key, func() http.RoundTripper {
+			if key == "a" {
+				return h2
+			}
+
+			return other
+		}
+	}, transportpool.WithMaxEntries(1), transportpool.WithRetireDelay(50*time.Millisecond))
+
+	ctx, cancel := context.WithCancel(context.WithValue(t.Context(), keyType{}, "a"))
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+
+	held, err := p.RoundTrip(req)
+	require.NoError(t, err)
+	require.Equal(t, 2, held.ProtoMajor)
+
+	resp, err := p.RoundTrip(request(t, "b")) // evicts the HTTP/2 transport mid-response
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	cancel()
+
+	_ = held.Body.Close()
+
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the connection of the evicted transport stayed open")
+	}
 }
 
 func TestPoolUpgrade(t *testing.T) {
