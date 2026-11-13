@@ -133,16 +133,20 @@ func closeIdle(tr http.RoundTripper) {
 	}
 }
 
+// responseBody runs done when the body ends and again when it is closed. A
+// transport may still hold the connection busy at the end of the body (an
+// HTTP/2 stream is cleaned up asynchronously) and release it only in Close,
+// so the cleanup of an evicted transport is repeated there; done is cheap and
+// idempotent.
 type responseBody struct {
 	io.ReadCloser
-	once sync.Once
 	done func()
 }
 
 func (b *responseBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	if err != nil {
-		b.once.Do(b.done)
+		b.done()
 	}
 
 	return n, err
@@ -150,7 +154,7 @@ func (b *responseBody) Read(p []byte) (int, error) {
 
 func (b *responseBody) Close() error {
 	err := b.ReadCloser.Close()
-	b.once.Do(b.done)
+	b.done()
 
 	return err
 }

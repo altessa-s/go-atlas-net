@@ -119,6 +119,40 @@ func TestEvictedInflightFinishesAndCloses(t *testing.T) {
 	require.EqualValues(t, 2, a.closes.Load())
 }
 
+// A transport can keep its connection busy at the end of the body and release
+// it only in Close, so an evicted transport is cleaned up again after Close.
+func TestEvictedCleanupRepeatsAfterClose(t *testing.T) {
+	a, b := &transport{}, &transport{}
+	p := transportpool.New(func(ctx context.Context) (string, func() http.RoundTripper) {
+		key := ctx.Value(keyType{}).(string)
+
+		return key, func() http.RoundTripper {
+			if key == "a" {
+				return a
+			}
+
+			return b
+		}
+	}, transportpool.WithMaxEntries(1))
+
+	held, err := p.RoundTrip(request(t, "a"))
+	require.NoError(t, err)
+
+	resp, err := p.RoundTrip(request(t, "b")) // evicts a while its body is open
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.EqualValues(t, 1, a.closes.Load())
+
+	_, err = io.ReadAll(held.Body)
+	require.NoError(t, err)
+
+	atEOF := a.closes.Load()
+	require.Greater(t, atEOF, int32(1))
+
+	require.NoError(t, held.Body.Close())
+	require.Greater(t, a.closes.Load(), atEOF)
+}
+
 func TestPoolUpgrade(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, rw, err := w.(http.Hijacker).Hijack()
