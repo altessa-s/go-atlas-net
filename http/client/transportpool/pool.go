@@ -18,11 +18,13 @@ import (
 // The builder is called only on a cache miss, serialized with other builders.
 type Selector func(ctx context.Context) (key string, build func() http.RoundTripper)
 
-// Retirer is implemented by a transport that can stop keeping connections:
-// after Retire it closes every connection as soon as it becomes idle. The
-// pool calls Retire once, after it evicted the transport and every request it
-// had acquired the transport for has finished, so Retire never races with a
-// request of the pool. A transport that does not implement it is cleaned up
+// Retirer is implemented by a transport that can stop keeping connections.
+// Retire switches it to closing every connection as soon as that connection
+// becomes idle; it must keep serving requests, both those in flight and
+// those that arrive after Retire (a request the pool acquired the transport
+// for just before evicting it can still be dispatched), on connections it
+// does not keep. The pool calls Retire once, when it evicts the transport.
+// A transport that does not implement it is cleaned up
 // with CloseIdleConnections as described on [Pool]; the connections that
 // cleanup misses live until the transport's own idle timeout, so such a
 // transport should have one.
@@ -34,11 +36,10 @@ type Retirer interface {
 //
 // Eviction does not interrupt active requests. An evicted transport is
 // retired: it serves no new request and the pool keeps owning its cleanup.
-// A [Retirer] is told once its acquired requests have finished. Its idle
-// connections are closed at eviction, whenever one of its responses ends or
-// is closed, [WithRetireDelay] after its
-// last response finished (a transport may hand a connection back only after
-// the body was closed), on every later eviction and on every
+// A [Retirer] is told at eviction. Its idle connections are closed at
+// eviction, whenever one of its responses ends or is closed, [WithRetireDelay]
+// after the latest of those events (a transport may hand a connection back
+// only after the body was closed), on every later eviction and on every
 // [Pool.CloseIdleConnections]. The pool keeps as many retired transports as
 // it caches; the oldest is dropped, after one more cleanup, when a newer one
 // retires.
@@ -55,13 +56,10 @@ type Pool struct {
 type entry struct {
 	key       string
 	transport http.RoundTripper
-	// inflight counts the requests acquired for the transport whose response
-	// has not finished; evicted and retireTold are set once; timer is the
-	// delayed cleanup of the retired entry. All are guarded by Pool.mu.
-	inflight   int
-	evicted    bool
-	retireTold bool
-	timer      *time.Timer
+	// evicted is set once; timer is the delayed cleanup of the retired entry.
+	// Both are guarded by Pool.mu.
+	evicted bool
+	timer   *time.Timer
 }
 
 // New constructs a pool. A nil selector panics. Nonpositive limits use 64.
@@ -96,13 +94,12 @@ func (p *Pool) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	resp, err := e.transport.RoundTrip(req)
 	if err != nil || resp == nil || resp.Body == nil {
-		p.finish(e)
 		p.cleanup(e)
 
 		return resp, err
 	}
 
-	body := &responseBody{ReadCloser: resp.Body, finish: func() { p.finish(e) }, cleanup: func() { p.cleanup(e) }}
+	body := &responseBody{ReadCloser: resp.Body, cleanup: func() { p.cleanup(e) }}
 	if writer, ok := resp.Body.(io.Writer); ok {
 		resp.Body = &responseReadWriteBody{responseBody: body, Writer: writer}
 	} else {
@@ -112,8 +109,8 @@ func (p *Pool) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-// acquire returns the entry of key with one more request in flight, building
-// it on a miss, and the entry that had to be evicted for it, if any.
+// acquire returns the entry of key, building it on a miss, and the entry that
+// had to be evicted for it, if any.
 func (p *Pool) acquire(key string, build func() http.RoundTripper) (*entry, *entry) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -121,10 +118,7 @@ func (p *Pool) acquire(key string, build func() http.RoundTripper) (*entry, *ent
 	if el := p.entries[key]; el != nil {
 		p.lru.MoveToFront(el)
 
-		e := el.Value.(*entry) //nolint:errcheck // Only *entry values enter this private list.
-		e.inflight++
-
-		return e, nil
+		return el.Value.(*entry), nil //nolint:errcheck // Only *entry values enter this private list.
 	}
 
 	tr := build()
@@ -132,7 +126,7 @@ func (p *Pool) acquire(key string, build func() http.RoundTripper) (*entry, *ent
 		panic("transportpool: builder returned nil")
 	}
 
-	e := &entry{key: key, transport: tr, inflight: 1}
+	e := &entry{key: key, transport: tr}
 	p.entries[key] = p.lru.PushFront(e)
 
 	var old *entry
@@ -151,6 +145,10 @@ func (p *Pool) acquire(key string, build func() http.RoundTripper) (*entry, *ent
 // retire takes an evicted entry into the retired set, dropping the oldest
 // retired entry beyond the limit, and cleans every retired transport up.
 func (p *Pool) retire(e *entry) {
+	if r, ok := e.transport.(Retirer); ok {
+		r.Retire()
+	}
+
 	p.mu.Lock()
 	p.retired = append(p.retired, e)
 
@@ -183,33 +181,16 @@ func (p *Pool) retire(e *entry) {
 	p.cleanup(e)
 }
 
-// finish records the end of one response of e.
-func (p *Pool) finish(e *entry) {
-	p.mu.Lock()
-	e.inflight--
-	p.mu.Unlock()
-}
-
-// cleanup closes the idle connections of e when it is retired and, while no
-// response of it is in flight, schedules one more cleanup after the retire
-// delay. It runs at the end of a body and again at its Close, so the delay
-// counts from whichever comes last. The entry stays in the retired set.
-//
-// A [Retirer] is told once, when the entry is retired and nothing the pool
-// sent on it is in flight any more: a request that acquired the transport
-// before its eviction still has to be served. The delayed cleanup is one
-// timer per entry, restarted rather than multiplied.
+// cleanup closes the idle connections of e when it is retired and schedules
+// one more cleanup after the retire delay. It runs at eviction, at the end of
+// a body and again at its Close, so the delay counts from the latest of them
+// whether or not other responses of e are still open. The delayed cleanup is
+// one timer per entry, restarted rather than multiplied.
 func (p *Pool) cleanup(e *entry) {
 	p.mu.Lock()
 	evicted := e.evicted
-	drained := evicted && e.inflight == 0
-	retire := drained && !e.retireTold
 
-	if retire {
-		e.retireTold = true
-	}
-
-	if drained {
+	if evicted {
 		if e.timer == nil {
 			e.timer = time.AfterFunc(p.retireDelay, func() { closeIdle(e.transport) })
 		} else {
@@ -218,15 +199,9 @@ func (p *Pool) cleanup(e *entry) {
 	}
 	p.mu.Unlock()
 
-	if !evicted {
-		return
+	if evicted {
+		closeIdle(e.transport)
 	}
-
-	if r, ok := e.transport.(Retirer); ok && retire {
-		r.Retire()
-	}
-
-	closeIdle(e.transport)
 }
 
 // CloseIdleConnections closes idle connections on every cached transport and
@@ -255,26 +230,20 @@ func closeIdle(tr http.RoundTripper) {
 	}
 }
 
-// responseBody reports the end of a response once (finish) and asks for the
-// cleanup of its transport both when the body ends and when it is closed: a
-// transport may still hold the connection busy at the end of the body and
-// release it only in Close.
+// responseBody asks for the cleanup of its transport when the body ends
+// (once: later terminal reads repeat the error and change nothing) and again
+// when it is closed: a transport may still hold the connection busy at the
+// end of the body and release it only in Close.
 type responseBody struct {
 	io.ReadCloser
-	once    sync.Once
-	finish  func()
+	eof     sync.Once
 	cleanup func()
 }
 
 func (b *responseBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	if err != nil {
-		// Only the first terminal read ends the response; later ones repeat
-		// the error and change nothing.
-		b.once.Do(func() {
-			b.finish()
-			b.cleanup()
-		})
+		b.eof.Do(b.cleanup)
 	}
 
 	return n, err
@@ -283,7 +252,6 @@ func (b *responseBody) Read(p []byte) (int, error) {
 func (b *responseBody) Close() error {
 	err := b.ReadCloser.Close()
 
-	b.once.Do(b.finish)
 	b.cleanup()
 
 	return err

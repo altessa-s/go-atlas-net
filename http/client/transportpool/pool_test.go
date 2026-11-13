@@ -293,9 +293,9 @@ func TestRetiredTransportStaysOwned(t *testing.T) {
 	require.Zero(t, all["d"].retires.Load())
 }
 
-// Retire waits for the requests the pool acquired the transport for: a
-// transport evicted mid-request is told only after that request finished.
-func TestRetireWaitsForAcquiredRequests(t *testing.T) {
+// Retire is told at eviction, and the retired transport keeps serving the
+// request the pool had already acquired it for.
+func TestRetireAtEvictionKeepsServing(t *testing.T) {
 	// Promoted fields are valid keys of a composite literal since Go 1.27, and
 	// `make vet` (go fix) rewrites the explicit embedded form into this one.
 	a := &retiring{entered: make(chan struct{}), resume: make(chan struct{})}
@@ -329,16 +329,50 @@ func TestRetireWaitsForAcquiredRequests(t *testing.T) {
 	resp, err := p.RoundTrip(request(t, "b")) // evicts a mid-request
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
-	require.Zero(t, a.retires.Load(), "retired while a request was in flight")
+	require.EqualValues(t, 1, a.retires.Load())
 
 	close(a.resume)
 
 	held := <-done
 	require.NoError(t, held.err)
-	require.Zero(t, a.retires.Load(), "retired while a response was open")
-
 	require.NoError(t, held.resp.Body.Close())
 	require.EqualValues(t, 1, a.retires.Load())
+}
+
+// The delayed cleanup of a retired transport does not wait for all of its
+// responses: a connection released by one response is collected while another
+// response stays open.
+func TestRetiredCleanupWithOpenResponse(t *testing.T) {
+	all := map[string]*retiring{"a": {}, "b": {}}
+	p := transportpool.New(func(ctx context.Context) (string, func() http.RoundTripper) {
+		key := ctx.Value(keyType{}).(string) //nolint:errcheck // The tests always set the key.
+
+		return key, func() http.RoundTripper { return all[key] }
+	}, transportpool.WithMaxEntries(1), transportpool.WithRetireDelay(20*time.Millisecond))
+
+	open, err := p.RoundTrip(request(t, "a"))
+	require.NoError(t, err)
+
+	defer open.Body.Close() //nolint:errcheck // Closed at the end of the test.
+
+	other, err := p.RoundTrip(request(t, "a"))
+	require.NoError(t, err)
+
+	resp, err := p.RoundTrip(request(t, "b")) // retires a with two responses open
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	require.Eventually(t, func() bool { return all["a"].closes.Load() >= 2 }, time.Second, time.Millisecond,
+		"the delayed cleanup after eviction")
+
+	settled := all["a"].closes.Load()
+
+	require.NoError(t, other.Body.Close())
+
+	atClose := all["a"].closes.Load()
+	require.Greater(t, atClose, settled)
+	require.Eventually(t, func() bool { return all["a"].closes.Load() > atClose }, time.Second, time.Millisecond,
+		"the delayed cleanup after one response closed while another stays open")
 }
 
 // Terminal reads repeated after the end of a body do not repeat the cleanup,
@@ -350,7 +384,7 @@ func TestRetiredCleanupIsCoalesced(t *testing.T) {
 		key := ctx.Value(keyType{}).(string) //nolint:errcheck // The tests always set the key.
 
 		return key, func() http.RoundTripper { return all[key] }
-	}, transportpool.WithMaxEntries(1), transportpool.WithRetireDelay(50*time.Millisecond))
+	}, transportpool.WithMaxEntries(1), transportpool.WithRetireDelay(100*time.Millisecond))
 
 	held, err := p.RoundTrip(request(t, "a"))
 	require.NoError(t, err)
@@ -378,7 +412,7 @@ func TestRetiredCleanupIsCoalesced(t *testing.T) {
 
 	dropped := all["a"].closes.Load()
 
-	time.Sleep(200 * time.Millisecond) // four retire delays: a stopped timer never fires
+	time.Sleep(400 * time.Millisecond) // four retire delays: a stopped timer never fires
 	require.Equal(t, dropped, all["a"].closes.Load(), "a dropped transport was cleaned up by a leftover timer")
 }
 
