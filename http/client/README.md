@@ -324,6 +324,14 @@ with an error wrapping `ErrDriverUnsupportedTransport`: `Dial` without
 or a configured proxy. If both `Dial` and `DialContext` are set, `DialContext`
 takes precedence. Without a driver, these settings retain their standard behavior.
 
+Driver construction leaves the supplied transport unchanged, so a fresh base can
+be reused across driver clients. In Go 1.27.4, using or cloning a standard
+transport can populate `HTTP2` and `TLSNextProto` automatically. Such transports
+are still rejected: the public API cannot distinguish an automatically populated
+empty `HTTP2` configuration from an explicit one. Supply a fresh transport for
+driver mode. Destination ALPN is captured before internal transport initialization
+and copied independently for each route, including a nil `NextProtos` policy.
+
 `TLSClientConfig` is cloned into `DriverEnv.TLS`; connection limits, idle,
 TLS handshake, response header and expect-continue timeouts, `DisableKeepAlives`
 and `DisableCompression` are passed in `DriverEnv`. `Proxy` and `DialContext`

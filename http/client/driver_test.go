@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -898,6 +899,120 @@ func TestConnectConfigurationWithoutDriver(t *testing.T) {
 
 			if setting != "ProxyConnectHeader" {
 				require.True(t, callbackSeen.Load())
+			}
+		})
+	}
+}
+
+func TestDriverTransportReusePreservesCaller(t *testing.T) {
+	for _, viaClient := range []bool{false, true} {
+		for _, ssrf := range []bool{false, true} {
+			t.Run("client="+strconv.FormatBool(viaClient)+"/ssrf="+strconv.FormatBool(ssrf), func(t *testing.T) {
+				base := DefaultPooledTransport()
+				base.TLSClientConfig = &tls.Config{NextProtos: []string{"http/1.1"}}
+				before := fmt.Sprintf("%#v", base)
+				tlsBefore := fmt.Sprintf("%#v", base.TLSClientConfig)
+
+				opts := []Option{WithTransportDriver(driverFunc(standardDriver)), WithoutProxy()}
+				if viaClient {
+					opts = append(opts, WithClient(&http.Client{Transport: base}))
+				} else {
+					opts = append(opts, WithTransport(base))
+				}
+
+				if !ssrf {
+					opts = append(opts, WithoutSSRFProtection())
+				}
+
+				for range 2 {
+					c := New(opts...)
+					c.CloseIdleConnections()
+					require.Equal(t, before, fmt.Sprintf("%#v", base))
+					require.Equal(t, tlsBefore, fmt.Sprintf("%#v", base.TLSClientConfig))
+				}
+			})
+		}
+	}
+}
+
+func TestDriverRouteTLSIsolation(t *testing.T) {
+	base := DefaultPooledTransport()
+	base.TLSClientConfig = &tls.Config{NextProtos: []string{"http/1.1"}}
+
+	var builds int
+
+	c := New(WithTransport(base), WithoutSSRFProtection(), WithoutRetry(),
+		WithProxyFunc(func(*http.Request) (*url.URL, error) {
+			return &url.URL{Scheme: "http", Host: "proxy.invalid:8080"}, nil
+		}), WithTransportDriver(driverFunc(func(e DriverEnv) (http.RoundTripper, error) {
+			builds++
+
+			require.Equal(t, []string{"http/1.1"}, e.TLS.NextProtos)
+			e.TLS.NextProtos[0] = "mutated"
+
+			return driverErrorTransport{errors.New("test route")}, nil
+		})))
+	defer c.CloseIdleConnections()
+
+	_, err := driverGet(t, c, "https://destination.invalid/")
+	require.Error(t, err)
+	require.Equal(t, 2, builds)
+	require.Equal(t, []string{"http/1.1"}, base.TLSClientConfig.NextProtos)
+}
+
+// Go 1.27.4 exposes no provenance for HTTP2: automatic initialization and an
+// explicit &http.HTTP2Config{} produce the same public setting. Until the API
+// has a rule for that ambiguity, validation must keep rejecting both.
+func TestDriverInitializedTransportRemainsUnsupported(t *testing.T) {
+	for _, initialize := range []string{"clone source", "clone result", "request"} {
+		t.Run(initialize, func(t *testing.T) {
+			base := DefaultPooledTransport()
+
+			base.Proxy = nil
+			defer func() { base.CloseIdleConnections() }()
+
+			switch initialize {
+			case "clone source":
+				base.Clone().CloseIdleConnections()
+			case "clone result":
+				base = base.Clone()
+			case "request":
+				s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusOK)
+				}))
+				defer s.Close()
+
+				_, err := driverGet(t, &http.Client{Transport: base}, s.URL)
+				require.NoError(t, err)
+				base.CloseIdleConnections()
+			}
+
+			require.Equal(t, new(http.HTTP2Config), base.HTTP2)
+
+			if initialize == "clone result" {
+				// Clone drops the automatic TLSNextProto map but preserves HTTP2.
+				// These fields are identical to explicit caller configuration.
+				require.Nil(t, base.TLSNextProto)
+			}
+
+			for _, viaClient := range []bool{false, true} {
+				opts := []Option{WithTransportDriver(driverFunc(standardDriver))}
+				if viaClient {
+					opts = append(opts, WithClient(&http.Client{Transport: base}))
+				} else {
+					opts = append(opts, WithTransport(base))
+				}
+
+				func() {
+					defer func() {
+						err, ok := recover().(error)
+						require.True(t, ok, "construction must panic with an error")
+						require.ErrorIs(t, err, ErrDriverUnsupportedTransport)
+						require.Contains(t, err.Error(), "HTTP2")
+					}()
+
+					New(opts...)
+				}()
 			}
 		})
 	}

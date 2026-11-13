@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"sync"
 	"time"
 
@@ -119,6 +120,9 @@ func validateDriverTransport(opts *options) error {
 	case base.Protocols != nil:
 		field = "Protocols"
 	case base.HTTP2 != nil:
+		// Go also sets this during automatic HTTP/2 initialization. There is
+		// no public provenance to distinguish that from an explicit empty
+		// configuration, so accepting it would silently ignore caller settings.
 		field = "HTTP2"
 	case base.TLSNextProto != nil:
 		field = "TLSNextProto"
@@ -131,6 +135,35 @@ func validateDriverTransport(opts *options) error {
 	return fmt.Errorf("%w: %s cannot be honored by the driver connection path", ErrDriverUnsupportedTransport, field)
 }
 
+// cloneDriverTLS also isolates the ALPN slice: tls.Config.Clone is shallow.
+func cloneDriverTLS(config *tls.Config) *tls.Config {
+	if config == nil {
+		return nil
+	}
+
+	clone := config.Clone()
+	clone.NextProtos = slices.Clone(config.NextProtos)
+
+	return clone
+}
+
+// copyDriverTransport copies supported public settings without copying internal
+// locks or calling Clone on a caller-owned transport. Validation rejects settings
+// that the driver cannot honor before this function runs.
+func copyDriverTransport(base *http.Transport) *http.Transport {
+	return &http.Transport{
+		Proxy: base.Proxy, DialContext: base.DialContext,
+		TLSClientConfig:     cloneDriverTLS(base.TLSClientConfig),
+		TLSHandshakeTimeout: base.TLSHandshakeTimeout,
+		DisableKeepAlives:   base.DisableKeepAlives, DisableCompression: base.DisableCompression,
+		MaxIdleConns: base.MaxIdleConns, MaxIdleConnsPerHost: base.MaxIdleConnsPerHost,
+		MaxConnsPerHost: base.MaxConnsPerHost, IdleConnTimeout: base.IdleConnTimeout,
+		ResponseHeaderTimeout: base.ResponseHeaderTimeout, ExpectContinueTimeout: base.ExpectContinueTimeout,
+		ForceAttemptHTTP2: base.ForceAttemptHTTP2,
+		WriteBufferSize:   base.WriteBufferSize, ReadBufferSize: base.ReadBufferSize,
+	}
+}
+
 func applyTransportDriver(c *http.Client, opts options) *http.Client {
 	base, ok := transportOf(c).(*http.Transport)
 	if !ok || base == nil {
@@ -141,7 +174,11 @@ func applyTransportDriver(c *http.Client, opts options) *http.Client {
 		panic("httpclient: transport driver rejects InsecureSkipVerify")
 	}
 
-	base = base.Clone()
+	// Transport.Clone initializes its receiver and can widen destination ALPN.
+	// Snapshot TLS first and copy only supported settings into a fresh transport.
+	destinationTLS := cloneDriverTLS(base.TLSClientConfig)
+
+	base = copyDriverTransport(base)
 	if opts.ssrfProtection {
 		base = newSSRFSafeTransport(base, opts.ssrfAllowedCIDRs, opts.proxy, opts.egressPolicy)
 	} else if opts.proxy != nil {
@@ -167,9 +204,7 @@ func applyTransportDriver(c *http.Client, opts options) *http.Client {
 			MaxConnsPerHost: base.MaxConnsPerHost, IdleConnTimeout: base.IdleConnTimeout,
 			TLSHandshakeTimeout: base.TLSHandshakeTimeout, ResponseHeaderTimeout: base.ResponseHeaderTimeout,
 			ExpectContinueTimeout: base.ExpectContinueTimeout, DisableKeepAlives: base.DisableKeepAlives, DisableCompression: base.DisableCompression}
-		if base.TLSClientConfig != nil {
-			env.TLS = base.TLSClientConfig.Clone()
-		}
+		env.TLS = cloneDriverTLS(destinationTLS)
 
 		tr, err := opts.transportDriver.NewTransport(env)
 		if err == nil && tr == nil {
