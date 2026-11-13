@@ -333,6 +333,12 @@ For each HTTPS request, including retries and redirects, the configured
 identity. Eviction and `CloseIdleConnections` close idle connections without
 interrupting active requests. Drivers must implement `CloseIdleConnections`.
 The core adds no transport replay; the existing retry layer remains above it.
+Drivers must not replay processed requests or non-rewindable bodies. Requests
+proven unprocessed by HTTP/2 REFUSED_STREAM or GOAWAY below their stream ID may
+be retried with a rewindable body, including when the client uses `WithoutRetry`.
+These retries are bounded by the request, not a transmission count: persistent
+refusal must return an error promptly when the request context expires or is
+canceled, and no transmission may start afterward.
 HTTP requests continue through the standard guarded transport.
 
 With SSRF protection enabled, driver-mode CONNECT and SOCKS5 tunnels resolve and

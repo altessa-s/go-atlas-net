@@ -72,7 +72,7 @@ func environment(s *httptest.Server) client.DriverEnv {
 			return (&net.Dialer{}).DialContext(ctx, network, s.Listener.Addr().String())
 		},
 		TLSHandshakeTimeout: shortTimeout, ResponseHeaderTimeout: shortTimeout,
-		MaxIdleConns: 10, MaxIdleConnsPerHost: 10, MaxConnsPerHost: 1, IdleConnTimeout: time.Minute,
+		MaxIdleConns: testIdleConns, MaxIdleConnsPerHost: testIdleConns, MaxConnsPerHost: 1, IdleConnTimeout: time.Minute,
 	}
 }
 
@@ -94,7 +94,9 @@ func transport(t *testing.T, d client.TransportDriver, env client.DriverEnv, ref
 	return tr
 }
 
-func roundTrip(t *testing.T, tr http.RoundTripper, method string, body io.Reader) (*http.Response, error) {
+type responseSummary struct{ StatusCode, ProtoMajor int }
+
+func roundTrip(t *testing.T, tr http.RoundTripper, method string, body io.Reader) (*responseSummary, error) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
@@ -113,11 +115,15 @@ func roundTrip(t *testing.T, tr http.RoundTripper, method string, body io.Reader
 		}
 	}
 
-	return resp, err
+	if resp == nil {
+		return nil, err
+	}
+
+	return &responseSummary{StatusCode: resp.StatusCode, ProtoMajor: resp.ProtoMajor}, err
 }
 
 func testDial(t *testing.T, f func(*testing.T) client.TransportDriver) {
-	for _, mode := range []string{"initial", "reconnect", "fallback", "resumption", "proxy"} {
+	for _, mode := range []string{"initial", "reconnect", "fallback", modeResumption, "proxy"} {
 		t.Run(mode, func(t *testing.T) {
 			var (
 				hits    atomic.Int32
@@ -132,12 +138,12 @@ func testDial(t *testing.T, f func(*testing.T) client.TransportDriver) {
 			}), nil, false)
 
 			env := environment(s)
-			if mode == "resumption" {
-				env.TLS.ClientSessionCache = tls.NewLRUClientSessionCache(4)
+			if mode == modeResumption {
+				env.TLS.ClientSessionCache = tls.NewLRUClientSessionCache(sessionCacheSize)
 			}
 
 			if mode == "fallback" {
-				env.TLS.NextProtos = []string{"h2", "http/1.1"}
+				env.TLS.NextProtos = []string{"h2", protocolHTTP1}
 			}
 
 			if mode == "proxy" {
@@ -162,7 +168,7 @@ func testDial(t *testing.T, f func(*testing.T) client.TransportDriver) {
 				return dial(ctx, n, a)
 			}
 
-			tr := transport(t, f(t), env, mode == "resumption")
+			tr := transport(t, f(t), env, mode == modeResumption)
 			if tr == nil {
 				return
 			}
@@ -171,18 +177,18 @@ func testDial(t *testing.T, f func(*testing.T) client.TransportDriver) {
 			require.NoError(t, err)
 			require.Positive(t, dials.Load(), "synthetic authority must use env.Dial")
 
-			if mode == "resumption" {
-				tr.(interface{ CloseIdleConnections() }).CloseIdleConnections()
+			if mode == modeResumption {
+				closeTransport(t, tr)
 				_, err = roundTrip(t, tr, "GET", nil)
 				require.NoError(t, err)
 				require.True(t, resumed.Load(), "accepted session cache must allow resumption")
-				require.EqualValues(t, 2, dials.Load())
+				require.EqualValues(t, twoConnections, dials.Load())
 			}
 
 			if mode == "initial" {
 				tr = transport(t, f(t), env, false)
 			} else {
-				tr.(interface{ CloseIdleConnections() }).CloseIdleConnections()
+				closeTransport(t, tr)
 				s.CloseClientConnections()
 			}
 
@@ -199,7 +205,7 @@ func testDial(t *testing.T, f func(*testing.T) client.TransportDriver) {
 
 func testVerification(t *testing.T, f func(*testing.T) client.TransportDriver) {
 	s := server(t, nil, nil, false)
-	for _, name := range []string{"untrusted", "wrong name", "insecure"} {
+	for _, name := range []string{"untrusted", "wrong name", modeInsecure} {
 		t.Run(name, func(t *testing.T) {
 			env := environment(s)
 
@@ -208,11 +214,11 @@ func testVerification(t *testing.T, f func(*testing.T) client.TransportDriver) {
 				env.TLS.RootCAs = x509.NewCertPool()
 			case "wrong name":
 				env.TLS.ServerName = "wrong.invalid"
-			case "insecure":
+			case modeInsecure:
 				env.TLS.InsecureSkipVerify = true
 			}
 
-			if name == "insecure" {
+			if name == modeInsecure {
 				require.Panics(t, func() {
 					client.New(client.WithTransport(&http.Transport{TLSClientConfig: env.TLS}), client.WithTransportDriver(f(t)))
 				})
@@ -258,17 +264,17 @@ func testALPN(t *testing.T, f func(*testing.T) client.TransportDriver) {
 		serverALPN, clientALPN []string
 		want                   int
 	}{
-		{"h1 restricted", []string{"h2", "http/1.1"}, []string{"http/1.1"}, 1},
+		{"h1 restricted", []string{"h2", protocolHTTP1}, []string{protocolHTTP1}, 1},
 		{"h2 only", []string{"h2"}, []string{"h2"}, 2},
-		{"h1 only", []string{"http/1.1"}, []string{"h2", "http/1.1"}, 1},
-		{"both", []string{"h2", "http/1.1"}, []string{"h2", "http/1.1"}, 2},
+		{"h1 only", []string{protocolHTTP1}, []string{"h2", protocolHTTP1}, 1},
+		{"both", []string{"h2", protocolHTTP1}, []string{"h2", protocolHTTP1}, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			offered := make(chan []string, 8)
 			cfg := &tls.Config{NextProtos: tc.serverALPN, MinVersion: tls.VersionTLS12,
 				GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 					offered <- append([]string(nil), hello.SupportedProtos...)
-					return nil, nil
+					return nil, nil //nolint:nilnil // TLS callback keeps the server configuration.
 				}}
 			s := server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Protocol", r.Proto)
@@ -352,7 +358,10 @@ func testReuse(t *testing.T, f func(*testing.T) client.TransportDriver) {
 		t.Run(map[bool]string{false: "h1", true: "h2"}[h2], func(t *testing.T) {
 			var handshakes atomic.Int32
 
-			s := server(t, nil, &tls.Config{MinVersion: tls.VersionTLS12, GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) { handshakes.Add(1); return nil, nil }}, h2)
+			s := server(t, nil, &tls.Config{MinVersion: tls.VersionTLS12, GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+				handshakes.Add(1)
+				return nil, nil //nolint:nilnil // TLS callback keeps the server configuration.
+			}}, h2)
 
 			env := environment(s)
 			if h2 {
@@ -374,10 +383,10 @@ func testReuse(t *testing.T, f func(*testing.T) client.TransportDriver) {
 
 			wg.Wait()
 			require.EqualValues(t, 1, handshakes.Load(), "MaxConnsPerHost=1 must be honored")
-			tr.(interface{ CloseIdleConnections() }).CloseIdleConnections()
+			closeTransport(t, tr)
 			_, err := roundTrip(t, tr, "GET", nil)
 			require.NoError(t, err)
-			require.EqualValues(t, 2, handshakes.Load())
+			require.EqualValues(t, twoConnections, handshakes.Load())
 		})
 	}
 }
@@ -391,7 +400,7 @@ func testCancellation(t *testing.T, f func(*testing.T) client.TransportDriver) {
 
 			go func() {
 				defer close(closed)
-				defer b.Close()
+				defer func() { _ = b.Close() }()
 
 				buf := make([]byte, 1)
 				if _, err := b.Read(buf); err == nil {
@@ -437,7 +446,7 @@ func testCancellation(t *testing.T, f func(*testing.T) client.TransportDriver) {
 			t.Fatal("request did not cancel")
 		}
 
-		tr.(interface{ CloseIdleConnections() }).CloseIdleConnections()
+		closeTransport(t, tr)
 
 		select {
 		case <-closed:
@@ -488,7 +497,7 @@ func testCancellation(t *testing.T, f func(*testing.T) client.TransportDriver) {
 			t.Fatal("request did not cancel")
 		}
 		// net/http detaches dials for reuse; CloseIdleConnections must retire them.
-		tr.(interface{ CloseIdleConnections() }).CloseIdleConnections()
+		closeTransport(t, tr)
 
 		select {
 		case <-exited:
@@ -501,7 +510,9 @@ func testCancellation(t *testing.T, f func(*testing.T) client.TransportDriver) {
 func testReplay(t *testing.T, f func(*testing.T) client.TransportDriver) {
 	for _, wrapped := range []bool{false, true} {
 		for _, rewindable := range []bool{false, true} {
-			t.Run(map[bool]string{false: "transport", true: "WithoutRetry"}[wrapped]+map[bool]string{false: "/stream", true: "/rewindable"}[rewindable], func(t *testing.T) {
+			name := map[bool]string{false: "transport", true: modeWithoutRetry}[wrapped] +
+				map[bool]string{false: "/stream", true: "/rewindable"}[rewindable]
+			t.Run(name, func(t *testing.T) {
 				var hits atomic.Int32
 
 				s := server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -509,7 +520,12 @@ func testReplay(t *testing.T, f func(*testing.T) client.TransportDriver) {
 
 					hits.Add(1)
 
-					conn, _, err := w.(http.Hijacker).Hijack()
+					hijacker, ok := w.(http.Hijacker)
+					if !ok {
+						return
+					}
+
+					conn, _, err := hijacker.Hijack()
 					if err == nil {
 						_ = conn.Close()
 					}
@@ -527,9 +543,9 @@ func testReplay(t *testing.T, f func(*testing.T) client.TransportDriver) {
 					tr = transport(t, f(t), env, false)
 				}
 
-				var body io.Reader = strings.NewReader("payload")
+				var body io.Reader = strings.NewReader(payload)
 				if !rewindable {
-					body = io.LimitReader(body, 7)
+					body = io.LimitReader(body, int64(len(payload)))
 				}
 
 				_, err := roundTrip(t, tr, "POST", body)
@@ -547,7 +563,7 @@ func testTimeouts(t *testing.T, f func(*testing.T) client.TransportDriver) {
 		env.Dial = func(context.Context, string, string) (net.Conn, error) {
 			a, b := net.Pipe()
 
-			go func() { defer close(closed); defer b.Close(); _, _ = io.Copy(io.Discard, b) }()
+			go func() { defer close(closed); defer func() { _ = b.Close() }(); _, _ = io.Copy(io.Discard, b) }()
 
 			return a, nil
 		}
@@ -555,7 +571,7 @@ func testTimeouts(t *testing.T, f func(*testing.T) client.TransportDriver) {
 		start := time.Now()
 		_, err := roundTrip(t, tr, "GET", nil)
 		require.Error(t, err)
-		require.Less(t, time.Since(start), testTimeout/2)
+		require.Less(t, time.Since(start), testTimeout/timeoutMargin)
 
 		select {
 		case <-closed:
@@ -569,6 +585,26 @@ func testTimeouts(t *testing.T, f func(*testing.T) client.TransportDriver) {
 		start := time.Now()
 		_, err := roundTrip(t, tr, "GET", nil)
 		require.Error(t, err)
-		require.Less(t, time.Since(start), testTimeout/2)
+		require.Less(t, time.Since(start), testTimeout/timeoutMargin)
 	})
 }
+
+func closeTransport(t *testing.T, tr http.RoundTripper) {
+	t.Helper()
+
+	closer, ok := tr.(interface{ CloseIdleConnections() })
+	require.True(t, ok)
+	closer.CloseIdleConnections()
+}
+
+const (
+	testIdleConns    = 10
+	sessionCacheSize = 4
+	twoConnections   = 2
+	timeoutMargin    = 2
+	payload          = "payload"
+	modeResumption   = "resumption"
+	protocolHTTP1    = "http/1.1"
+	modeInsecure     = "insecure"
+	modeWithoutRetry = "WithoutRetry"
+)

@@ -85,8 +85,7 @@ linters:
     rules:
       # Tests run only the formatting, dead-code and simple correctness
       # linters (see CONTRIBUTING "Formatting"); every other linter skips them.
-      # drivertest is an exported test harness, so it follows the same rules.
-      - path: (_test\.go|http/client/drivertest/)
+      - path: _test\.go
         linters:
           - bidichk
           - bodyclose

@@ -14,8 +14,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -25,6 +27,48 @@ import (
 	"github.com/altessa-s/go-atlas-net/http/client"
 	"github.com/altessa-s/go-atlas-net/proxydial"
 )
+
+const (
+	replayTimeout     = 1500 * time.Millisecond
+	replayMargin      = 500 * time.Millisecond
+	replayCancelDelay = 250 * time.Millisecond
+	// Observe beyond the first HTTP/2 retry backoff to catch detached retries.
+	replayObservation = 1200 * time.Millisecond
+)
+
+// replayEvents records receipt of connections and the start of streams, not
+// body completion: a transmission must not start after the request ends.
+type replayEvents struct {
+	mu                   sync.Mutex
+	connections, streams []time.Time
+}
+
+func (e *replayEvents) record(connection bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if connection {
+		e.connections = append(e.connections, time.Now())
+	} else {
+		e.streams = append(e.streams, time.Now())
+	}
+}
+
+func (e *replayEvents) check(t *testing.T, ended time.Time) {
+	t.Helper()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	require.NotEmpty(t, e.streams, "fixture must receive a request")
+
+	for _, received := range e.connections {
+		require.False(t, received.After(ended), "connection received %s after context ended", received.Sub(ended))
+	}
+
+	for _, received := range e.streams {
+		require.False(t, received.After(ended), "stream started %s after context ended", received.Sub(ended))
+	}
+}
 
 func proxyDial(t *testing.T, s *httptest.Server) func(context.Context, string, string) (net.Conn, error) {
 	t.Helper()
@@ -41,7 +85,13 @@ func proxyDial(t *testing.T, s *httptest.Server) func(context.Context, string, s
 			return
 		}
 
-		downstream, rw, err := w.(http.Hijacker).Hijack()
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			_ = upstream.Close()
+			return
+		}
+
+		downstream, rw, err := hijacker.Hijack()
 		if err != nil {
 			_ = upstream.Close()
 			return
@@ -69,72 +119,166 @@ func proxyDial(t *testing.T, s *httptest.Server) func(context.Context, string, s
 
 func testH2Replay(t *testing.T, f func(*testing.T) client.TransportDriver) {
 	for _, goAway := range []bool{false, true} {
-		for _, rewindable := range []bool{false, true} {
-			name := map[bool]string{false: "REFUSED_STREAM", true: "GOAWAY"}[goAway] + map[bool]string{false: "/stream", true: "/rewindable"}[rewindable]
-			t.Run(name, func(t *testing.T) {
-				// Use httptest only for its local certificate; framing below deliberately
-				// refuses the first fully received stream before processing it.
-				certServer := server(t, nil, nil, true)
-				ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: certServer.TLS.Certificates, NextProtos: []string{"h2"}, MinVersion: tls.VersionTLS12})
-				require.NoError(t, err)
-
-				var streams atomic.Int32
-
-				done := make(chan struct{})
-				ctx, cancel := context.WithCancel(t.Context())
-
-				go func() {
-					defer close(done)
-
-					for {
-						conn, err := ln.Accept()
-						if err != nil {
-							return
-						}
-
-						stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-
-						serveFrames(conn, &streams, goAway)
-						stop()
-
-						_ = conn.Close()
+		for _, mode := range []string{refuseOnce, "always", modeWithoutRetry} {
+			for _, rewindable := range []bool{false, true} {
+				name := map[bool]string{false: "REFUSED_STREAM", true: "GOAWAY"}[goAway] + map[bool]string{false: "/stream", true: "/rewindable"}[rewindable]
+				t.Run(mode+"/"+name, func(t *testing.T) {
+					if mode == refuseOnce {
+						testH2ReplayCase(t, f, goAway, mode, rewindable, false)
+						return
 					}
-				}()
 
-				t.Cleanup(func() { cancel(); _ = ln.Close(); <-done })
-
-				env := environment(certServer)
-				env.TLS.NextProtos = []string{"h2"}
-				env.Dial = func(ctx context.Context, n, _ string) (net.Conn, error) {
-					return (&net.Dialer{}).DialContext(ctx, n, ln.Addr().String())
-				}
-				tr := transport(t, f(t), env, false)
-
-				var body io.Reader = strings.NewReader("payload")
-				if !rewindable {
-					body = io.LimitReader(body, 7)
-				}
-
-				resp, err := roundTrip(t, tr, "POST", body)
-				require.Positive(t, streams.Load())
-
-				if rewindable {
-					require.LessOrEqual(t, streams.Load(), int32(2), "at most one safe transport retry")
-
-					if err == nil {
-						require.Equal(t, http.StatusOK, resp.StatusCode)
-						require.EqualValues(t, 2, streams.Load())
+					for _, callerCancel := range []bool{false, true} {
+						t.Run(map[bool]string{false: "deadline", true: "cancel"}[callerCancel], func(t *testing.T) {
+							testH2ReplayCase(t, f, goAway, mode, rewindable, callerCancel)
+						})
 					}
-				} else {
-					require.Error(t, err)
-					require.EqualValues(t, 1, streams.Load(), "streaming body cannot be replayed")
-				}
-			})
+				})
+			}
 		}
 	}
 }
 
-func serveFrames(conn net.Conn, streams *atomic.Int32, goAway bool) {
+func testH2ReplayCase(t *testing.T, f func(*testing.T) client.TransportDriver, goAway bool, mode string, rewindable, callerCancel bool) {
+	// Use httptest only for its local certificate; framing below deliberately
+	// refuses either the first or every fully received stream before processing it.
+	certServer := server(t, nil, nil, true)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: certServer.TLS.Certificates,
+		NextProtos: []string{"h2"}, MinVersion: tls.VersionTLS12})
+	require.NoError(t, err)
+
+	var streams atomic.Int32
+
+	var events replayEvents
+
+	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(t.Context())
+
+	go func() {
+		defer close(done)
+
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+
+			events.record(true)
+
+			stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+
+			serveFrames(conn, &streams, &events, goAway, mode != refuseOnce)
+			stop()
+
+			_ = conn.Close()
+		}
+	}()
+
+	t.Cleanup(func() { cancel(); _ = ln.Close(); <-done })
+
+	env := environment(certServer)
+	env.TLS.NextProtos = []string{"h2"}
+	env.Dial = func(ctx context.Context, n, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, n, ln.Addr().String())
+	}
+
+	var tr http.RoundTripper
+
+	if mode == modeWithoutRetry {
+		c := client.New(client.WithoutSSRFProtection(), client.WithoutProxy(), client.WithoutRetry(), client.WithTransportDriver(f(t)),
+			client.WithTransport(&http.Transport{DialContext: env.Dial, TLSClientConfig: env.TLS}))
+		t.Cleanup(c.CloseIdleConnections)
+		tr = c.Transport
+	} else {
+		tr = transport(t, f(t), env, false)
+	}
+
+	var body io.Reader = strings.NewReader(payload)
+	if !rewindable {
+		body = io.LimitReader(body, int64(len(payload)))
+	}
+
+	// Persistent refusals are bounded by this request, not a retry count.
+	requestCtx, requestCancel := context.WithTimeout(t.Context(), replayTimeout)
+	defer requestCancel()
+
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, "https://"+authority+"/", body)
+	require.NoError(t, err)
+
+	if mode != refuseOnce {
+		checkPersistentRefusal(t, tr, req, requestCancel, callerCancel, &events)
+
+		if !rewindable {
+			require.EqualValues(t, 1, streams.Load(), "streaming body cannot be replayed")
+		}
+
+		return
+	}
+
+	resp, err := tr.RoundTrip(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+
+	require.NoError(t, requestCtx.Err())
+	require.Positive(t, streams.Load())
+
+	if rewindable {
+		if err == nil {
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+		}
+	} else {
+		require.Error(t, err)
+		require.EqualValues(t, 1, streams.Load(), "streaming body cannot be replayed")
+	}
+}
+
+func checkPersistentRefusal(t *testing.T, tr http.RoundTripper, req *http.Request,
+	cancel context.CancelFunc, callerCancel bool, events *replayEvents) {
+	t.Helper()
+
+	returned := make(chan error, 1)
+
+	go func() {
+		resp, err := tr.RoundTrip(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+
+		returned <- err
+	}()
+
+	ended, _ := req.Context().Deadline()
+
+	if callerCancel {
+		time.Sleep(replayCancelDelay)
+		cancel()
+
+		ended = time.Now()
+	} else {
+		<-req.Context().Done()
+	}
+
+	// A driver may give up earlier. It must return an error by this bound even
+	// if it ignores the context, so run RoundTrip separately from the watchdog.
+	timer := time.NewTimer(time.Until(ended.Add(replayMargin)))
+	defer timer.Stop()
+
+	select {
+	case err := <-returned:
+		require.Error(t, err)
+		require.WithinDuration(t, ended, time.Now(), replayMargin)
+	case <-timer.C:
+		t.Fatal("persistent refusal did not return promptly after context ended")
+	}
+
+	// Keep the peer live after RoundTrip returns, so background transmissions
+	// remain observable instead of being hidden by fixture cleanup.
+	time.Sleep(replayObservation)
+	events.check(t, ended)
+}
+
+func serveFrames(conn net.Conn, streams *atomic.Int32, events *replayEvents, goAway, always bool) {
 	preface := make([]byte, len(http2.ClientPreface))
 	if _, err := io.ReadFull(conn, preface); err != nil || string(preface) != http2.ClientPreface {
 		return
@@ -151,30 +295,20 @@ func serveFrames(conn net.Conn, streams *atomic.Int32, goAway bool) {
 			return
 		}
 
-		var stream uint32
+		if _, ok := frame.(*http2.HeadersFrame); ok {
+			events.record(false)
+		}
 
-		switch frame := frame.(type) {
-		case *http2.SettingsFrame:
-			if !frame.IsAck() {
-				if err := fr.WriteSettingsAck(); err != nil {
-					return
-				}
-			}
-		case *http2.HeadersFrame:
-			if frame.StreamEnded() {
-				stream = frame.StreamID
-			}
-		case *http2.DataFrame:
-			if frame.StreamEnded() {
-				stream = frame.StreamID
-			}
+		stream, ok := endedStream(fr, frame)
+		if !ok {
+			return
 		}
 
 		if stream == 0 {
 			continue
 		}
 
-		if streams.Add(1) == 1 {
+		if count := streams.Add(1); count == 1 || always {
 			if goAway {
 				_ = fr.WriteGoAway(0, http2.ErrCodeNo, nil)
 				return
@@ -199,3 +333,28 @@ func serveFrames(conn net.Conn, streams *atomic.Int32, goAway bool) {
 		}
 	}
 }
+
+func endedStream(fr *http2.Framer, frame http2.Frame) (uint32, bool) {
+	var stream uint32
+
+	switch frame := frame.(type) {
+	case *http2.SettingsFrame:
+		if !frame.IsAck() {
+			if err := fr.WriteSettingsAck(); err != nil {
+				return 0, false
+			}
+		}
+	case *http2.HeadersFrame:
+		if frame.StreamEnded() {
+			stream = frame.StreamID
+		}
+	case *http2.DataFrame:
+		if frame.StreamEnded() {
+			stream = frame.StreamID
+		}
+	}
+
+	return stream, true
+}
+
+const refuseOnce = "once"

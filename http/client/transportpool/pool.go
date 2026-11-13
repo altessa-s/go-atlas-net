@@ -60,7 +60,12 @@ func (p *Pool) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil || resp == nil || resp.Body == nil {
 		p.release(e)
 	} else {
-		resp.Body = &responseBody{ReadCloser: resp.Body, done: func() { p.release(e) }}
+		body := &responseBody{ReadCloser: resp.Body, done: func() { p.release(e) }}
+		if writer, ok := resp.Body.(io.Writer); ok {
+			resp.Body = &responseReadWriteBody{responseBody: body, Writer: writer}
+		} else {
+			resp.Body = body
+		}
 	}
 
 	return resp, err
@@ -148,4 +153,10 @@ func (b *responseBody) Close() error {
 	b.once.Do(b.done)
 
 	return err
+}
+
+// responseReadWriteBody preserves duplex upgraded responses and release tracking.
+type responseReadWriteBody struct {
+	*responseBody
+	io.Writer
 }

@@ -8,10 +8,12 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -115,4 +117,52 @@ func TestEvictedInflightFinishesAndCloses(t *testing.T) {
 	close(a.resume)
 	<-done
 	require.EqualValues(t, 2, a.closes.Load())
+}
+
+func TestPoolUpgrade(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, rw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+		_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+		_ = rw.Flush()
+
+		buf := make([]byte, 4)
+		if _, err = io.ReadFull(rw, buf); err == nil {
+			_, _ = conn.Write(buf)
+		}
+	}))
+	defer s.Close()
+
+	tr := &http.Transport{}
+
+	p := transportpool.New(func(context.Context) (string, func() http.RoundTripper) {
+		return "upgrade", func() http.RoundTripper { return tr }
+	})
+	defer p.CloseIdleConnections()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, s.URL, nil)
+	require.NoError(t, err)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "echo")
+	resp, err := p.RoundTrip(req)
+	require.NoError(t, err)
+
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
+	body, ok := resp.Body.(io.ReadWriteCloser)
+	require.True(t, ok)
+
+	_, err = body.Write([]byte("ping"))
+	require.NoError(t, err)
+
+	buf := make([]byte, 4)
+	_, err = io.ReadFull(body, buf)
+	require.NoError(t, err)
+	require.Equal(t, "ping", string(buf))
 }

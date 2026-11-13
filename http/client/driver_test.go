@@ -710,3 +710,78 @@ func TestDriverUnguardedBaseDial(t *testing.T) {
 		})
 	}
 }
+
+func TestDriverHTTPProxyTLS(t *testing.T) {
+	for _, reject := range []bool{false, true} {
+		t.Run(strconv.FormatBool(reject), func(t *testing.T) {
+			var calls atomic.Int32
+
+			proxy := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "http://destination.invalid/", r.URL.String())
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer proxy.Close()
+
+			proxyURL, err := url.Parse(proxy.URL)
+			require.NoError(t, err)
+
+			sentinel := errors.New("proxy verification rejected")
+			proxyTLS := driverBase(proxy).TLSClientConfig
+			proxyTLS.VerifyConnection = func(tls.ConnectionState) error {
+				calls.Add(1)
+
+				if reject {
+					return sentinel
+				}
+
+				return nil
+			}
+			destinationTLS := &tls.Config{RootCAs: x509.NewCertPool(), ServerName: "destination.invalid", MinVersion: tls.VersionTLS13,
+				VerifyConnection: func(tls.ConnectionState) error { return errors.New("destination callback used for proxy") }}
+
+			c := New(WithTransport(&http.Transport{TLSClientConfig: destinationTLS}), WithTransportDriver(driverFunc(func(e DriverEnv) (http.RoundTripper, error) {
+				require.Equal(t, destinationTLS.ServerName, e.TLS.ServerName)
+				require.Same(t, destinationTLS.RootCAs, e.TLS.RootCAs)
+
+				return standardDriver(e)
+			})), WithProxyFunc(http.ProxyURL(proxyURL)), WithProxyTLSConfig(proxyTLS), WithSSRFAllowedCIDRs(netip.MustParsePrefix("127.0.0.0/8")), WithoutRetry())
+			defer c.CloseIdleConnections()
+
+			_, err = driverGet(t, c, "http://destination.invalid/")
+			if reject {
+				require.ErrorIs(t, err, sentinel)
+			} else {
+				require.NoError(t, err)
+			}
+
+			require.EqualValues(t, 1, calls.Load())
+		})
+	}
+}
+
+func TestDriverLegacyDial(t *testing.T) {
+	for _, proxy := range []bool{false, true} {
+		t.Run(strconv.FormatBool(proxy), func(t *testing.T) {
+			sentinel := errors.New("legacy dial refused")
+
+			var address string
+
+			base := &http.Transport{Dial: func(_, addr string) (net.Conn, error) { address = addr; return nil, sentinel }}
+			opts := []Option{WithTransport(base), WithTransportDriver(driverFunc(standardDriver)), WithoutSSRFProtection(), WithoutProxy(), WithoutRetry()}
+			want := "destination.invalid:443"
+
+			if proxy {
+				u := &url.URL{Scheme: "http", Host: "proxy.invalid:8080"}
+				opts = append(opts, WithProxyFunc(http.ProxyURL(u)))
+				want = u.Host
+			}
+
+			c := New(opts...)
+			defer c.CloseIdleConnections()
+
+			_, err := driverGet(t, c, "https://destination.invalid/")
+			require.ErrorIs(t, err, sentinel)
+			require.Equal(t, want, address)
+		})
+	}
+}

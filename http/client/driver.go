@@ -35,6 +35,12 @@ const DefaultDialTimeout = 30 * time.Second
 // support concurrent requests, and must implement CloseIdleConnections.
 // NewTransport must not open connections. Direct-route errors panic in New;
 // errors constructing subsequent proxy routes are returned by RoundTrip.
+// Requests that may have been processed and non-rewindable bodies must not be
+// replayed. Proven unprocessed requests (HTTP/2 REFUSED_STREAM or GOAWAY below
+// their stream ID) with rewindable bodies may be retried, including with
+// WithoutRetry. These retries are bounded by the request, not a transmission
+// count: persistent refusal must return an error promptly when the request
+// context expires or is canceled, and no transmission may start afterward.
 type TransportDriver interface {
 	// NewTransport builds a transport using only the supplied connection path.
 	NewTransport(env DriverEnv) (http.RoundTripper, error)
@@ -95,7 +101,15 @@ func applyTransportDriver(c *http.Client, opts options) *http.Client {
 		base.Proxy = opts.proxy
 	}
 	// Keep the standard HTTP path, while resolving HTTPS routes before pooling.
-	d := &driverTransport{base: base, proxy: base.Proxy}
+	httpBase := base.Clone()
+	// This transport serves only HTTP destinations, so its TLS policy is solely
+	// for HTTPS proxies. Never apply destination roots or callbacks to a proxy.
+	httpBase.TLSClientConfig = nil
+	if opts.proxyTLSConfig != nil {
+		httpBase.TLSClientConfig = opts.proxyTLSConfig.Clone()
+	}
+
+	d := &driverTransport{base: httpBase, proxy: base.Proxy}
 	build := func(u *url.URL) (http.RoundTripper, error) {
 		dial, err := driverDial(base, opts, u)
 		if err != nil {
@@ -211,6 +225,12 @@ func (d driverErrorTransport) RoundTrip(req *http.Request) (*http.Response, erro
 
 func driverDial(base *http.Transport, opts options, u *url.URL) (proxydial.DialContextFunc, error) {
 	dial := base.DialContext
+	if dial == nil && base.Dial != nil { //nolint:staticcheck // Preserve the standard transport’s legacy Dial precedence.
+		dial = func(_ context.Context, network, address string) (net.Conn, error) {
+			return base.Dial(network, address) //nolint:staticcheck // Honor an explicitly configured legacy connection path.
+		}
+	}
+
 	if dial == nil {
 		dial = proxydial.DefaultDialer().DialContext
 	}
