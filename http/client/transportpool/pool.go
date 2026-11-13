@@ -9,6 +9,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 )
@@ -17,14 +18,28 @@ import (
 // The builder is called only on a cache miss, serialized with other builders.
 type Selector func(ctx context.Context) (key string, build func() http.RoundTripper)
 
+// Retirer is implemented by a transport that can stop keeping connections:
+// after Retire it serves the requests already in flight and closes every
+// connection as soon as it becomes idle. The pool calls Retire once, when it
+// evicts the transport. A transport that does not implement it is cleaned up
+// with CloseIdleConnections as described on [Pool]; the connections that
+// cleanup misses live until the transport's own idle timeout, so such a
+// transport should have one.
+type Retirer interface {
+	Retire()
+}
+
 // Pool is a concurrent, bounded LRU of transports. Construct it with New.
 //
 // Eviction does not interrupt active requests. An evicted transport is
-// retired: it serves no new request, its idle connections are closed at once,
-// again whenever one of its responses ends or is closed, and a final time
-// [WithRetireDelay] after its last response finished — a transport may hand a
-// connection back only after the body was closed. Until that final cleanup a
-// retired transport stays reachable by [Pool.CloseIdleConnections].
+// retired: it serves no new request and the pool keeps owning its cleanup.
+// Its idle connections are closed at eviction ([Retirer] is told first),
+// whenever one of its responses ends or is closed, [WithRetireDelay] after its
+// last response finished (a transport may hand a connection back only after
+// the body was closed), on every later eviction and on every
+// [Pool.CloseIdleConnections]. The pool keeps as many retired transports as
+// it caches; the oldest is dropped, after one more cleanup, when a newer one
+// retires.
 type Pool struct {
 	mu          sync.Mutex
 	selector    Selector
@@ -32,7 +47,7 @@ type Pool struct {
 	retireDelay time.Duration
 	entries     map[string]*list.Element
 	lru         list.List
-	retired     map[*entry]struct{}
+	retired     []*entry // oldest first, at most max
 }
 
 type entry struct {
@@ -61,7 +76,7 @@ func New(selector Selector, opts ...Option) *Pool {
 
 	return &Pool{
 		selector: selector, max: o.maxEntries, retireDelay: o.retireDelay,
-		entries: make(map[string]*list.Element), retired: make(map[*entry]struct{}),
+		entries: make(map[string]*list.Element),
 	}
 }
 
@@ -71,7 +86,7 @@ func (p *Pool) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	e, evicted := p.acquire(key, build)
 	if evicted != nil {
-		p.cleanup(evicted)
+		p.retire(evicted)
 	}
 
 	resp, err := e.transport.RoundTrip(req)
@@ -123,10 +138,42 @@ func (p *Pool) acquire(key string, build func() http.RoundTripper) (*entry, *ent
 		old.evicted = true
 		delete(p.entries, old.key)
 		p.lru.Remove(el)
-		p.retired[old] = struct{}{}
 	}
 
 	return e, old
+}
+
+// retire takes an evicted entry into the retired set, dropping the oldest
+// retired entry beyond the limit, and cleans every retired transport up.
+func (p *Pool) retire(e *entry) {
+	if r, ok := e.transport.(Retirer); ok {
+		r.Retire()
+	}
+
+	p.mu.Lock()
+	p.retired = append(p.retired, e)
+
+	var dropped *entry
+
+	if len(p.retired) > p.max {
+		dropped = p.retired[0]
+		p.retired = slices.Delete(p.retired, 0, 1)
+	}
+
+	retired := slices.Clone(p.retired)
+	p.mu.Unlock()
+
+	if dropped != nil {
+		closeIdle(dropped.transport)
+	}
+
+	for _, r := range retired {
+		if r != e { // cleanup below takes care of e
+			closeIdle(r.transport)
+		}
+	}
+
+	p.cleanup(e)
 }
 
 // finish records the end of one response of e.
@@ -137,9 +184,9 @@ func (p *Pool) finish(e *entry) {
 }
 
 // cleanup closes the idle connections of e when it is retired and, while no
-// response of it is in flight, schedules the delayed cleanup that forgets it.
-// It runs at the end of a body and again at its Close, so the delay counts
-// from whichever comes last.
+// response of it is in flight, schedules one more cleanup after the retire
+// delay. It runs at the end of a body and again at its Close, so the delay
+// counts from whichever comes last. The entry stays in the retired set.
 func (p *Pool) cleanup(e *entry) {
 	p.mu.Lock()
 	evicted := e.evicted
@@ -153,13 +200,7 @@ func (p *Pool) cleanup(e *entry) {
 	closeIdle(e.transport)
 
 	if last {
-		time.AfterFunc(p.retireDelay, func() {
-			closeIdle(e.transport)
-
-			p.mu.Lock()
-			delete(p.retired, e)
-			p.mu.Unlock()
-		})
+		time.AfterFunc(p.retireDelay, func() { closeIdle(e.transport) })
 	}
 }
 
@@ -173,7 +214,7 @@ func (p *Pool) CloseIdleConnections() {
 		transports = append(transports, el.Value.(*entry).transport) //nolint:errcheck // Only *entry values enter this private list.
 	}
 
-	for e := range p.retired {
+	for _, e := range p.retired {
 		transports = append(transports, e.transport)
 	}
 	p.mu.Unlock()

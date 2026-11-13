@@ -240,6 +240,59 @@ func TestEvictedHTTP2ConnectionClosesAfterCancel(t *testing.T) {
 	}
 }
 
+// retiring records Retire and counts cleanups.
+type retiring struct {
+	transport
+	retires atomic.Int32
+}
+
+func (tr *retiring) Retire() { tr.retires.Add(1) }
+
+// A retired transport is not forgotten after its delayed cleanup: a
+// connection that becomes idle later is still reached by the next eviction
+// and by CloseIdleConnections, and the oldest retired transport gets one more
+// cleanup when it is dropped.
+func TestRetiredTransportStaysOwned(t *testing.T) {
+	all := map[string]*retiring{"a": {}, "b": {}, "c": {}, "d": {}}
+	p := transportpool.New(func(ctx context.Context) (string, func() http.RoundTripper) {
+		key := ctx.Value(keyType{}).(string) //nolint:errcheck // The tests always set the key.
+
+		return key, func() http.RoundTripper { return all[key] }
+	}, transportpool.WithMaxEntries(1), transportpool.WithRetireDelay(10*time.Millisecond))
+
+	send := func(key string) {
+		resp, err := p.RoundTrip(request(t, key))
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+	}
+
+	send("a")
+	send("b") // retires a
+	require.EqualValues(t, 1, all["a"].retires.Load())
+	require.Eventually(t, func() bool { return all["a"].closes.Load() >= 2 }, time.Second, time.Millisecond,
+		"the delayed cleanup of a")
+
+	// Long after the delayed cleanup, a is still cleaned up.
+	settled := all["a"].closes.Load()
+
+	p.CloseIdleConnections()
+	require.Greater(t, all["a"].closes.Load(), settled)
+
+	settled = all["a"].closes.Load()
+
+	send("c") // retires b: a is dropped (limit 1) with one more cleanup
+	require.Greater(t, all["a"].closes.Load(), settled)
+	require.EqualValues(t, 1, all["b"].retires.Load())
+
+	settled = all["a"].closes.Load()
+	before := all["b"].closes.Load()
+
+	send("d") // retires c: b is dropped with one more cleanup, a is gone
+	require.Greater(t, all["b"].closes.Load(), before)
+	require.Equal(t, settled, all["a"].closes.Load())
+	require.Zero(t, all["d"].retires.Load())
+}
+
 func TestPoolUpgrade(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, rw, err := w.(http.Hijacker).Hijack()
