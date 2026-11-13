@@ -19,9 +19,10 @@ import (
 type Selector func(ctx context.Context) (key string, build func() http.RoundTripper)
 
 // Retirer is implemented by a transport that can stop keeping connections:
-// after Retire it serves the requests already in flight and closes every
-// connection as soon as it becomes idle. The pool calls Retire once, when it
-// evicts the transport. A transport that does not implement it is cleaned up
+// after Retire it closes every connection as soon as it becomes idle. The
+// pool calls Retire once, after it evicted the transport and every request it
+// had acquired the transport for has finished, so Retire never races with a
+// request of the pool. A transport that does not implement it is cleaned up
 // with CloseIdleConnections as described on [Pool]; the connections that
 // cleanup misses live until the transport's own idle timeout, so such a
 // transport should have one.
@@ -33,8 +34,9 @@ type Retirer interface {
 //
 // Eviction does not interrupt active requests. An evicted transport is
 // retired: it serves no new request and the pool keeps owning its cleanup.
-// Its idle connections are closed at eviction ([Retirer] is told first),
-// whenever one of its responses ends or is closed, [WithRetireDelay] after its
+// A [Retirer] is told once its acquired requests have finished. Its idle
+// connections are closed at eviction, whenever one of its responses ends or
+// is closed, [WithRetireDelay] after its
 // last response finished (a transport may hand a connection back only after
 // the body was closed), on every later eviction and on every
 // [Pool.CloseIdleConnections]. The pool keeps as many retired transports as
@@ -53,10 +55,13 @@ type Pool struct {
 type entry struct {
 	key       string
 	transport http.RoundTripper
-	// inflight counts the requests sent on the transport whose response has
-	// not finished; evicted is set once.
-	inflight int
-	evicted  bool
+	// inflight counts the requests acquired for the transport whose response
+	// has not finished; evicted and retireTold are set once; timer is the
+	// delayed cleanup of the retired entry. All are guarded by Pool.mu.
+	inflight   int
+	evicted    bool
+	retireTold bool
+	timer      *time.Timer
 }
 
 // New constructs a pool. A nil selector panics. Nonpositive limits use 64.
@@ -146,10 +151,6 @@ func (p *Pool) acquire(key string, build func() http.RoundTripper) (*entry, *ent
 // retire takes an evicted entry into the retired set, dropping the oldest
 // retired entry beyond the limit, and cleans every retired transport up.
 func (p *Pool) retire(e *entry) {
-	if r, ok := e.transport.(Retirer); ok {
-		r.Retire()
-	}
-
 	p.mu.Lock()
 	p.retired = append(p.retired, e)
 
@@ -158,6 +159,12 @@ func (p *Pool) retire(e *entry) {
 	if len(p.retired) > p.max {
 		dropped = p.retired[0]
 		p.retired = slices.Delete(p.retired, 0, 1)
+
+		// The pool stops owning dropped: its pending delayed cleanup must not
+		// keep it alive. A response of it still in flight schedules its own.
+		if dropped.timer != nil {
+			dropped.timer.Stop()
+		}
 	}
 
 	retired := slices.Clone(p.retired)
@@ -187,21 +194,39 @@ func (p *Pool) finish(e *entry) {
 // response of it is in flight, schedules one more cleanup after the retire
 // delay. It runs at the end of a body and again at its Close, so the delay
 // counts from whichever comes last. The entry stays in the retired set.
+//
+// A [Retirer] is told once, when the entry is retired and nothing the pool
+// sent on it is in flight any more: a request that acquired the transport
+// before its eviction still has to be served. The delayed cleanup is one
+// timer per entry, restarted rather than multiplied.
 func (p *Pool) cleanup(e *entry) {
 	p.mu.Lock()
 	evicted := e.evicted
-	last := evicted && e.inflight == 0
+	drained := evicted && e.inflight == 0
+	retire := drained && !e.retireTold
+
+	if retire {
+		e.retireTold = true
+	}
+
+	if drained {
+		if e.timer == nil {
+			e.timer = time.AfterFunc(p.retireDelay, func() { closeIdle(e.transport) })
+		} else {
+			e.timer.Reset(p.retireDelay)
+		}
+	}
 	p.mu.Unlock()
 
 	if !evicted {
 		return
 	}
 
-	closeIdle(e.transport)
-
-	if last {
-		time.AfterFunc(p.retireDelay, func() { closeIdle(e.transport) })
+	if r, ok := e.transport.(Retirer); ok && retire {
+		r.Retire()
 	}
+
+	closeIdle(e.transport)
 }
 
 // CloseIdleConnections closes idle connections on every cached transport and
@@ -244,8 +269,12 @@ type responseBody struct {
 func (b *responseBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	if err != nil {
-		b.once.Do(b.finish)
-		b.cleanup()
+		// Only the first terminal read ends the response; later ones repeat
+		// the error and change nothing.
+		b.once.Do(func() {
+			b.finish()
+			b.cleanup()
+		})
 	}
 
 	return n, err

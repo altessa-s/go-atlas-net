@@ -293,6 +293,93 @@ func TestRetiredTransportStaysOwned(t *testing.T) {
 	require.Zero(t, all["d"].retires.Load())
 }
 
+// Retire waits for the requests the pool acquired the transport for: a
+// transport evicted mid-request is told only after that request finished.
+func TestRetireWaitsForAcquiredRequests(t *testing.T) {
+	a := &retiring{entered: make(chan struct{}), resume: make(chan struct{})}
+	b := &retiring{}
+	p := transportpool.New(func(ctx context.Context) (string, func() http.RoundTripper) {
+		key := ctx.Value(keyType{}).(string) //nolint:errcheck // The tests always set the key.
+
+		return key, func() http.RoundTripper {
+			if key == "a" {
+				return a
+			}
+
+			return b
+		}
+	}, transportpool.WithMaxEntries(1), transportpool.WithRetireDelay(10*time.Millisecond))
+
+	type result struct {
+		resp *http.Response
+		err  error
+	}
+
+	done := make(chan result, 1)
+
+	go func() {
+		resp, err := p.RoundTrip(request(t, "a"))
+		done <- result{resp, err}
+	}()
+
+	<-a.entered
+
+	resp, err := p.RoundTrip(request(t, "b")) // evicts a mid-request
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Zero(t, a.retires.Load(), "retired while a request was in flight")
+
+	close(a.resume)
+
+	held := <-done
+	require.NoError(t, held.err)
+	require.Zero(t, a.retires.Load(), "retired while a response was open")
+
+	require.NoError(t, held.resp.Body.Close())
+	require.EqualValues(t, 1, a.retires.Load())
+}
+
+// Terminal reads repeated after the end of a body do not repeat the cleanup,
+// and the delayed cleanup of an entry is a single timer: once the pool drops
+// a retired transport nothing cleans it up later.
+func TestRetiredCleanupIsCoalesced(t *testing.T) {
+	all := map[string]*retiring{"a": {}, "b": {}, "c": {}}
+	p := transportpool.New(func(ctx context.Context) (string, func() http.RoundTripper) {
+		key := ctx.Value(keyType{}).(string) //nolint:errcheck // The tests always set the key.
+
+		return key, func() http.RoundTripper { return all[key] }
+	}, transportpool.WithMaxEntries(1), transportpool.WithRetireDelay(50*time.Millisecond))
+
+	held, err := p.RoundTrip(request(t, "a"))
+	require.NoError(t, err)
+
+	resp, err := p.RoundTrip(request(t, "b")) // retires a with its body open
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	_, err = io.ReadAll(held.Body)
+	require.NoError(t, err)
+
+	atEOF := all["a"].closes.Load()
+
+	for range 5 {
+		_, err = held.Body.Read(make([]byte, 1))
+		require.ErrorIs(t, err, io.EOF)
+	}
+
+	require.Equal(t, atEOF, all["a"].closes.Load(), "repeated terminal reads repeated the cleanup")
+	require.NoError(t, held.Body.Close())
+
+	resp, err = p.RoundTrip(request(t, "c")) // retires b: a is dropped, its timer stopped
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	dropped := all["a"].closes.Load()
+
+	time.Sleep(200 * time.Millisecond) // four retire delays: a stopped timer never fires
+	require.Equal(t, dropped, all["a"].closes.Load(), "a dropped transport was cleaned up by a leftover timer")
+}
+
 func TestPoolUpgrade(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, rw, err := w.(http.Hijacker).Hijack()
