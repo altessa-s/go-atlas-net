@@ -130,7 +130,7 @@ func testH2Replay(t *testing.T, f func(*testing.T) client.TransportDriver) {
 	for _, goAway := range []bool{false, true} {
 		for _, mode := range []string{refuseOnce, "always", modeWithoutRetry} {
 			for _, rewindable := range []bool{false, true} {
-				name := map[bool]string{false: "REFUSED_STREAM", true: "GOAWAY"}[goAway] + map[bool]string{false: "/stream", true: "/rewindable"}[rewindable]
+				name := map[bool]string{false: "REFUSED_STREAM", true: "GOAWAY"}[goAway] + map[bool]string{false: streamSuffix, true: rewindableSuffix}[rewindable]
 				t.Run(mode+"/"+name, func(t *testing.T) {
 					t.Parallel()
 
@@ -151,47 +151,13 @@ func testH2Replay(t *testing.T, f func(*testing.T) client.TransportDriver) {
 }
 
 func testH2ReplayCase(t *testing.T, f func(*testing.T) client.TransportDriver, goAway bool, mode string, rewindable, callerCancel bool) {
-	// Use httptest only for its local certificate; framing below deliberately
-	// refuses either the first or every fully received stream before processing it.
-	certServer := server(t, nil, nil, true)
-	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: certServer.TLS.Certificates,
-		NextProtos: []string{"h2"}, MinVersion: tls.VersionTLS12})
-	require.NoError(t, err)
-
 	var streams atomic.Int32
 
 	var events replayEvents
 
-	done := make(chan struct{})
-	ctx, cancel := context.WithCancel(t.Context())
-
-	go func() {
-		defer close(done)
-
-		for {
-			conn, acceptErr := ln.Accept()
-			if acceptErr != nil {
-				return
-			}
-
-			events.record(true)
-
-			stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-
-			serveFrames(conn, &streams, &events, goAway, mode != refuseOnce)
-			stop()
-
-			_ = conn.Close()
-		}
-	}()
-
-	t.Cleanup(func() { cancel(); _ = ln.Close(); <-done })
-
-	env := environment(certServer)
-	env.TLS.NextProtos = []string{"h2"}
-	env.Dial = func(ctx context.Context, n, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, n, ln.Addr().String())
-	}
+	env := h2ReplayEnvironment(t, &events, func(conn net.Conn) {
+		serveFrames(conn, &streams, &events, goAway, mode != refuseOnce)
+	})
 
 	var tr http.RoundTripper
 
@@ -379,3 +345,46 @@ func endedStream(fr *http2.Framer, frame http2.Frame) (uint32, bool) {
 }
 
 const refuseOnce = "once"
+
+func h2ReplayEnvironment(t *testing.T, events *replayEvents, serve func(net.Conn)) client.DriverEnv {
+	t.Helper()
+
+	// Use httptest only for its local certificate; serve handles HTTP/2 framing.
+	certServer := server(t, nil, nil, true)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: certServer.TLS.Certificates,
+		NextProtos: []string{"h2"}, MinVersion: tls.VersionTLS12})
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(t.Context())
+
+	go func() {
+		defer close(done)
+
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+
+			events.record(true)
+
+			stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+
+			serve(conn)
+			stop()
+
+			_ = conn.Close()
+		}
+	}()
+
+	t.Cleanup(func() { cancel(); _ = ln.Close(); <-done })
+
+	env := environment(certServer)
+	env.TLS.NextProtos = []string{"h2"}
+	env.Dial = func(ctx context.Context, n, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, n, ln.Addr().String())
+	}
+
+	return env
+}

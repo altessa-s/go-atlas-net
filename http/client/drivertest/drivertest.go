@@ -42,7 +42,11 @@ func Run(t *testing.T, factory func(*testing.T) client.TransportDriver) {
 	t.Run("Pinning", func(t *testing.T) { testPinning(t, factory) })
 	t.Run("MutualTLS", func(t *testing.T) { testMTLS(t, factory) })
 	t.Run("ReuseAndOwnership", func(t *testing.T) { testReuse(t, factory); testCancellation(t, factory) })
-	t.Run("Replay", func(t *testing.T) { testReplay(t, factory); testH2Replay(t, factory) })
+	t.Run("Replay", func(t *testing.T) {
+		testReplay(t, factory)
+		testH2Replay(t, factory)
+		testH2ProcessedReplay(t, factory)
+	})
 	t.Run("Timeouts", func(t *testing.T) { testTimeouts(t, factory) })
 }
 
@@ -512,7 +516,7 @@ func testReplay(t *testing.T, f func(*testing.T) client.TransportDriver) {
 	for _, wrapped := range []bool{false, true} {
 		for _, rewindable := range []bool{false, true} {
 			name := map[bool]string{false: "transport", true: modeWithoutRetry}[wrapped] +
-				map[bool]string{false: "/stream", true: "/rewindable"}[rewindable]
+				map[bool]string{false: streamSuffix, true: rewindableSuffix}[rewindable]
 			t.Run(name, func(t *testing.T) {
 				var hits atomic.Int32
 
@@ -608,4 +612,6 @@ const (
 	protocolHTTP1    = "http/1.1"
 	modeInsecure     = "insecure"
 	modeWithoutRetry = "WithoutRetry"
+	rewindableSuffix = "/rewindable"
+	streamSuffix     = "/stream"
 )
