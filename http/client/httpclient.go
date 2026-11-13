@@ -71,6 +71,12 @@ type Client struct {
 // proxy options are allowed with SSRF protection (see [ProxyFunc]). With
 // [WithTransportDriver], proxy TLS configuration is supported under the guard;
 // insecure destination TLS and direct driver construction errors also panic.
+// Driver mode panics with an error wrapping [ErrDriverUnsupportedTransport] for
+// Dial without DialContext, ProxyConnectHeader, GetProxyConnectHeader,
+// OnProxyConnectResponse, DialTLS, DialTLSContext, Protocols, HTTP2,
+// TLSNextProto, or nonzero MaxResponseHeaderBytes on the base transport.
+// Drivers own protocol negotiation and buffering: ForceAttemptHTTP2,
+// WriteBufferSize and ReadBufferSize apply only to the standard HTTP path.
 //
 // Example:
 //
@@ -89,6 +95,10 @@ func New(opt ...Option) *http.Client {
 }
 
 func (c *Client) retractableClient() *http.Client {
+	if err := validateDriverTransport(&c.options); err != nil {
+		panic(err)
+	}
+
 	if err := validateSSRFTransport(&c.options); err != nil {
 		panic(err)
 	}

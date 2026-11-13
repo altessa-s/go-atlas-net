@@ -29,18 +29,19 @@ import (
 )
 
 const (
-	replayTimeout     = 1500 * time.Millisecond
+	replayTimeout     = 500 * time.Millisecond
 	replayMargin      = 500 * time.Millisecond
 	replayCancelDelay = 250 * time.Millisecond
+	replaySettling    = 100 * time.Millisecond
 	// Observe beyond the first HTTP/2 retry backoff to catch detached retries.
 	replayObservation = 1200 * time.Millisecond
 )
 
-// replayEvents records receipt of connections and the start of streams, not
-// body completion: a transmission must not start after the request ends.
+// replayEvents counts connections and stream starts so retries can be checked
+// after in-flight work has settled following the request's return.
 type replayEvents struct {
 	mu                   sync.Mutex
-	connections, streams []time.Time
+	connections, streams int
 }
 
 func (e *replayEvents) record(connection bool) {
@@ -48,26 +49,34 @@ func (e *replayEvents) record(connection bool) {
 	defer e.mu.Unlock()
 
 	if connection {
-		e.connections = append(e.connections, time.Now())
+		e.connections++
 	} else {
-		e.streams = append(e.streams, time.Now())
+		e.streams++
 	}
 }
 
-func (e *replayEvents) check(t *testing.T, ended time.Time) {
-	t.Helper()
+func (e *replayEvents) counts() (connections, streams int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	require.NotEmpty(t, e.streams, "fixture must receive a request")
+	return e.connections, e.streams
+}
 
-	for _, received := range e.connections {
-		require.False(t, received.After(ended), "connection received %s after context ended", received.Sub(ended))
-	}
+func (e *replayEvents) check(t *testing.T) {
+	t.Helper()
 
-	for _, received := range e.streams {
-		require.False(t, received.After(ended), "stream started %s after context ended", received.Sub(ended))
-	}
+	// A connection or stream already opening when the context ends may reach
+	// the peer later. Allow it to settle before checking that retrying stops.
+	time.Sleep(replaySettling)
+
+	connections, streams := e.counts()
+	require.Positive(t, streams, "fixture must receive a request")
+
+	time.Sleep(replayObservation)
+
+	finalConnections, finalStreams := e.counts()
+	require.Equal(t, connections, finalConnections, "connections grew after request returned and settled")
+	require.Equal(t, streams, finalStreams, "streams grew after request returned and settled")
 }
 
 func proxyDial(t *testing.T, s *httptest.Server) func(context.Context, string, string) (net.Conn, error) {
@@ -123,6 +132,8 @@ func testH2Replay(t *testing.T, f func(*testing.T) client.TransportDriver) {
 			for _, rewindable := range []bool{false, true} {
 				name := map[bool]string{false: "REFUSED_STREAM", true: "GOAWAY"}[goAway] + map[bool]string{false: "/stream", true: "/rewindable"}[rewindable]
 				t.Run(mode+"/"+name, func(t *testing.T) {
+					t.Parallel()
+
 					if mode == refuseOnce {
 						testH2ReplayCase(t, f, goAway, mode, rewindable, false)
 						return
@@ -199,7 +210,12 @@ func testH2ReplayCase(t *testing.T, f func(*testing.T) client.TransportDriver, g
 	}
 
 	// Persistent refusals are bounded by this request, not a retry count.
-	requestCtx, requestCancel := context.WithTimeout(t.Context(), replayTimeout)
+	timeout := replayTimeout
+	if mode == refuseOnce {
+		timeout = testTimeout
+	}
+
+	requestCtx, requestCancel := context.WithTimeout(t.Context(), timeout)
 	defer requestCancel()
 
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, "https://"+authority+"/", body)
@@ -237,7 +253,12 @@ func checkPersistentRefusal(t *testing.T, tr http.RoundTripper, req *http.Reques
 	cancel context.CancelFunc, callerCancel bool, events *replayEvents) {
 	t.Helper()
 
-	returned := make(chan error, 1)
+	type result struct {
+		err      error
+		returned time.Time
+	}
+
+	returned := make(chan result, 1)
 
 	go func() {
 		resp, err := tr.RoundTrip(req)
@@ -245,16 +266,17 @@ func checkPersistentRefusal(t *testing.T, tr http.RoundTripper, req *http.Reques
 			_ = resp.Body.Close()
 		}
 
-		returned <- err
+		returned <- result{err: err, returned: time.Now()}
 	}()
 
 	ended, _ := req.Context().Deadline()
 
 	if callerCancel {
 		time.Sleep(replayCancelDelay)
-		cancel()
 
 		ended = time.Now()
+
+		cancel()
 	} else {
 		<-req.Context().Done()
 	}
@@ -265,17 +287,16 @@ func checkPersistentRefusal(t *testing.T, tr http.RoundTripper, req *http.Reques
 	defer timer.Stop()
 
 	select {
-	case err := <-returned:
-		require.Error(t, err)
-		require.WithinDuration(t, ended, time.Now(), replayMargin)
+	case result := <-returned:
+		require.Error(t, result.err)
+		require.False(t, result.returned.After(ended.Add(replayMargin)), "request returned too late after context ended")
 	case <-timer.C:
 		t.Fatal("persistent refusal did not return promptly after context ended")
 	}
 
 	// Keep the peer live after RoundTrip returns, so background transmissions
 	// remain observable instead of being hidden by fixture cleanup.
-	time.Sleep(replayObservation)
-	events.check(t, ended)
+	events.check(t)
 }
 
 func serveFrames(conn net.Conn, streams *atomic.Int32, events *replayEvents, goAway, always bool) {

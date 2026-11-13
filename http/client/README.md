@@ -315,6 +315,24 @@ maximum versions, ALPN, client certificates and both verification callbacks.
 The core always rejects `InsecureSkipVerify`. Direct-route construction happens
 in `New` and errors panic; lazy proxy-route construction errors reach the request.
 
+Driver mode rejects base transport settings it cannot honor at construction,
+with an error wrapping `ErrDriverUnsupportedTransport`: `Dial` without
+`DialContext`, `ProxyConnectHeader` (including an empty non-nil map),
+`GetProxyConnectHeader`, `OnProxyConnectResponse`, `DialTLS`, `DialTLSContext`,
+`Protocols`, `HTTP2`, `TLSNextProto` (including an empty non-nil map), and nonzero
+`MaxResponseHeaderBytes`. These restrictions apply even without SSRF protection
+or a configured proxy. If both `Dial` and `DialContext` are set, `DialContext`
+takes precedence. Without a driver, these settings retain their standard behavior.
+
+`TLSClientConfig` is cloned into `DriverEnv.TLS`; connection limits, idle,
+TLS handshake, response header and expect-continue timeouts, `DisableKeepAlives`
+and `DisableCompression` are passed in `DriverEnv`. `Proxy` and `DialContext`
+are consumed by the core connection path (SSRF protection replaces the dialer).
+`ForceAttemptHTTP2` controls the standard transport's automatic HTTP/2 setup;
+drivers own protocol negotiation. `WriteBufferSize` and `ReadBufferSize` tune
+standard transport buffers; drivers own their buffering. These three settings
+apply only to the standard HTTP path and are not passed to drivers.
+
 Drivers are **trusted in-process code**, not a sandbox. Go cannot prevent a driver
 from opening its own sockets. Audit every connection-opening path in the driver
 and its dependencies, and run the exported local-server regression suite:
@@ -338,7 +356,7 @@ proven unprocessed by HTTP/2 REFUSED_STREAM or GOAWAY below their stream ID may
 be retried with a rewindable body, including when the client uses `WithoutRetry`.
 These retries are bounded by the request, not a transmission count: persistent
 refusal must return an error promptly when the request context expires or is
-canceled, and no transmission may start afterward.
+canceled, and retrying must stop when the request ends.
 HTTP requests continue through the standard guarded transport.
 
 With SSRF protection enabled, driver-mode CONNECT and SOCKS5 tunnels resolve and

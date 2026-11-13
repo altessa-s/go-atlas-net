@@ -437,6 +437,12 @@ func WithTransport(v *http.Transport) Option {
 // WithTransportDriver sets the transportDriver option.
 //
 // transportDriver builds HTTPS transports on core-owned guarded dials.
+// Driver mode panics with an error wrapping [ErrDriverUnsupportedTransport] for
+// Dial without DialContext, ProxyConnectHeader, GetProxyConnectHeader,
+// OnProxyConnectResponse, DialTLS, DialTLSContext, Protocols, HTTP2,
+// TLSNextProto, or nonzero MaxResponseHeaderBytes on the base transport.
+// Drivers own protocol negotiation and buffering: ForceAttemptHTTP2,
+// WriteBufferSize and ReadBufferSize apply only to the standard HTTP path.
 func WithTransportDriver(v TransportDriver) Option {
 	return func(o *options) {
 		switch rv := reflect.ValueOf(v); rv.Kind() {

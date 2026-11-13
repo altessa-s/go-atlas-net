@@ -67,6 +67,12 @@ type options struct {
 	client    *http.Client `optgen:"default=defaultClient()"`
 	transport *http.Transport
 	// transportDriver builds HTTPS transports on core-owned guarded dials.
+	// Driver mode panics with an error wrapping [ErrDriverUnsupportedTransport] for
+	// Dial without DialContext, ProxyConnectHeader, GetProxyConnectHeader,
+	// OnProxyConnectResponse, DialTLS, DialTLSContext, Protocols, HTTP2,
+	// TLSNextProto, or nonzero MaxResponseHeaderBytes on the base transport.
+	// Drivers own protocol negotiation and buffering: ForceAttemptHTTP2,
+	// WriteBufferSize and ReadBufferSize apply only to the standard HTTP path.
 	transportDriver TransportDriver `optgen:"notnil"`
 	// dialTimeout bounds the whole driver dial, including proxy negotiation.
 	// Nonpositive values use DefaultDialTimeout.

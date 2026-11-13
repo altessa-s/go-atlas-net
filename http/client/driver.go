@@ -40,7 +40,7 @@ const DefaultDialTimeout = 30 * time.Second
 // their stream ID) with rewindable bodies may be retried, including with
 // WithoutRetry. These retries are bounded by the request, not a transmission
 // count: persistent refusal must return an error promptly when the request
-// context expires or is canceled, and no transmission may start afterward.
+// context expires or is canceled, and retrying must stop when the request ends.
 type TransportDriver interface {
 	// NewTransport builds a transport using only the supplied connection path.
 	NewTransport(env DriverEnv) (http.RoundTripper, error)
@@ -82,6 +82,53 @@ type driverTransport struct {
 	pool      *transportpool.Pool
 	initialMu sync.Mutex
 	initial   http.RoundTripper
+}
+
+// validateDriverTransport runs before SSRF replaces the caller's dialer and
+// before Clone can initialize the standard transport's protocol configuration.
+func validateDriverTransport(opts *options) error {
+	if opts.transportDriver == nil {
+		return nil
+	}
+
+	transport := transportOf(opts.client)
+	if opts.transport != nil {
+		transport = opts.transport
+	}
+
+	base, ok := transport.(*http.Transport)
+	if !ok || base == nil {
+		return fmt.Errorf("%w: requires a non-nil *http.Transport", ErrDriverUnsupportedTransport)
+	}
+
+	var field string
+
+	switch {
+	case base.Dial != nil && base.DialContext == nil: //nolint:staticcheck // Reject legacy dials that cannot honor cancellation.
+		field = "Dial without DialContext"
+	case base.ProxyConnectHeader != nil:
+		field = "ProxyConnectHeader"
+	case base.GetProxyConnectHeader != nil:
+		field = "GetProxyConnectHeader"
+	case base.OnProxyConnectResponse != nil:
+		field = "OnProxyConnectResponse"
+	case base.DialTLS != nil: //nolint:staticcheck // Reject legacy TLS dials as well.
+		field = "DialTLS"
+	case base.DialTLSContext != nil:
+		field = "DialTLSContext"
+	case base.Protocols != nil:
+		field = "Protocols"
+	case base.HTTP2 != nil:
+		field = "HTTP2"
+	case base.TLSNextProto != nil:
+		field = "TLSNextProto"
+	case base.MaxResponseHeaderBytes != 0:
+		field = "MaxResponseHeaderBytes"
+	default:
+		return nil
+	}
+
+	return fmt.Errorf("%w: %s cannot be honored by the driver connection path", ErrDriverUnsupportedTransport, field)
 }
 
 func applyTransportDriver(c *http.Client, opts options) *http.Client {
@@ -225,11 +272,6 @@ func (d driverErrorTransport) RoundTrip(req *http.Request) (*http.Response, erro
 
 func driverDial(base *http.Transport, opts options, u *url.URL) (proxydial.DialContextFunc, error) {
 	dial := base.DialContext
-	if dial == nil && base.Dial != nil { //nolint:staticcheck // Preserve the standard transport’s legacy Dial precedence.
-		dial = func(_ context.Context, network, address string) (net.Conn, error) {
-			return base.Dial(network, address) //nolint:staticcheck // Honor an explicitly configured legacy connection path.
-		}
-	}
 
 	if dial == nil {
 		dial = proxydial.DefaultDialer().DialContext

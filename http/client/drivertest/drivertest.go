@@ -30,6 +30,7 @@ const shortTimeout = 100 * time.Millisecond
 const authority = "driver.invalid"
 
 // Run tests a fresh driver from factory in each subtest. All traffic is local.
+// Replay subtests run in parallel; factory must support concurrent calls.
 // Configurations explicitly permitted to fail closed are accepted when
 // NewTransport returns an error. A driver that accepts them must enforce them.
 func Run(t *testing.T, factory func(*testing.T) client.TransportDriver) {

@@ -19,6 +19,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -766,7 +767,10 @@ func TestDriverLegacyDial(t *testing.T) {
 
 			var address string
 
-			base := &http.Transport{Dial: func(_, addr string) (net.Conn, error) { address = addr; return nil, sentinel }}
+			base := &http.Transport{
+				Dial:        func(_, _ string) (net.Conn, error) { return nil, errors.New("unexpected legacy dial") },
+				DialContext: func(_ context.Context, _, addr string) (net.Conn, error) { address = addr; return nil, sentinel },
+			}
 			opts := []Option{WithTransport(base), WithTransportDriver(driverFunc(standardDriver)), WithoutSSRFProtection(), WithoutProxy(), WithoutRetry()}
 			want := "destination.invalid:443"
 
@@ -782,6 +786,119 @@ func TestDriverLegacyDial(t *testing.T) {
 			_, err := driverGet(t, c, "https://destination.invalid/")
 			require.ErrorIs(t, err, sentinel)
 			require.Equal(t, want, address)
+		})
+	}
+}
+
+func TestDriverUnsupportedTransport(t *testing.T) {
+	dial := func(string, string) (net.Conn, error) { return nil, errors.New("unexpected dial") }
+
+	tests := []struct {
+		name      string
+		configure func(*http.Transport)
+	}{
+		{"Dial without DialContext", func(tr *http.Transport) { tr.Dial = dial }},
+		{"ProxyConnectHeader", func(tr *http.Transport) { tr.ProxyConnectHeader = http.Header{"X-Test": {"value"}} }},
+		{"ProxyConnectHeader empty", func(tr *http.Transport) { tr.ProxyConnectHeader = http.Header{} }},
+		{"GetProxyConnectHeader", func(tr *http.Transport) {
+			tr.GetProxyConnectHeader = func(context.Context, *url.URL, string) (http.Header, error) { return nil, nil }
+		}},
+		{"OnProxyConnectResponse", func(tr *http.Transport) {
+			tr.OnProxyConnectResponse = func(context.Context, *url.URL, *http.Request, *http.Response) error { return nil }
+		}},
+		{"DialTLS", func(tr *http.Transport) { tr.DialTLS = dial }},
+		{"DialTLSContext", func(tr *http.Transport) {
+			tr.DialTLSContext = func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("unexpected dial") }
+		}},
+		{"Protocols", func(tr *http.Transport) { tr.Protocols = new(http.Protocols) }},
+		{"HTTP2", func(tr *http.Transport) { tr.HTTP2 = new(http.HTTP2Config) }},
+		{"TLSNextProto", func(tr *http.Transport) { tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{} }},
+		{"MaxResponseHeaderBytes", func(tr *http.Transport) { tr.MaxResponseHeaderBytes = 1024 }},
+	}
+	for _, tt := range tests {
+		for _, ssrf := range []bool{false, true} {
+			for _, viaClient := range []bool{false, true} {
+				t.Run(tt.name+"/ssrf="+strconv.FormatBool(ssrf)+"/client="+strconv.FormatBool(viaClient), func(t *testing.T) {
+					base := &http.Transport{}
+					tt.configure(base)
+
+					opts := []Option{WithoutProxy(), WithTransportDriver(driverFunc(func(DriverEnv) (http.RoundTripper, error) {
+						t.Fatal("driver constructed before validation")
+						return nil, nil
+					}))}
+					if !ssrf {
+						opts = append(opts, WithoutSSRFProtection())
+					}
+
+					if viaClient {
+						opts = append(opts, WithClient(&http.Client{Transport: base}))
+					} else {
+						opts = append(opts, WithTransport(base))
+					}
+
+					defer func() {
+						err, ok := recover().(error)
+						require.True(t, ok, "construction must panic with an error")
+						require.ErrorIs(t, err, ErrDriverUnsupportedTransport)
+						require.Contains(t, err.Error(), strings.TrimSuffix(tt.name, " empty"))
+					}()
+
+					New(opts...)
+				})
+			}
+		}
+	}
+}
+
+// A rejecting proxy lets us observe the standard CONNECT hooks without a TLS
+// handshake or an external connection. Callback errors must survive wrapping.
+func TestConnectConfigurationWithoutDriver(t *testing.T) {
+	for _, setting := range []string{"ProxyConnectHeader", "GetProxyConnectHeader", "OnProxyConnectResponse"} {
+		t.Run(setting, func(t *testing.T) {
+			var headerSeen, callbackSeen atomic.Bool
+
+			proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				headerSeen.Store(r.Method == http.MethodConnect && r.Header.Get("X-Test") == "value")
+				w.WriteHeader(http.StatusForbidden)
+			}))
+			defer proxy.Close()
+
+			u, err := url.Parse(proxy.URL)
+			require.NoError(t, err)
+
+			base := &http.Transport{}
+			sentinel := errors.New("CONNECT response refused")
+
+			switch setting {
+			case "ProxyConnectHeader":
+				base.ProxyConnectHeader = http.Header{"X-Test": {"value"}}
+			case "GetProxyConnectHeader":
+				base.GetProxyConnectHeader = func(context.Context, *url.URL, string) (http.Header, error) {
+					callbackSeen.Store(true)
+					return http.Header{"X-Test": {"value"}}, nil
+				}
+			case "OnProxyConnectResponse":
+				base.OnProxyConnectResponse = func(_ context.Context, _ *url.URL, _ *http.Request, res *http.Response) error {
+					callbackSeen.Store(res.StatusCode == http.StatusForbidden)
+					return sentinel
+				}
+			}
+
+			c := New(WithTransport(base), WithoutSSRFProtection(), WithProxyFunc(http.ProxyURL(u)), WithoutRetry())
+			defer c.CloseIdleConnections()
+
+			_, err = driverGet(t, c, "https://destination.invalid/")
+			require.Error(t, err)
+
+			if setting == "OnProxyConnectResponse" {
+				require.ErrorIs(t, err, sentinel)
+			} else {
+				require.True(t, headerSeen.Load())
+			}
+
+			if setting != "ProxyConnectHeader" {
+				require.True(t, callbackSeen.Load())
+			}
 		})
 	}
 }
