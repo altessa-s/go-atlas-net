@@ -296,6 +296,8 @@ func TestRetiredTransportStaysOwned(t *testing.T) {
 // Retire waits for the requests the pool acquired the transport for: a
 // transport evicted mid-request is told only after that request finished.
 func TestRetireWaitsForAcquiredRequests(t *testing.T) {
+	// Promoted fields are valid keys of a composite literal since Go 1.27, and
+	// `make vet` (go fix) rewrites the explicit embedded form into this one.
 	a := &retiring{entered: make(chan struct{}), resume: make(chan struct{})}
 	b := &retiring{}
 	p := transportpool.New(func(ctx context.Context) (string, func() http.RoundTripper) {
