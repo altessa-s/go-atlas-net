@@ -220,7 +220,7 @@ func testVerification(t *testing.T, f func(*testing.T) client.TransportDriver) {
 			case "wrong name":
 				env.TLS.ServerName = "wrong.invalid"
 			case modeInsecure:
-				env.TLS.InsecureSkipVerify = true
+				env.TLS.InsecureSkipVerify = true // #nosec G402 -- the case asserts that a driver refuses this setting
 			}
 
 			if name == modeInsecure {
@@ -309,6 +309,7 @@ func testPinning(t *testing.T, f func(*testing.T) client.TransportDriver) {
 			var calls atomic.Int32
 
 			if name == "peer" {
+				// #nosec G123 -- the case checks that a driver runs the callback on a full handshake; no session cache is set
 				env.TLS.VerifyPeerCertificate = func([][]byte, [][]*x509.Certificate) error { calls.Add(1); return sentinel }
 			} else {
 				env.TLS.VerifyConnection = func(tls.ConnectionState) error { calls.Add(1); return sentinel }
