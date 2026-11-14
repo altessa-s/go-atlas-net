@@ -44,6 +44,8 @@ func Run(t *testing.T, factory func(*testing.T) client.TransportDriver) {
 	t.Run("ReuseAndOwnership", func(t *testing.T) { testReuse(t, factory); testCancellation(t, factory) })
 	t.Run("Replay", func(t *testing.T) {
 		testReplay(t, factory)
+		testH1WarmedReplay(t, factory)
+		testH1SeveralWarmedReplay(t, factory)
 		testH2Replay(t, factory)
 		testH2ProcessedReplay(t, factory)
 	})

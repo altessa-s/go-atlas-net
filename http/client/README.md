@@ -58,7 +58,7 @@ constructors are available: `New` returns a bare `*http.Client` suitable for any
 | `WithProxyTLSConfig`         | system        | Custom `*tls.Config` for the handshake to an `https://` proxy (self-signed CA, mTLS); isolates proxy TLS from destination TLS via custom DialContext |
 | `WithErrorHandler`           | nil           | Custom error handler                                                                                                                                 |
 | `WithRetryPolicyHandler`     | nil           | Custom retry policy handler; delegate to `DefaultRetryPolicy` for the cases it does not decide                                                      |
-| `WithoutRetry`               | --            | One attempt per request; the response for any status (body unread) or the transport error (redacted text, causes intact) is returned; overrides `WithRetryMax` and `WithRetryPolicyHandler` |
+| `WithoutRetry`               | --            | One client-layer attempt per request (transport retries remain possible); the response for any status (body unread) or the transport error (redacted text, causes intact) is returned; overrides `WithRetryMax` and `WithRetryPolicyHandler` |
 | `WithoutRedirects`           | follow        | Never follow redirects; a 3xx reply is returned as the response (also over a `WithClient` client, left unchanged) |
 | `WithClock`                  | system        | `clock.Clock` of the retry layer: elapsed budget, backoff and Retry-After waits, Retry-After dates, request duration; `clock.NewFake` in tests |
 | `WithObserver`               | no-op         | `Observer` receiving request, retry and circuit breaker events, for example to record metrics and health                                            |
@@ -125,7 +125,7 @@ of 400 and above fails with `UnexpectedStatusError`, and the rest is returned. `
 c := httpclient.New(httpclient.WithRetryableStatuses(408, 429, 500, 502, 503, 504))
 ```
 
-The built-in classification replays only requests that are safe to repeat, as `net/http.Transport` does for its own retries: an idempotent method
+The built-in classification replays only requests that are safe to repeat: an idempotent method
 (GET, HEAD, OPTIONS, TRACE, PUT, DELETE) or a request carrying an `Idempotency-Key` or `X-Idempotency-Key` header. A POST or PATCH without one is sent
 once — a server that processed it before failing never sees it twice — and a retryable failure is returned as a `RetryExhaustedError` after that
 single attempt. A policy set with `WithRetryPolicyHandler` decides for every method, so it can replay a POST the server deduplicates otherwise.
@@ -359,8 +359,20 @@ For each HTTPS request, including retries and redirects, the configured
 identity. Eviction and `CloseIdleConnections` close idle connections without
 interrupting active requests. Drivers must implement `CloseIdleConnections`.
 The core adds no transport replay; the existing retry layer remains above it.
-Drivers must not replay processed requests or non-rewindable bodies. Requests
-proven unprocessed by HTTP/2 REFUSED_STREAM or GOAWAY below their stream ID may
+Drivers must not replay requests that may have been processed, with the HTTP/1.1
+exception inherited from `net/http`: after certain connection failures on a
+**reused** connection, it may resend a request even after writing it if it has no
+body (`nil` or `http.NoBody`) or `GetBody`, and uses GET, HEAD, OPTIONS, TRACE
+or carries an `Idempotency-Key` or `X-Idempotency-Key` header. Unlike the client's
+retry classification above, net/http does not classify PUT/DELETE as idempotent
+without such a header. There is no transport option to disable this replay;
+it occurs below the client retry layer and `WithoutRetry` does not prevent it.
+This applies to the non-driver client, the conformance reference driver, and
+drivers using the standard HTTP/1.1 transport.
+An ordinary POST/PATCH without either header is never replayed after it may have
+been processed. If nothing was written, net/http may retry it with no body or
+`GetBody`. Consumed non-rewindable bodies must not be replayed.
+On HTTP/2, only requests proven unprocessed by HTTP/2 REFUSED_STREAM or GOAWAY below their stream ID may
 be retried with a rewindable body, including when the client uses `WithoutRetry`.
 These retries are bounded by the request, not a transmission count: persistent
 refusal must return an error promptly when the request context expires or is

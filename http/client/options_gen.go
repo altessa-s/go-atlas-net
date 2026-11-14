@@ -288,12 +288,20 @@ func WithoutRedirects() Option {
 
 // WithoutRetry disables the withoutRetry option.
 //
-// withoutRetry disables the retry layer: every request is sent exactly
-// once and its outcome is returned as it is — the response for any
+// withoutRetry disables the client retry layer: one attempt is made and
+// its outcome is returned as it is — the response for any
 // status, body unread, or the transport error (its message redacted, its
 // causes intact). It overrides retryMax
 // and retryPolicyHandler. Set it with the generated WithoutRetry when the
 // caller classifies replies itself or retries around the client.
+// It does not disable transport retries. On reused HTTP/1.1 connections,
+// net/http may resend even a possibly processed request with no body
+// (nil or http.NoBody) or GetBody and method GET, HEAD, OPTIONS, TRACE
+// or an Idempotency-Key or X-Idempotency-Key header. An ordinary POST/PATCH
+// without either header is not replayed after it may have been processed;
+// net/http may retry it if nothing was written and it has no body or GetBody.
+// On HTTP/2, only proven unprocessed requests with replayable bodies may
+// be resent. See TransportDriver for the transport replay contract.
 func WithoutRetry() Option {
 	return func(o *options) {
 		value := true

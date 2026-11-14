@@ -36,8 +36,16 @@ const DefaultDialTimeout = 30 * time.Second
 // support concurrent requests, and must implement CloseIdleConnections.
 // NewTransport must not open connections. Direct-route errors panic in New;
 // errors constructing subsequent proxy routes are returned by RoundTrip.
-// Requests that may have been processed and non-rewindable bodies must not be
-// replayed. Proven unprocessed requests (HTTP/2 REFUSED_STREAM or GOAWAY below
+// Requests that may have been processed must not be replayed, except that on
+// a reused HTTP/1.1 connection net/http may resend a replayable request after
+// certain connection failures, even after writing it. Replayable means no body
+// (nil or http.NoBody) or GetBody, and GET, HEAD, OPTIONS, TRACE or the presence
+// of an Idempotency-Key or X-Idempotency-Key header. There is no transport option
+// to disable this replay; it occurs below the retry layer, including WithoutRetry.
+// An ordinary POST/PATCH without either header is never replayed after it may
+// have been processed. If nothing was written, net/http may retry it with no
+// body or GetBody. Consumed non-rewindable bodies must not be replayed.
+// On HTTP/2, only proven unprocessed requests (HTTP/2 REFUSED_STREAM or GOAWAY below
 // their stream ID) with rewindable bodies may be retried, including with
 // WithoutRetry. These retries are bounded by the request, not a transmission
 // count: persistent refusal must return an error promptly when the request
