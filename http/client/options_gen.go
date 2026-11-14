@@ -128,6 +128,19 @@ func WithCookieJar(v http.CookieJar) Option {
 	}
 }
 
+// WithDialTimeout sets the dialTimeout option.
+//
+// dialTimeout bounds the whole driver dial, including proxy negotiation.
+// Nonpositive values use DefaultDialTimeout.
+func WithDialTimeout(v time.Duration) Option {
+	return func(o *options) {
+		if v <= 0 {
+			return
+		}
+		o.dialTimeout = v
+	}
+}
+
 // WithEgressPolicy sets the egressPolicy option.
 //
 // egressPolicy, set by the generated WithEgressPolicy, replaces the
@@ -275,12 +288,20 @@ func WithoutRedirects() Option {
 
 // WithoutRetry disables the withoutRetry option.
 //
-// withoutRetry disables the retry layer: every request is sent exactly
-// once and its outcome is returned as it is — the response for any
+// withoutRetry disables the client retry layer: one attempt is made and
+// its outcome is returned as it is — the response for any
 // status, body unread, or the transport error (its message redacted, its
 // causes intact). It overrides retryMax
 // and retryPolicyHandler. Set it with the generated WithoutRetry when the
 // caller classifies replies itself or retries around the client.
+// It does not disable transport retries. On reused HTTP/1.1 connections,
+// net/http may resend even a possibly processed request with no body
+// (nil or http.NoBody) or GetBody and method GET, HEAD, OPTIONS, TRACE
+// or an Idempotency-Key or X-Idempotency-Key header. An ordinary POST/PATCH
+// without either header is not replayed after it may have been processed;
+// net/http may retry it if nothing was written and it has no body or GetBody.
+// On HTTP/2, only proven unprocessed requests with replayable bodies may
+// be resent. See TransportDriver for the transport replay contract.
 func WithoutRetry() Option {
 	return func(o *options) {
 		value := true
@@ -421,6 +442,29 @@ func WithTransport(v *http.Transport) Option {
 	}
 }
 
+// WithTransportDriver sets the transportDriver option.
+//
+// transportDriver builds HTTPS transports on core-owned guarded dials.
+// Driver mode panics with an error wrapping [ErrDriverUnsupportedTransport] for
+// Dial without DialContext, ProxyConnectHeader, GetProxyConnectHeader,
+// OnProxyConnectResponse, DialTLS, DialTLSContext, Protocols, HTTP2,
+// TLSNextProto, or nonzero MaxResponseHeaderBytes on the base transport.
+// Drivers own protocol negotiation and buffering: ForceAttemptHTTP2,
+// WriteBufferSize and ReadBufferSize apply only to the standard HTTP path.
+func WithTransportDriver(v TransportDriver) Option {
+	return func(o *options) {
+		switch rv := reflect.ValueOf(v); rv.Kind() {
+		case reflect.Invalid:
+			return
+		case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+			if rv.IsNil() {
+				return
+			}
+		}
+		o.transportDriver = v
+	}
+}
+
 // defaultOptions returns the default values for options.
 func defaultOptions() *options {
 	return &options{
@@ -429,6 +473,7 @@ func defaultOptions() *options {
 		breakerTimeout:     DefaultBreakerTimeout,
 		client:             defaultClient(),
 		clock:              clock.Real(),
+		dialTimeout:        DefaultDialTimeout,
 		logger:             slog.New(slog.DiscardHandler),
 		maxHostBreakers:    DefaultMaxHostBreakers,
 		observer:           defaultObserver(),

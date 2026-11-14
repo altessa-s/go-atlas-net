@@ -64,8 +64,19 @@ type CircuitBreakerSettings struct {
 // options holds the internal configuration state for the HTTP client.
 // This struct is not exported and is modified through Option functions.
 type options struct {
-	client             *http.Client `optgen:"default=defaultClient()"`
-	transport          *http.Transport
+	client    *http.Client `optgen:"default=defaultClient()"`
+	transport *http.Transport
+	// transportDriver builds HTTPS transports on core-owned guarded dials.
+	// Driver mode panics with an error wrapping [ErrDriverUnsupportedTransport] for
+	// Dial without DialContext, ProxyConnectHeader, GetProxyConnectHeader,
+	// OnProxyConnectResponse, DialTLS, DialTLSContext, Protocols, HTTP2,
+	// TLSNextProto, or nonzero MaxResponseHeaderBytes on the base transport.
+	// Drivers own protocol negotiation and buffering: ForceAttemptHTTP2,
+	// WriteBufferSize and ReadBufferSize apply only to the standard HTTP path.
+	transportDriver TransportDriver `optgen:"notnil"`
+	// dialTimeout bounds the whole driver dial, including proxy negotiation.
+	// Nonpositive values use DefaultDialTimeout.
+	dialTimeout        time.Duration `optgen:"default=DefaultDialTimeout"`
 	retryMax           int           `optgen:"default=DefaultRetryMax"`
 	breakerMaxRequests uint32        `optgen:"default=DefaultBreakerMaxRequests"`
 	retryWaitMin       time.Duration `optgen:"default=DefaultRetryWaitMin"`
@@ -100,12 +111,20 @@ type options struct {
 	maxResponseSize    int64
 	errorHandler       ErrorHandler
 	retryPolicyHandler RetryPolicyHandler
-	// withoutRetry disables the retry layer: every request is sent exactly
-	// once and its outcome is returned as it is — the response for any
+	// withoutRetry disables the client retry layer: one attempt is made and
+	// its outcome is returned as it is — the response for any
 	// status, body unread, or the transport error (its message redacted, its
 	// causes intact). It overrides retryMax
 	// and retryPolicyHandler. Set it with the generated WithoutRetry when the
 	// caller classifies replies itself or retries around the client.
+	// It does not disable transport retries. On reused HTTP/1.1 connections,
+	// net/http may resend even a possibly processed request with no body
+	// (nil or http.NoBody) or GetBody and method GET, HEAD, OPTIONS, TRACE
+	// or an Idempotency-Key or X-Idempotency-Key header. An ordinary POST/PATCH
+	// without either header is not replayed after it may have been processed;
+	// net/http may retry it if nothing was written and it has no body or GetBody.
+	// On HTTP/2, only proven unprocessed requests with replayable bodies may
+	// be resent. See TransportDriver for the transport replay contract.
 	withoutRetry bool `opt:"Retry" optval:"invert"`
 	// withoutRedirects stops the client from following redirects: a 3xx
 	// reply is returned to the caller as the response, body unread
@@ -236,7 +255,7 @@ const DefaultSSRFProtection = true
 // only needed to re-enable it after a [WithoutSSRFProtection]. Use
 // [WithSSRFAllowedCIDRs] to exempt known internal networks. Environment proxies
 // are disabled; explicit proxy options are guarded as described on [ProxyFunc].
-// A proxy TLS configuration, custom TLS dialers, a proxy resolver set on a
+// A proxy TLS configuration (without a driver), custom TLS dialers, a proxy resolver set on a
 // caller transport and non-standard transports cause construction to panic
 // with an error wrapping [ErrSSRFUnsafeTransport].
 //
@@ -299,7 +318,9 @@ func WithSSRFAllowedCIDRs(cidrs ...netip.Prefix) Option {
 // [SSRFError] before the request reaches the proxy. With [WithEgressPolicy] a
 // host name target is also checked against the deny rules that need no
 // address; to resolve and pin targets locally, dial through proxydial with
-// its WithSSRFGuard option instead.
+// its WithSSRFGuard option instead. WithTransportDriver does this automatically
+// for HTTPS: proxy routes are selected per request, and destinations are resolved,
+// guarded and pinned locally before opening their tunnels.
 type ProxyFunc = func(*http.Request) (*url.URL, error)
 
 // WithProxy routes all requests through an HTTP proxy at host:port with
@@ -327,7 +348,7 @@ func WithProxy(host string, port int, auth *url.Userinfo) Option {
 	}
 
 	u := &url.URL{
-		Scheme: "http",
+		Scheme: schemeHTTP,
 		User:   auth,
 		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
 	}

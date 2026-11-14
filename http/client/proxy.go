@@ -49,7 +49,7 @@ func proxyAwareDialer(proxyFn ProxyFunc, proxyTLSCfg *tls.Config) func(context.C
 		}
 
 		switch proxyURL.Scheme {
-		case "http", schemeHTTPS:
+		case schemeHTTP, schemeHTTPS:
 			return proxydial.HTTPConnect(ctx, base, proxyURL, proxyTLSCfg, addr)
 		case "socks5", "socks5h":
 			contextDial, err := proxydial.SOCKS5Dialer(proxyURL, base)

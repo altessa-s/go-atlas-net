@@ -58,7 +58,7 @@ constructors are available: `New` returns a bare `*http.Client` suitable for any
 | `WithProxyTLSConfig`         | system        | Custom `*tls.Config` for the handshake to an `https://` proxy (self-signed CA, mTLS); isolates proxy TLS from destination TLS via custom DialContext |
 | `WithErrorHandler`           | nil           | Custom error handler                                                                                                                                 |
 | `WithRetryPolicyHandler`     | nil           | Custom retry policy handler; delegate to `DefaultRetryPolicy` for the cases it does not decide                                                      |
-| `WithoutRetry`               | --            | One attempt per request; the response for any status (body unread) or the transport error (redacted text, causes intact) is returned; overrides `WithRetryMax` and `WithRetryPolicyHandler` |
+| `WithoutRetry`               | --            | One client-layer attempt per request (transport retries remain possible); the response for any status (body unread) or the transport error (redacted text, causes intact) is returned; overrides `WithRetryMax` and `WithRetryPolicyHandler` |
 | `WithoutRedirects`           | follow        | Never follow redirects; a 3xx reply is returned as the response (also over a `WithClient` client, left unchanged) |
 | `WithClock`                  | system        | `clock.Clock` of the retry layer: elapsed budget, backoff and Retry-After waits, Retry-After dates, request duration; `clock.NewFake` in tests |
 | `WithObserver`               | no-op         | `Observer` receiving request, retry and circuit breaker events, for example to record metrics and health                                            |
@@ -125,7 +125,7 @@ of 400 and above fails with `UnexpectedStatusError`, and the rest is returned. `
 c := httpclient.New(httpclient.WithRetryableStatuses(408, 429, 500, 502, 503, 504))
 ```
 
-The built-in classification replays only requests that are safe to repeat, as `net/http.Transport` does for its own retries: an idempotent method
+The built-in classification replays only requests that are safe to repeat: an idempotent method
 (GET, HEAD, OPTIONS, TRACE, PUT, DELETE) or a request carrying an `Idempotency-Key` or `X-Idempotency-Key` header. A POST or PATCH without one is sent
 once — a server that processed it before failing never sees it twice — and a retryable failure is returned as a `RetryExhaustedError` after that
 single attempt. A policy set with `WithRetryPolicyHandler` decides for every method, so it can replay a POST the server deduplicates otherwise.
@@ -288,3 +288,115 @@ if err != nil {
 }
 c := client.New(client.WithEgressPolicy(policy))
 ```
+
+## HTTPS transport drivers
+
+A trusted driver can supply destination TLS, ALPN dispatch, connection pooling,
+and HTTP framing while the client retains its connection guard and wrappers:
+
+```go
+base := client.DefaultPooledTransport()
+base.TLSClientConfig = destinationTLS // roots, versions, client certificates, pinning
+c := client.New(
+    client.WithTransport(base),
+    client.WithTransportDriver(driver), // implements client.TransportDriver
+    client.WithDialTimeout(30*time.Second),
+    client.WithoutRetry(), // optional: consumer owns retries
+)
+defer c.CloseIdleConnections()
+```
+
+`TransportDriver.NewTransport(DriverEnv)` receives a cloned TLS configuration,
+connection/idle limits and handshake/header timeouts. Every connection must come
+from `env.Dial`, including reconnects, fallback, and TLS session resumption. The
+driver must honor every non-default TLS setting with `crypto/tls` semantics or
+return a construction error. This includes roots, server name, TLS minimum and
+maximum versions, ALPN, client certificates and both verification callbacks.
+The core always rejects `InsecureSkipVerify`. Direct-route construction happens
+in `New` and errors panic; lazy proxy-route construction errors reach the request.
+
+Driver mode rejects base transport settings it cannot honor at construction,
+with an error wrapping `ErrDriverUnsupportedTransport`: `Dial` without
+`DialContext`, `ProxyConnectHeader` (including an empty non-nil map),
+`GetProxyConnectHeader`, `OnProxyConnectResponse`, `DialTLS`, `DialTLSContext`,
+`Protocols`, `HTTP2`, `TLSNextProto` (including an empty non-nil map), and nonzero
+`MaxResponseHeaderBytes`. These restrictions apply even without SSRF protection
+or a configured proxy. If both `Dial` and `DialContext` are set, `DialContext`
+takes precedence. Without a driver, these settings retain their standard behavior.
+
+Driver construction leaves the supplied transport unchanged, so a fresh base can
+be reused across driver clients. In Go 1.27.4, using or cloning a standard
+transport can populate `HTTP2` and `TLSNextProto` automatically. Such transports
+are still rejected: the public API cannot distinguish an automatically populated
+empty `HTTP2` configuration from an explicit one. Supply a fresh transport for
+driver mode. Destination ALPN is captured before internal transport initialization
+and copied independently for each route, including a nil `NextProtos` policy.
+
+`TLSClientConfig` is cloned into `DriverEnv.TLS`; connection limits, idle,
+TLS handshake, response header and expect-continue timeouts, `DisableKeepAlives`
+and `DisableCompression` are passed in `DriverEnv`. `Proxy` and `DialContext`
+are consumed by the core connection path (SSRF protection replaces the dialer).
+`ForceAttemptHTTP2` controls the standard transport's automatic HTTP/2 setup;
+drivers own protocol negotiation. `WriteBufferSize` and `ReadBufferSize` tune
+standard transport buffers; drivers own their buffering. These three settings
+apply only to the standard HTTP path and are not passed to drivers.
+
+Drivers are **trusted in-process code**, not a sandbox. Go cannot prevent a driver
+from opening its own sockets. Audit every connection-opening path in the driver
+and its dependencies, and run the exported local-server regression suite:
+
+```go
+func TestDriver(t *testing.T) {
+    drivertest.Run(t, func(t *testing.T) client.TransportDriver {
+        return newDriver(t)
+    })
+}
+```
+
+For each HTTPS request, including retries and redirects, the configured
+`ProxyFunc` and proxy policy guard run before transport selection. A bounded
+64-entry LRU isolates direct connections and each proxy URL, including user
+identity. Eviction and `CloseIdleConnections` close idle connections without
+interrupting active requests. Drivers must implement `CloseIdleConnections`.
+The core adds no transport replay; the existing retry layer remains above it.
+Drivers must not replay requests that may have been processed, with the HTTP/1.1
+exception inherited from `net/http`: after certain connection failures on a
+**reused** connection, it may resend a request even after writing it if it has no
+body (`nil` or `http.NoBody`) or `GetBody`, and uses GET, HEAD, OPTIONS, TRACE
+or carries an `Idempotency-Key` or `X-Idempotency-Key` header. Unlike the client's
+retry classification above, net/http does not classify PUT/DELETE as idempotent
+without such a header. There is no transport option to disable this replay;
+it occurs below the client retry layer and `WithoutRetry` does not prevent it.
+This applies to the non-driver client, the conformance reference driver, and
+drivers using the standard HTTP/1.1 transport.
+An ordinary POST/PATCH without either header is never replayed after it may have
+been processed. If nothing was written, net/http may retry it with no body or
+`GetBody`. Consumed non-rewindable bodies must not be replayed.
+On HTTP/2, only requests proven unprocessed by HTTP/2 REFUSED_STREAM or GOAWAY below their stream ID may
+be retried with a rewindable body, including when the client uses `WithoutRetry`.
+These retries are bounded by the request, not a transmission count: persistent
+refusal must return an error promptly when the request context expires or is
+canceled, and retrying must stop when the request ends.
+HTTP requests continue through the standard guarded transport.
+
+With SSRF protection enabled, driver-mode CONNECT and SOCKS5 tunnels resolve and
+check the destination locally and send an approved IP to the proxy. **This is
+stricter than the default proxy mode**, where the proxy resolves destination
+names: names visible only to a proxy will not resolve locally, and private
+addresses need explicit exemptions. The proxy's own address is also guarded.
+`WithProxyTLSConfig` configures `crypto/tls` to an HTTPS proxy independently of
+destination TLS. `WithDialTimeout` bounds resolution, TCP, proxy TLS and tunnel
+negotiation together (30 seconds by default; earlier context deadlines win).
+Setup deadlines are cleared on success. `WithoutSSRFProtection` opts out of the
+guard; direct and proxy TCP dials then use the base transport's dialer. Without a driver,
+existing transport behavior is unchanged.
+
+### Reusable keyed transport pool
+
+`http/client/transportpool.New(selector, transportpool.WithMaxEntries(64))`
+returns an `http.RoundTripper`. A `Selector` receives the request context and
+returns a key plus a lazy `func() http.RoundTripper` builder. Include every policy
+snapshot, route and profile identity in the key. Concurrent misses for one key
+build once; builders run serially and must not reenter the pool. Nonpositive
+limits use 64. Evicted requests finish on their original transport, with idle
+cleanup repeated when their response bodies finish. Always close response bodies.

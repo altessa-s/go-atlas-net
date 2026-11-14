@@ -21,6 +21,11 @@ type options struct {
 	// unconditionally.
 	dialer *net.Dialer `optgen:"default=DefaultDialer()"`
 
+	// dialContext overrides the connection path to the proxy. When set, it
+	// takes precedence over dialer. It must honor context cancellation and
+	// deadlines. This lets transports retain their caller-owned dial path.
+	dialContext DialContextFunc `optgen:"notnil"`
+
 	// proxyTLSConfig is the *tls.Config used for the TLS handshake to
 	// an https:// proxy. The caller's config is cloned via [TLSConfig]
 	// before use; it is never mutated. ServerName and MinVersion are

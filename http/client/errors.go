@@ -57,6 +57,10 @@ var (
 	// Use [IsSSRFError] to extract details.
 	ErrSSRFBlocked = errors.New("ssrf: connection blocked")
 
+	// ErrDriverUnsupportedTransport identifies base transport settings the driver
+	// cannot honor. New panics with an error wrapping this sentinel.
+	ErrDriverUnsupportedTransport = errors.New("httpclient: unsupported driver transport configuration")
+
 	// ErrSSRFUnsafeTransport identifies a transport configuration that cannot
 	// enforce SSRF protection. New panics with an error wrapping this sentinel.
 	ErrSSRFUnsafeTransport = errors.New("ssrf: incompatible transport configuration")

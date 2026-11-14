@@ -29,6 +29,11 @@ import (
 // resolution mode. Callers needing client-side DNS must resolve to
 // an IP literal before passing addr.
 func SOCKS5Dialer(proxyURL *url.URL, dialer *net.Dialer) (DialContextFunc, error) {
+	return socks5Dialer(proxyURL, dialer)
+}
+
+// socks5Dialer preserves both Dial and DialContext on a caller-owned dialer.
+func socks5Dialer(proxyURL *url.URL, dialer xproxy.Dialer) (DialContextFunc, error) {
 	var auth *xproxy.Auth
 
 	if u := proxyURL.User; u != nil {
@@ -49,4 +54,16 @@ func SOCKS5Dialer(proxyURL *url.URL, dialer *net.Dialer) (DialContextFunc, error
 	return func(ctx context.Context, _, addr string) (net.Conn, error) {
 		return contextDialer.DialContext(ctx, "tcp", addr)
 	}, nil
+}
+
+// contextDialer adapts a context dial function to the SOCKS library's dialer.
+// SOCKS5 selects DialContext when available; Dial implements its base interface.
+type contextDialer struct{ DialContextFunc }
+
+func (d contextDialer) Dial(network, address string) (net.Conn, error) {
+	return d.DialContextFunc(context.Background(), network, address)
+}
+
+func (d contextDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return d.DialContextFunc(ctx, network, address)
 }

@@ -59,3 +59,13 @@ build it.
 
 `make generate` builds [`optgen`](https://github.com/altessa-s/go-optgen) at the version pinned in `devtools/go.mod` into `bin/optgen` and runs
 it from there; nothing is installed into `GOPATH` and an `optgen` on `PATH` is not used. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for every target.
+
+### Custom HTTPS transports
+
+[`http/client`](http/client/README.md#https-transport-drivers) supports trusted
+`TransportDriver` implementations on core-owned guarded dials, route-isolated
+proxy tunnels, and a whole-dial timeout. Drivers must honor or reject destination
+TLS policy and pass `http/client/drivertest`; source review remains necessary.
+Driver mode resolves proxy destinations locally, which is stricter than the
+default proxy behavior. `http/client/transportpool` exports the bounded keyed
+transport pool for service-specific policy and profile selection.

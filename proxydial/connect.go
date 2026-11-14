@@ -40,7 +40,12 @@ var ErrConnectResponseTooLarge = errors.New("proxydial: CONNECT response header 
 // a server-first protocol such as SMTP, FTP, POP3 or SSH) are kept and
 // returned by the first reads on the tunnel.
 func HTTPConnect(ctx context.Context, dialer *net.Dialer, proxyURL *url.URL, tlsCfg *tls.Config, addr string) (net.Conn, error) {
-	conn, err := dialer.DialContext(ctx, "tcp", proxyURL.Host)
+	return httpConnect(ctx, dialer.DialContext, proxyURL, tlsCfg, addr)
+}
+
+// httpConnect is HTTPConnect with a caller-owned context dial function.
+func httpConnect(ctx context.Context, dial DialContextFunc, proxyURL *url.URL, tlsCfg *tls.Config, addr string) (net.Conn, error) {
+	conn, err := dial(ctx, "tcp", proxyURL.Host)
 	if err != nil {
 		return nil, fmt.Errorf("dial proxy %s: %w", proxyURL.Host, err)
 	}

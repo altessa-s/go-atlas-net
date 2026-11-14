@@ -17,6 +17,30 @@
 // [OptionsClient] (the *WithOptions methods) and [RequestFactory] (NewRequest) — so consumers accept the
 // narrowest one they need, usually an [httpx.Doer].
 //
+// # Transport drivers
+//
+// [WithTransportDriver] delegates HTTPS TLS, ALPN and protocol framing to a
+// [TransportDriver]. HTTP requests still use the guarded standard transport.
+// The driver receives [DriverEnv], including a cloned destination TLS policy
+// and the only permitted connection path. The proxy resolver runs for every
+// HTTPS request before selecting a route-specific, bounded transport pool.
+// Routes include proxy credentials, so connections cannot cross identities.
+//
+// Drivers are trusted in-process code: Dial is a contract, not containment.
+// Audit every connection-opening path and run the http/client/drivertest suite.
+// All non-default TLS settings must be honored with crypto/tls semantics or
+// refused at construction; InsecureSkipVerify is always rejected by the core.
+// Direct-route construction failures panic in New, as other invalid client
+// configurations do. Proxy-route construction failures are request errors.
+//
+// With protection enabled, proxied HTTPS destinations are resolved and checked
+// locally, then pinned through CONNECT or SOCKS5. This is stricter than the
+// default mode, where the proxy resolves host names. Proxy addresses are guarded
+// too; [WithProxyTLSConfig] configures only TLS to an HTTPS proxy. [WithDialTimeout]
+// bounds the entire setup (default 30 seconds), even for detached dial contexts;
+// connection deadlines are cleared before ownership passes to the driver.
+// Retry, breaker, size-limit, limiter and cookie behavior remain unchanged.
+//
 // # Features
 //
 //   - Connection Management: automatic TCP connection pooling and keep-alive configuration; [DefaultPooledTransport]
