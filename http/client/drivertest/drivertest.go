@@ -25,7 +25,11 @@ import (
 	"github.com/altessa-s/go-atlas-net/http/client"
 )
 
-const testTimeout = 3 * time.Second
+// testTimeout bounds exchanges that are expected to complete. It is generous so
+// that a race-instrumented run on a loaded machine cannot trip it.
+const testTimeout = 30 * time.Second
+
+// shortTimeout is set only where a timeout is the behavior under test.
 const shortTimeout = 100 * time.Millisecond
 const authority = "driver.invalid"
 
@@ -78,7 +82,7 @@ func environment(s *httptest.Server) client.DriverEnv {
 		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, network, s.Listener.Addr().String())
 		},
-		TLSHandshakeTimeout: shortTimeout, ResponseHeaderTimeout: shortTimeout,
+		TLSHandshakeTimeout: testTimeout, ResponseHeaderTimeout: testTimeout,
 		MaxIdleConns: testIdleConns, MaxIdleConnsPerHost: testIdleConns, MaxConnsPerHost: 1, IdleConnTimeout: time.Minute,
 	}
 }
@@ -589,7 +593,9 @@ func testTimeouts(t *testing.T, f func(*testing.T) client.TransportDriver) {
 	})
 	t.Run("response header", func(t *testing.T) {
 		s := server(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }), nil, false)
-		tr := transport(t, f(t), environment(s), false)
+		env := environment(s)
+		env.ResponseHeaderTimeout = shortTimeout
+		tr := transport(t, f(t), env, false)
 		start := time.Now()
 		_, err := roundTrip(t, tr, "GET", nil)
 		require.Error(t, err)
