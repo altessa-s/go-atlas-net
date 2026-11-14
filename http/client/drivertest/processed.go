@@ -61,7 +61,8 @@ func testH2ProcessedReplayCase(t *testing.T, f func(*testing.T) client.Transport
 		body = io.LimitReader(body, int64(len(payload)))
 	}
 
-	ctx, cancel := context.WithTimeout(t.Context(), replayTimeout)
+	// The fixture ends the exchange itself; the deadline is only a safety net.
+	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+authority+"/", body)
