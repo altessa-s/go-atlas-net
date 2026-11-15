@@ -157,10 +157,11 @@ c := client.New(client.WithBreakerIsSuccessful(func(err error) bool {
 ```
 
 The predicate receives the original error from the wrapped `RoundTripper`, before `redactTransportError`, so it can inspect typed causes with
-`errors.Is`/`errors.As`. Returning true counts the result as a success; the error is still returned, with its text redacted as usual. The predicate
-also receives nil on successful requests. It must be safe for concurrent calls across breakers and must not call breaker methods: gobreaker invokes
-it under the breaker's lock. Panics propagate according to gobreaker's `Execute` behavior; its recovery may invoke the predicate again with an
-error describing the panic. The client does not swallow panics.
+`errors.Is`/`errors.As`. An error whose cause graph exceeds the inspection bound (including cycles and exponentially shared causes) is replaced
+before classification by a bounded error wrapping `ErrUninspectableCause`; a nil predicate counts it as a failure. Returning true counts the result
+as a success; the error is still returned, with its text redacted as usual. The predicate also receives nil on successful requests. It must be safe
+for concurrent calls across breakers and must not call breaker methods: gobreaker invokes it under the breaker's lock. Panics propagate according
+to gobreaker's `Execute` behavior; its recovery may invoke the predicate again with an error describing the panic. The client does not swallow panics.
 
 ## Redaction
 

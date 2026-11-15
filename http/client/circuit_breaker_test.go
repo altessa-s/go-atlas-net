@@ -229,6 +229,125 @@ func TestBreakerIsSuccessfulPanic(t *testing.T) {
 	require.Equal(t, 2, calls)
 }
 
+type breakerSelfCause struct{}
+
+func (e *breakerSelfCause) Error() string { return "self" }
+func (e *breakerSelfCause) Unwrap() error { return e }
+
+func TestBreakerIsSuccessfulUninspectableCauses(t *testing.T) {
+	t.Parallel()
+
+	doubled := errors.New("transport failure")
+	for range 40 {
+		doubled = errors.Join(doubled, doubled)
+	}
+
+	for name, cause := range map[string]error{"cyclic": &breakerSelfCause{}, "shared": doubled} {
+		for _, custom := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/custom=%t", name, custom), func(t *testing.T) {
+				t.Parallel()
+
+				classified := make(chan error, 1)
+				started := make(chan struct{})
+				opts := []Option{WithBreakerInterval(time.Hour)}
+
+				if custom {
+					opts = append(opts, WithBreakerIsSuccessful(func(err error) bool {
+						if err != nil {
+							classified <- err
+						}
+
+						var refusal *NonRetryableError
+
+						return err == nil || errors.As(err, &refusal)
+					}))
+				} else {
+					opts = append(opts, WithBreakerIsSuccessful(nil))
+				}
+
+				cb := newCircuitBreakerClient(*newOptions(opts...))
+				rt := cb.newCircuitBreakerRoundTripper(httpx.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					if req.URL.Path == "/bad" {
+						close(started)
+						return nil, cause
+					}
+
+					return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+				}))
+
+				badReq, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.test/bad", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				goodReq, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://api.test/good", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				do := func(req *http.Request, done chan<- error) {
+					resp, err := rt.RoundTrip(req)
+					if resp != nil {
+						_ = resp.Body.Close()
+					}
+
+					done <- err
+				}
+				badDone, goodDone := make(chan error, 1), make(chan error, 1)
+				deadline := time.NewTimer(5 * time.Second)
+
+				defer deadline.Stop()
+
+				go do(badReq, badDone)
+
+				if custom {
+					select {
+					case observed := <-classified:
+						if !errorGraphWithin(observed) {
+							t.Error("predicate received an unbounded error graph")
+						} else if !errors.Is(observed, ErrUninspectableCause) {
+							t.Error("predicate did not receive ErrUninspectableCause")
+						}
+					case <-deadline.C:
+						t.Fatal("predicate was not invoked promptly")
+					}
+				} else {
+					select {
+					case <-started:
+					case <-deadline.C:
+						t.Fatal("transport was not invoked promptly")
+					}
+				}
+
+				go do(goodReq, goodDone)
+
+				select {
+				case err := <-goodDone:
+					if err != nil {
+						t.Fatalf("concurrent request: %v", err)
+					}
+				case <-deadline.C:
+					t.Fatal("concurrent request through the same breaker blocked")
+				}
+
+				select {
+				case err := <-badDone:
+					if !errors.Is(err, ErrUninspectableCause) {
+						t.Fatal("request did not return ErrUninspectableCause")
+					}
+				case <-deadline.C:
+					t.Fatal("request with an uninspectable cause did not return promptly")
+				}
+
+				counts := cb.getBreakerForHost("api.test").Counts()
+				if counts.TotalFailures != 1 || counts.TotalSuccesses != 1 {
+					t.Errorf("counts = %+v, want one failure and one success", counts)
+				}
+			})
+		}
+	}
+}
+
 func TestBreakerIsSuccessfulConcurrent(t *testing.T) {
 	t.Parallel()
 

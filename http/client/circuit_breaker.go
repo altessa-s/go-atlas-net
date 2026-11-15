@@ -395,9 +395,14 @@ func (c *circuitBreakerClient) newCircuitBreakerRoundTripper(next http.RoundTrip
 		breaker := c.getBreakerForHost(req.URL.Host)
 
 		res, err := breaker.Execute(func() (*http.Response, error) {
-			// Classify the original error so a caller's predicate can inspect
-			// typed causes before redaction bounds the cause graph.
-			return next.RoundTrip(req) //nolint:bodyclose
+			res, err := next.RoundTrip(req) //nolint:bodyclose
+			// Bound the graph before gobreaker invokes the predicate under its
+			// lock; errors.Is and errors.As must not block every request.
+			if err != nil && !errorGraphWithin(err) {
+				err = uninspectable()
+			}
+
+			return res, err
 		})
 		if err != nil {
 			// Bound the cause graph and render trusted text before the error

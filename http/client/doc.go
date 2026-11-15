@@ -56,6 +56,7 @@
 //   - Protection: a circuit breaker per destination host, so one failing endpoint never rejects requests to
 //     another; tune hosts with [WithCircuitBreakerSettings] and bound lazily created breakers with [WithMaxHostBreakers].
 //     [WithBreakerIsSuccessful] classifies the original transport error before redaction for every breaker;
+//     graphs exceeding the inspection bound are replaced by an error wrapping [ErrUninspectableCause] before classification;
 //     nil keeps the default (only nil errors succeed). Predicate panics propagate as in gobreaker.
 //   - Redirects: followed like net/http by default; [WithoutRedirects] returns a 3xx reply to the caller as the
 //     response instead, on every layer of the client.

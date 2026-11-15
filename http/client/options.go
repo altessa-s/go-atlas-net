@@ -109,8 +109,11 @@ type options struct {
 	// Nil uses gobreaker's default: only a nil error is successful.
 	// The predicate receives the original error from the wrapped RoundTripper,
 	// before redactTransportError, so errors.Is and errors.As can inspect typed
-	// causes such as NonRetryableError. A true result counts as a success but
-	// the error is still returned to callers with its message redacted.
+	// causes such as NonRetryableError. If its cause graph exceeds the inspection
+	// bound (including cycles and exponentially shared causes), it receives a
+	// bounded error wrapping ErrUninspectableCause instead; a nil predicate counts
+	// this as a failure. A true result counts as a success but the error is still
+	// returned to callers with its message redacted.
 	// It also receives nil for successful requests. It must be safe for
 	// concurrent calls across breakers and must not call breaker methods,
 	// because gobreaker holds the breaker's lock while invoking it.
