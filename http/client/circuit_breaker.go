@@ -80,9 +80,10 @@ type circuitBreakerClient struct {
 	// client-wide breaker, so health aggregation can ignore it while idle
 	sharedUsed atomic.Bool
 	// lazy breakers inherit the client-wide breaker settings
-	breakerMaxRequests uint32
-	breakerInterval    time.Duration
-	breakerTimeout     time.Duration
+	breakerMaxRequests  uint32
+	breakerInterval     time.Duration
+	breakerTimeout      time.Duration
+	breakerIsSuccessful func(err error) bool
 	// stringInterner provides efficient string interning for hostnames
 	stringInterner *intern.Interner
 }
@@ -230,6 +231,7 @@ func newCircuitBreakerClient(opts options) *circuitBreakerClient {
 		breakerMaxRequests:  opts.breakerMaxRequests,
 		breakerInterval:     opts.breakerInterval,
 		breakerTimeout:      opts.breakerTimeout,
+		breakerIsSuccessful: opts.breakerIsSuccessful,
 
 		// Create dedicated string interner for HTTP client with smaller size
 		// HTTP client typically has predictable string patterns (hostnames, common headers)
@@ -238,11 +240,12 @@ func newCircuitBreakerClient(opts options) *circuitBreakerClient {
 	observer := opts.observer
 	// nolint:bodyclose
 	client.CircuitBreaker = gobreaker.NewCircuitBreaker[*http.Response](gobreaker.Settings{
-		Name:        cbName,
-		MaxRequests: opts.breakerMaxRequests,
-		Interval:    opts.breakerInterval,
-		Timeout:     opts.breakerTimeout,
-		ReadyToTrip: defaultReadyToTrip,
+		Name:         cbName,
+		MaxRequests:  opts.breakerMaxRequests,
+		Interval:     opts.breakerInterval,
+		Timeout:      opts.breakerTimeout,
+		ReadyToTrip:  defaultReadyToTrip,
+		IsSuccessful: opts.breakerIsSuccessful,
 		OnStateChange: func(name string, from, to gobreaker.State) {
 			observer.BreakerStateChanged(BreakerStateEvent{Name: name, From: from, To: to})
 		},
@@ -332,6 +335,8 @@ func (c *circuitBreakerClient) getBreakerForHost(hostname string) *gobreaker.Cir
 		st.ReadyToTrip = defaultReadyToTrip
 	}
 
+	st.IsSuccessful = c.breakerIsSuccessful
+
 	st.OnStateChange = func(n string, from gobreaker.State, to gobreaker.State) {
 		c.observer.BreakerStateChanged(BreakerStateEvent{Name: n, Host: hostname, From: from, To: to})
 
@@ -391,11 +396,19 @@ func (c *circuitBreakerClient) newCircuitBreakerRoundTripper(next http.RoundTrip
 
 		res, err := breaker.Execute(func() (*http.Response, error) {
 			res, err := next.RoundTrip(req) //nolint:bodyclose
-			// The transport's error is rendered from trusted parts, and its
-			// cause graph bounded, before anything formats or searches it.
-			return res, redactTransportError(err)
+			// Bound the graph before gobreaker invokes the predicate under its
+			// lock; errors.Is and errors.As must not block every request.
+			if err != nil && !errorGraphWithin(err) {
+				err = uninspectable()
+			}
+
+			return res, err
 		})
 		if err != nil {
+			// Bound the cause graph and render trusted text before the error
+			// reaches wrappers, retry classification, logging or callers.
+			err = redactTransportError(err)
+
 			// The URL omits user info and the query string: both may carry
 			// credentials.
 			return nil, coreerrs.Wrapf(err, "circuit breaker execution failed for %s %s", req.Method, redactedURL(req.URL))

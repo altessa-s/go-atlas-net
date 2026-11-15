@@ -45,7 +45,8 @@ func defaultPooledClient() *http.Client {
 // defaults for a specific hostname. Zero-value fields fall back to the
 // package-level defaults ([DefaultBreakerMaxRequests], [DefaultBreakerInterval],
 // [DefaultBreakerTimeout]). Use [DefaultOnStateChange] for a ready-made
-// state-transition logging callback.
+// state-transition logging callback. [WithBreakerIsSuccessful] applies to
+// every breaker, including hosts configured here.
 type CircuitBreakerSettings struct {
 	// MaxRequests is the maximum number of requests allowed in half-open state
 	MaxRequests uint32
@@ -103,6 +104,22 @@ type options struct {
 	breakerInterval time.Duration `optgen:"default=DefaultBreakerInterval"`
 	breakerTimeout  time.Duration `optgen:"default=DefaultBreakerTimeout"`
 	breakerName     string
+	// breakerIsSuccessful classifies each transport result for every breaker,
+	// including shared, lazy and explicitly configured per-host breakers.
+	// Nil uses gobreaker's default: only a nil error is successful.
+	// The predicate receives the original error from the wrapped RoundTripper,
+	// before redactTransportError, so errors.Is and errors.As can inspect typed
+	// causes such as NonRetryableError. If its cause graph exceeds the inspection
+	// bound (including cycles and exponentially shared causes), it receives a
+	// bounded error wrapping ErrUninspectableCause instead; a nil predicate counts
+	// this as a failure. A true result counts as a success but the error is still
+	// returned to callers with its message redacted.
+	// It also receives nil for successful requests. It must be safe for
+	// concurrent calls across breakers and must not call breaker methods,
+	// because gobreaker holds the breaker's lock while invoking it.
+	// Panics propagate according to gobreaker's Execute behavior; its recovery
+	// may invoke the predicate again with an error describing the panic.
+	breakerIsSuccessful func(err error) bool
 	// maxHostBreakers caps the number of per-host breakers created lazily for
 	// hosts without explicit [CircuitBreakerSettings]. Once reached, further
 	// hosts share the client-wide breaker. Zero or negative disables lazy
