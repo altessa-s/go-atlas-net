@@ -38,6 +38,7 @@ constructors are available: `New` returns a bare `*http.Client` suitable for any
 | `WithBreakerInterval`        | 30s           | Period to clear failure counts in closed state                                                                                                       |
 | `WithBreakerTimeout`         | 30s           | Duration before transitioning from open to half-open                                                                                                 |
 | `WithBreakerName`            | auto          | Circuit breaker name for identification                                                                                                              |
+| `WithBreakerIsSuccessful`    | nil           | Classify original transport errors for every breaker; nil counts every non-nil error as a failure                                                      |
 | `WithCircuitBreakerSettings` | --            | Per-host circuit breaker configuration                                                                                                               |
 | `WithMaxHostBreakers`        | 1024          | Cap on breakers created lazily for hosts without explicit settings; further hosts share one breaker (0 = all such hosts share it)                   |
 | `WithMaxResponseSize`        | 0             | Maximum response body size in bytes (0 = unlimited)                                                                                                  |
@@ -137,6 +138,29 @@ req.Header.Set("Idempotency-Key", orderID) // the POST is now retried like a GET
 The Content-Length precheck of `WithMaxResponseSize` closes an oversized reply unread and fails with a `ResponseSizeError` that keeps its `Status` and
 `Header`, so a caller can tell an oversized success (a POST that was processed) from an oversized rejection. The limit is its own round tripper
 between the circuit breaker and the retry layer, so an oversized reply counts as a breaker success.
+
+## Circuit breaker classification
+
+`WithBreakerIsSuccessful(func(err error) bool)` sets gobreaker's `IsSuccessful` for every breaker: the shared fallback, lazily created per-authority
+breakers, and hosts configured with `WithCircuitBreakerSettings`. There is one client-wide predicate; per-host settings do not override it.
+Nil preserves the default: nil errors count as successes and every non-nil error counts as a failure. The breaker classifies transport outcomes,
+before the retry layer classifies HTTP statuses or errors.
+
+For example, when a transport detects an application refusal and returns a `NonRetryableError`, keep that refusal from opening the breaker while
+still counting real transport failures:
+
+```go
+c := client.New(client.WithBreakerIsSuccessful(func(err error) bool {
+    var refusal *client.NonRetryableError
+    return err == nil || errors.As(err, &refusal)
+}))
+```
+
+The predicate receives the original error from the wrapped `RoundTripper`, before `redactTransportError`, so it can inspect typed causes with
+`errors.Is`/`errors.As`. Returning true counts the result as a success; the error is still returned, with its text redacted as usual. The predicate
+also receives nil on successful requests. It must be safe for concurrent calls across breakers and must not call breaker methods: gobreaker invokes
+it under the breaker's lock. Panics propagate according to gobreaker's `Execute` behavior; its recovery may invoke the predicate again with an
+error describing the panic. The client does not swallow panics.
 
 ## Redaction
 
