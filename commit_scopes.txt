@@ -20,6 +20,8 @@ http/client/limiters             # Client-side rate limiters
 http/client/limiters/hostpacer   # Waiting per-host request limiter
 httpx                            # HTTP helpers and header names
 netipx                           # IP address helpers
+oauth2/jwtbearer                 # JWT bearer grant
+proxyconfig                      # Shared proxy configuration
 proxydial                        # Forward-proxy dialers
 urlx                             # Base URL parsing and joining
 

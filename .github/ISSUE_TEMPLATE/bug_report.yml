@@ -41,6 +41,8 @@ body:
         - http/client/limiters/hostpacer
         - httpx
         - netipx
+        - oauth2/jwtbearer
+        - proxyconfig
         - proxydial
         - urlx
         - devtools
