@@ -2,14 +2,14 @@
 // Use of this source code is governed by the MIT license that can be found in
 // the LICENSE file.
 
-package client_test
+package httpx_test
 
 import (
 	"net/http"
 	"testing"
 	"time"
 
-	httpclient "github.com/altessa-s/go-atlas-net/http/client"
+	"github.com/altessa-s/go-atlas-net/httpx"
 )
 
 func BenchmarkParseRetryAfter(b *testing.B) {
@@ -35,7 +35,7 @@ func BenchmarkParseRetryAfter(b *testing.B) {
 			b.ReportAllocs()
 
 			for b.Loop() {
-				_, _ = httpclient.ParseRetryAfter(h, now, time.Minute)
+				_, _ = httpx.ParseRetryAfter(h, now, time.Minute)
 			}
 		})
 	}

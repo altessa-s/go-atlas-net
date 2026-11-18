@@ -19,48 +19,6 @@ import (
 	httpclient "github.com/altessa-s/go-atlas-net/http/client"
 )
 
-func TestParseRetryAfter(t *testing.T) {
-	t.Parallel()
-
-	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
-
-	tests := []struct {
-		name   string
-		value  string
-		max    time.Duration
-		want   time.Duration
-		wantOK bool
-	}{
-		{"absent", "", 0, 0, false},
-		{"seconds", "120", 0, 2 * time.Minute, true},
-		{"zero seconds", "0", 0, 0, true},
-		{"spaces", " 5 ", 0, 5 * time.Second, true},
-		{"capped seconds", "3600", time.Minute, time.Minute, true},
-		{"huge seconds", "99999999999999999999", time.Minute, time.Minute, true},
-		{"negative", "-5", 0, 0, false},
-		{"signed", "+5", 0, 0, false},
-		{"fraction", "1.5", 0, 0, false},
-		{"garbage", "soon", 0, 0, false},
-		{"date ahead", now.Add(90 * time.Second).Format(http.TimeFormat), 0, 90 * time.Second, true},
-		{"date ahead capped", now.Add(time.Hour).Format(http.TimeFormat), time.Minute, time.Minute, true},
-		{"date past", now.Add(-time.Hour).Format(http.TimeFormat), 0, 0, true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			h := http.Header{}
-			if tc.value != "" {
-				h.Set("Retry-After", tc.value)
-			}
-
-			got, ok := httpclient.ParseRetryAfter(h, now, tc.max)
-			require.Equal(t, tc.wantOK, ok)
-			require.Equal(t, tc.want, got)
-		})
-	}
-}
-
 // retryAfterServer answers the first request with status and Retry-After, and
 // every later one with 200.
 func retryAfterServer(t *testing.T, status int, retryAfter string) (*httptest.Server, *atomic.Int32) {

@@ -83,8 +83,7 @@ forwarded (the caller's other cookies are, rebuilt sorted). That filtering runs 
 The retry layer honors `Retry-After` on 429 and 503 replies (delta seconds or an HTTP date): the next retry waits at least as long as the server asked,
 capped by `WithRetryAfterMax` (default `DefaultRetryAfterMax`, one minute), and never shorter than the exponential backoff. `WithRetryAfterStatuses`
 replaces the honored statuses (default `DefaultRetryAfterStatuses()`: 429, 503), e.g. for a retry policy that also retries 500/502/504 replies.
-`ParseRetryAfter(h, now, max)` exposes the same parser for callers that run their own retry loop; it reports `ok == false` for an absent or malformed
-header.
+Callers with their own retry loop can use `httpx.ParseRetryAfter(h, now, max)`. It reports `ok == false` for an absent or malformed header.
 
 ## Errors
 
