@@ -15,9 +15,8 @@ Network primitives and an outbound HTTP client for Go services and libraries: eg
 helpers, real client IP extraction, the incoming gRPC metadata getter and a resilient HTTP client with retries, circuit breaker, SSRF guard and
 egress policy.
 
-Each package can be imported independently without pulling in the rest of the module. The packages read no configuration schema and report no
-metrics themselves: they are configured through options, and the HTTP client publishes request, retry and circuit breaker events through its
-`Observer` for the caller to turn into metrics and health checks.
+Each package can be imported independently. The shared proxy schema lives in `proxyconfig`. Runtime packages use options. The HTTP client publishes
+request, retry and circuit breaker events through its `Observer` for the caller to turn into metrics and health checks.
 
 ## Requirements
 
@@ -35,6 +34,8 @@ build it.
 | [hmacsign](./hmacsign)           | HMAC signing and verification of request bodies (Stripe/GitHub schemes), key rotation, replay cache; `httpsign` for `net/http` |
 | [httpx](./httpx)                 | `RoundTripperFunc`, `Doer`, `IsSuccess` / `IsRedirect`, shared header names, `HTTPHeaderGetter`  |
 | [netipx](./netipx)               | `IsPrivate`, `IsTrusted`, `InList`, `ParsePrefixes`                                              |
+| [oauth2/jwtbearer](./oauth2/jwtbearer) | Context-aware RFC 7523 assertion exchange and token cache |
+| [proxyconfig](./proxyconfig)       | Shared proxy wire schema and validated URL conversion |
 | [proxydial](./proxydial)         | Forward-proxy dialers (HTTP CONNECT, SOCKS5)                                                     |
 | [urlx](./urlx)                   | `ParseBaseURL`, `JoinPath`, `Canonical` for service base URLs                                    |
 
