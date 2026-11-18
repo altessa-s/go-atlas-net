@@ -47,7 +47,7 @@
 //     returns a fresh copy of the default transport to customize and pass to [WithTransport].
 //   - Resilience: built-in retry policies with exponential backoff and jitter ([WithRetryMax], [WithRetryWait]);
 //     [WithoutRetry] sends each request once and returns every reply unclassified. Retries after a 429/503
-//     reply wait at least its Retry-After ([WithRetryAfterMax], [ParseRetryAfter]). The built-in classification retries
+//     reply wait at least its Retry-After ([WithRetryAfterMax], [httpx.ParseRetryAfter]). The built-in classification retries
 //     [DefaultRetryableStatuses] (change them with [WithRetryableStatuses]) and is exported as [DefaultRetryPolicy] for
 //     custom policies set with [WithRetryPolicyHandler]. The built-in classification replays only requests that are
 //     safe to repeat, as net/http does: an idempotent method (GET, HEAD, OPTIONS, TRACE, PUT, DELETE) or a request

@@ -27,6 +27,7 @@ import (
 	"github.com/altessa-s/go-atlas-core/time/clock"
 
 	"github.com/altessa-s/go-atlas-net/http/client/limiters"
+	"github.com/altessa-s/go-atlas-net/httpx"
 
 	coreerrs "github.com/altessa-s/go-atlas-core/errors"
 	coreio "github.com/altessa-s/go-atlas-core/io"
@@ -107,7 +108,7 @@ func (rt *retryRoundTripper) now() time.Time {
 func (rt *retryRoundTripper) retryableStatus(resp *http.Response) *retryableStatusError {
 	e := &retryableStatusError{status: resp.StatusCode}
 	if rt.retryAfterMax > 0 && honorsRetryAfter(rt.retryAfterStatuses, resp.StatusCode) {
-		e.retryAfter, _ = ParseRetryAfter(resp.Header, rt.now(), rt.retryAfterMax)
+		e.retryAfter, _ = httpx.ParseRetryAfter(resp.Header, rt.now(), rt.retryAfterMax)
 	}
 
 	return e
