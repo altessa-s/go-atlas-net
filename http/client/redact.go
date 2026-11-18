@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"net"
 	"net/http"
 	"net/url"
@@ -25,6 +26,8 @@ import (
 	"github.com/altessa-s/go-atlas-core/errors/network"
 
 	"github.com/altessa-s/go-atlas-net/http/client/limiters"
+
+	coreerrors "github.com/altessa-s/go-atlas-core/errors"
 )
 
 // redirectLimitRe matches the whole text of net/http's redirect limit error,
@@ -141,31 +144,8 @@ const maxRedactedErrors = 1024
 // rendered as trusted text). complete is false when the tree holds more than [maxRedactedErrors] errors to visit or to hold
 // pending, so some error may not have been inspected.
 func findURLErrors(err error) (urlErrs []*url.Error, complete bool) {
-	stack := []error{err}
-	for visited := 0; len(stack) > 0; visited++ {
-		if visited >= maxRedactedErrors {
-			return nil, false
-		}
-
-		e := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-
-		switch u := e.(type) { //nolint:errorlint // the tree is walked one layer at a time
-		case nil:
-		case *url.Error:
-			urlErrs = append(urlErrs, u)
-		case interface{ Unwrap() []error }:
-			children := u.Unwrap()
-			if len(stack)+len(children) > maxRedactedErrors {
-				return nil, false
-			}
-
-			for _, child := range slices.Backward(children) { // pushed last to first, so the first child is visited first
-				stack = append(stack, child)
-			}
-		case interface{ Unwrap() error }:
-			stack = append(stack, u.Unwrap())
-		}
+	if !walkErrorGraph(err, &urlErrs) {
+		return nil, false
 	}
 
 	return urlErrs, true
@@ -277,31 +257,56 @@ func trustedMessage(err error) string {
 // errorGraphWithin reports whether walking the cause graph of err (Unwrap() error and Unwrap() []error), visiting a shared cause
 // once per path to it as errors.Is and errors.As do, takes at most [maxRedactedErrors] visits.
 func errorGraphWithin(err error) bool {
-	stack := []error{err}
-	for visited := 0; len(stack) > 0; visited++ {
-		if visited >= maxRedactedErrors {
-			return false
+	return walkErrorGraph(err, nil)
+}
+
+// walkErrorGraph checks joins from right to left, or collects outer URL errors from left to right when urlErrs is provided.
+func walkErrorGraph(err error, urlErrs *[]*url.Error) bool {
+	pending := 0
+	within := true
+
+	walkJoin := func(group []error, yield func(error) bool) {
+		if len(group) > maxRedactedErrors-pending {
+			within = false
+			return
 		}
 
-		e := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
+		group = slices.Clone(group)
+		if urlErrs == nil {
+			slices.Reverse(group)
+		}
 
-		switch u := e.(type) { //nolint:errorlint // the graph is walked one layer at a time
-		case interface{ Unwrap() []error }:
-			children := u.Unwrap()
-			if len(stack)+len(children) > maxRedactedErrors {
-				return false
-			}
+		pending += len(group)
+		for _, child := range group {
+			pending--
 
-			stack = append(stack, children...)
-		case interface{ Unwrap() error }:
-			if next := u.Unwrap(); next != nil {
-				stack = append(stack, next)
+			if !yield(child) || !within {
+				return
 			}
 		}
 	}
 
-	return true
+	children := func(node error) iter.Seq[error] {
+		return func(yield func(error) bool) {
+			switch u := node.(type) { //nolint:errorlint // inspect only this layer
+			case interface{ Unwrap() []error }:
+				walkJoin(u.Unwrap(), yield)
+			case interface{ Unwrap() error }:
+				if urlErrs != nil {
+					if ue, ok := node.(*url.Error); ok { //nolint:errorlint // prune this URL error's subtree
+						*urlErrs = append(*urlErrs, ue)
+						return
+					}
+				}
+
+				if child := u.Unwrap(); child != nil || urlErrs != nil {
+					yield(child)
+				}
+			}
+		}
+	}
+
+	return coreerrors.WalkFunc(err, maxRedactedErrors, func(error) bool { return true }, children) && within
 }
 
 // renderTrusted describes err from fields that cannot hold a URL query:
