@@ -16,7 +16,9 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -29,6 +31,8 @@ import (
 
 	"github.com/altessa-s/go-atlas-net/httpx"
 	"github.com/altessa-s/go-atlas-net/oauth2/jwtbearer"
+
+	httpclient "github.com/altessa-s/go-atlas-net/http/client"
 )
 
 const endpoint = "https://issuer.test/token"
@@ -190,7 +194,7 @@ func TestExchangeFailures(t *testing.T) {
 		{"oversize", 200, strings.Repeat("x", jwtbearer.MaxResponseBytes+20), jwtbearer.ErrResponse},
 		{"emptyToken", 200, `{"expires_in":20}`, jwtbearer.ErrResponse},
 		{"missingExpiry", 200, `{"access_token":"private"}`, jwtbearer.ErrResponse},
-		{"overflow", 200, `{"access_token":"private","expires_in":9223372036854775807}`, jwtbearer.ErrResponse},
+		{"fractionAfterOverflow", 200, `{"access_token":"private","expires_in":99999999999999999999999.5}`, jwtbearer.ErrResponse},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -209,7 +213,8 @@ func TestExchangeFailures(t *testing.T) {
 
 	d := httpx.DoerFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("private") })
 	_, err := jwtbearer.Exchange(t.Context(), d, endpoint, "private")
-	require.Equal(t, jwtbearer.ErrRequest, err)
+	require.ErrorIs(t, err, jwtbearer.ErrRequest)
+	require.NotContains(t, err.Error(), "private")
 }
 
 func TestEndpointAndSigner(t *testing.T) {
@@ -224,12 +229,12 @@ func TestEndpointAndSigner(t *testing.T) {
 
 		return r, nil
 	})}
-	for _, endpoint := range []string{"", "http://issuer.test/token", "invalid", "https://user@issuer.test", "https://issuer.test/path#secret"} {
+	for _, endpoint := range []string{"", "http://issuer.test/token", "invalid", "https://user@issuer.test", "https://issuer.test/path#secret", "https://issuer.test/path?q=1#", "https://:443/token?q=1", "https:///token", "ftp://issuer.test/token"} {
 		_, err := jwtbearer.New(client, endpoint, "issuer", key)
 		require.ErrorIs(t, err, jwtbearer.ErrConfig)
 	}
 
-	_, err := jwtbearer.New(client, endpoint, " ", key)
+	_, err := jwtbearer.New(client, endpoint, "", key)
 	require.ErrorIs(t, err, jwtbearer.ErrConfig)
 	_, err = jwtbearer.New(client, endpoint, "issuer", (*rsa.PrivateKey)(nil))
 	require.ErrorIs(t, err, jwtbearer.ErrConfig)
@@ -299,6 +304,168 @@ func TestReadError(t *testing.T) {
 			})
 			_, err := jwtbearer.Exchange(t.Context(), d, endpoint, "assertion")
 			require.ErrorIs(t, err, tc.want)
+			require.ErrorIs(t, err, tc.cause)
+			require.ErrorIs(t, err, jwtbearer.ErrRequest)
+			require.NotContains(t, err.Error(), "private")
+		})
+	}
+}
+
+func TestOpaqueClaimsAndEndpointQuery(t *testing.T) {
+	t.Parallel()
+
+	key := keyFor(t)
+	for _, tc := range []struct{ name, value, query string }{
+		{"padded", "  a/b  ", "?tenant=a%2Fb&tenant=c+d"},
+		{"whitespace", " \t ", "?"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			target := endpoint + tc.query
+			d := httpx.DoerFunc(func(req *http.Request) (*http.Response, error) {
+				require.Equal(t, target, req.URL.String())
+				require.NoError(t, req.ParseForm())
+				parts := strings.Split(req.PostForm.Get("assertion"), ".")
+				require.Len(t, parts, 3)
+
+				for i, want := range []map[string]string{{"kid": tc.value}, {"iss": tc.value, "sub": tc.value, "prn": tc.value, "aud": target}} {
+					raw, err := base64.RawURLEncoding.DecodeString(parts[i])
+					require.NoError(t, err)
+
+					var fields map[string]any
+					require.NoError(t, json.Unmarshal(raw, &fields))
+
+					for k, v := range want {
+						require.Equal(t, v, fields[k], k)
+					}
+				}
+
+				return response(200, `{"access_token":"ok","expires_in":30}`), nil
+			})
+			s, err := jwtbearer.New(d, target, tc.value, key, jwtbearer.WithKeyID(&tc.value), jwtbearer.WithSubject(tc.value), jwtbearer.WithClock(clock.NewFake(time.Unix(0, 0))), jwtbearer.WithMaxLifetime(time.Second))
+			require.NoError(t, err)
+			tok, err := s.Fetch(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, time.Unix(1, 0), tok.Expiry)
+		})
+	}
+}
+
+func TestLifetime(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(100, 0)
+
+	for _, tc := range []struct {
+		name, seconds string
+		cap, want     time.Duration
+	}{
+		{"short", "2", time.Minute, 2 * time.Second},
+		{"capped", `"20"`, 1500 * time.Millisecond, 1500 * time.Millisecond},
+		{"lastWholeSecond", "9223372036", 0, 9223372036 * time.Second},
+		{"durationOverflow", "9223372037", 0, math.MaxInt64},
+		{"integerOverflow", `"999999999999999999999999999"`, 0, math.MaxInt64},
+		{"overflowCapped", "9223372036854775807", time.Hour, time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			d := httpx.DoerFunc(func(*http.Request) (*http.Response, error) {
+				return response(200, `{"extension":{"nested":[1,2]},"access_token":"ok","expires_in":`+tc.seconds+`}`), nil
+			})
+			tok, err := jwtbearer.Exchange(t.Context(), d, endpoint, "assertion", jwtbearer.WithClock(clock.NewFake(now)), jwtbearer.WithMaxLifetime(tc.cap))
+			require.NoError(t, err)
+			require.Equal(t, "ok", tok.AccessToken.Expose())
+			require.Equal(t, now.Add(tc.want), tok.Expiry)
+		})
+	}
+}
+
+func TestResponseLimit(t *testing.T) {
+	t.Parallel()
+
+	const (
+		valid    = `{"access_token":"ok","expires_in":1}`
+		rejected = `{"error":"invalid_grant","error_description":"private","error_uri":"urn:private"}`
+	)
+	for _, tc := range []struct {
+		name, body string
+		status     int
+		limit      int64
+		cause      error
+	}{
+		{"exact", valid, 200, int64(len(valid)), nil},
+		{"over", valid, 200, int64(len(valid) - 1), jwtbearer.ErrResponse},
+		{"larger", valid + strings.Repeat(" ", jwtbearer.MaxResponseBytes), 200, 16 << 20, nil},
+		{"rejected", rejected, 400, 1 << 16, jwtbearer.ErrRequest},
+		{"truncated", rejected, 400, 4, jwtbearer.ErrRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			d := httpx.DoerFunc(func(*http.Request) (*http.Response, error) { return response(tc.status, tc.body), nil })
+
+			_, err := jwtbearer.Exchange(t.Context(), d, endpoint, "private", jwtbearer.WithMaxResponseBytes(tc.limit))
+			if tc.cause == nil {
+				require.NoError(t, err)
+				return
+			}
+
+			require.ErrorIs(t, err, tc.cause)
+
+			var re *jwtbearer.ResponseError
+			require.ErrorAs(t, err, &re)
+			require.EqualValues(t, min(int64(len(tc.body)), tc.limit+1), re.Bytes)
+			require.NotContains(t, err.Error(), "private")
+
+			if tc.status == 400 {
+				require.Equal(t, tc.body[:min(int64(len(tc.body)), tc.limit)], re.Body.Expose())
+
+				if int64(len(tc.body)) <= tc.limit {
+					require.Equal(t, "invalid_grant", re.ErrorCode.Expose())
+					require.Equal(t, "private", re.ErrorDescription.Expose())
+					require.Equal(t, "urn:private", re.ErrorURI.Expose())
+				} else {
+					require.Empty(t, re.ErrorCode.Expose())
+				}
+			}
+		})
+	}
+}
+
+func TestTransportErrorChain(t *testing.T) {
+	t.Parallel()
+
+	refused := errors.New("redirect refused: private")
+
+	size := &httpclient.ResponseSizeError{Status: 403}
+	for _, tc := range []struct {
+		name  string
+		cause error
+	}{
+		{"redirect", refused}, {"size", size}, {"canceled", context.Canceled}, {"deadline", context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			transport := &url.Error{Op: "POST", URL: "https://private", Err: tc.cause}
+			d := httpx.DoerFunc(func(*http.Request) (*http.Response, error) { cancel(); return nil, transport })
+			_, err := jwtbearer.Exchange(ctx, d, endpoint, "private")
+			require.ErrorIs(t, err, jwtbearer.ErrRequest)
+			require.ErrorIs(t, err, tc.cause)
+			require.ErrorIs(t, err, context.Canceled)
+			got, ok := errors.AsType[*url.Error](err)
+			require.True(t, ok)
+			require.Same(t, transport, got)
+
+			if tc.cause == size {
+				require.Same(t, size, httpclient.IsResponseSizeError(err))
+			}
+
 			require.NotContains(t, err.Error(), "private")
 		})
 	}
