@@ -13,6 +13,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,15 +23,21 @@ import (
 	"github.com/altessa-s/go-atlas-net/httpx"
 )
 
-// MaxResponseBytes bounds successful and unsuccessful response bodies.
+// MaxResponseBytes is the default limit for successful and unsuccessful response bodies.
 const MaxResponseBytes = 1 << 20
 
 // ResponseError describes a rejected response. Bytes is the observed body
-// length, capped at MaxResponseBytes+1. Unwrap identifies the failure class.
+// length, capped at the configured limit plus one. Unwrap identifies the failure class.
 type ResponseError struct {
 	Status int
 	Bytes  int
-	cause  error
+	// Body is the bounded body of a rejected HTTP response. The OAuth fields
+	// are populated when the complete body contains an RFC 6749 error object.
+	Body             redacted.RedactedString
+	ErrorCode        redacted.RedactedString
+	ErrorDescription redacted.RedactedString
+	ErrorURI         redacted.RedactedString
+	cause            error
 }
 
 // Error returns a secret-free diagnostic.
@@ -42,18 +49,18 @@ func (e *ResponseError) Error() string {
 func (e *ResponseError) Unwrap() error { return e.cause }
 
 // Exchange posts an externally signed assertion directly on ctx. This supports
-// callers with existing signing algorithms or retry policies. WithClock and
-// WithInsecureHTTP apply. Custom Doers must honor context and disable redirects.
+// callers with existing signing algorithms or retry policies. Endpoint, clock, response size and expiry options apply.
+// Custom Doers must honor context and disable redirects.
 func Exchange(ctx context.Context, doer httpx.Doer, endpoint, assertion string, opts ...Option) (Token, error) {
 	o := newOptions(opts...)
 	if nilcheck.IsNil(doer) || nilcheck.IsNil(o.clock) || assertion == "" || !validEndpoint(endpoint, o) {
 		return Token{}, ErrConfig
 	}
 
-	return exchange(ctx, noRedirect(doer), endpoint, assertion, o.clock.Now(), o.optionalExpiry)
+	return exchange(ctx, noRedirect(doer), endpoint, assertion, o.clock.Now(), o)
 }
 
-func exchange(ctx context.Context, doer httpx.Doer, endpoint, assertion string, now time.Time, optionalExpiry bool) (Token, error) {
+func exchange(ctx context.Context, doer httpx.Doer, endpoint, assertion string, now time.Time, o *options) (Token, error) {
 	form := url.Values{"grant_type": {GrantType}, "assertion": {assertion}}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
@@ -74,27 +81,26 @@ func exchange(ctx context.Context, doer httpx.Doer, endpoint, assertion string, 
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, min(o.maxResponseBytes, math.MaxInt64-1)+1))
 
 	failure := &ResponseError{Status: resp.StatusCode, Bytes: len(data), cause: ErrRequest}
 	if err != nil {
-		if cause := requestError(ctx, err); cause != ErrRequest {
-			return Token{}, cause
-		}
+		failure.cause = requestError(ctx, err)
 
 		return Token{}, failure
 	}
 
 	if !httpx.IsSuccess(resp.StatusCode) {
+		failure.setOAuthError(data, o.maxResponseBytes)
 		return Token{}, failure
 	}
 
 	failure.cause = ErrResponse
-	if len(data) > MaxResponseBytes {
+	if int64(len(data)) > o.maxResponseBytes {
 		return Token{}, failure
 	}
 
-	tok, err := parseResponse(data, now, optionalExpiry)
+	tok, err := parseResponse(data, now, o)
 	if err != nil {
 		return Token{}, failure
 	}
@@ -102,21 +108,38 @@ func exchange(ctx context.Context, doer httpx.Doer, endpoint, assertion string, 
 	return tok, nil
 }
 
-func requestError(ctx context.Context, err error) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-
-	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
-		if errors.Is(err, cause) {
-			return cause
+func (e *ResponseError) setOAuthError(data []byte, limit int64) {
+	e.Body = redacted.RedactedString(data[:min(int64(len(data)), limit)])
+	if int64(len(data)) <= limit {
+		var fields struct {
+			Code        string `json:"error"`
+			Description string `json:"error_description"`
+			URI         string `json:"error_uri"`
+		}
+		if json.Unmarshal(data, &fields) == nil {
+			e.ErrorCode = redacted.RedactedString(fields.Code)
+			e.ErrorDescription = redacted.RedactedString(fields.Description)
+			e.ErrorURI = redacted.RedactedString(fields.URI)
 		}
 	}
-
-	return ErrRequest
 }
 
-func parseResponse(data []byte, now time.Time, optionalExpiry bool) (Token, error) {
+// transportError exposes transport and context causes only through unwrapping.
+type transportError struct{ cause error }
+
+func (e *transportError) Error() string        { return ErrRequest.Error() }
+func (e *transportError) Unwrap() error        { return e.cause }
+func (e *transportError) Is(target error) bool { return target == ErrRequest }
+
+func requestError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+		err = errors.Join(err, ctxErr)
+	}
+
+	return &transportError{cause: err}
+}
+
+func parseResponse(data []byte, now time.Time, o *options) (Token, error) {
 	var v struct {
 		Access     string      `json:"access_token"`
 		Refresh    string      `json:"refresh_token"`
@@ -130,15 +153,9 @@ func parseResponse(data []byte, now time.Time, optionalExpiry bool) (Token, erro
 		return Token{}, ErrResponse
 	}
 
-	var expiry time.Time
-
-	if !optionalExpiry || (v.Seconds != "" && v.Seconds != "0") {
-		secs, err := v.Seconds.Int64()
-		if err != nil || secs <= 0 || secs > math.MaxInt64/int64(time.Second) {
-			return Token{}, ErrResponse
-		}
-
-		expiry = now.Add(time.Duration(secs) * time.Second)
+	expiry, err := o.tokenExpiry(v.Seconds, now)
+	if err != nil {
+		return Token{}, err
 	}
 
 	return Token{
@@ -150,4 +167,31 @@ func parseResponse(data []byte, now time.Time, optionalExpiry bool) (Token, erro
 		IssuedTokenType: v.IssuedType,
 		Expiry:          expiry,
 	}, nil
+}
+
+func (o *options) tokenExpiry(seconds json.Number, now time.Time) (time.Time, error) {
+	if o.optionalExpiry && (seconds == "" || seconds == "0") {
+		return time.Time{}, nil
+	}
+	// json.Number already validated the JSON syntax. Exclude signed, fractional
+	// and exponential forms before treating an integer range error as saturation.
+	if strings.ContainsAny(seconds.String(), "-.eE") {
+		return time.Time{}, ErrResponse
+	}
+
+	secs, err := seconds.Int64()
+	if secs <= 0 || (err != nil && !errors.Is(err, strconv.ErrRange)) {
+		return time.Time{}, ErrResponse
+	}
+
+	lifetime := time.Duration(math.MaxInt64)
+	if secs <= math.MaxInt64/int64(time.Second) {
+		lifetime = time.Duration(secs) * time.Second
+	}
+
+	if o.maxLifetime > 0 {
+		lifetime = min(lifetime, o.maxLifetime)
+	}
+
+	return now.Add(lifetime), nil
 }

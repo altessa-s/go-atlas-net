@@ -14,16 +14,17 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/altessa-s/go-atlas-core/runtime/singleflight"
 	"github.com/altessa-s/go-atlas-core/types/nilcheck"
 	"github.com/altessa-s/go-atlas-core/types/redacted"
 
 	"github.com/altessa-s/go-atlas-net/httpx"
-	"github.com/altessa-s/go-atlas-net/urlx"
 )
 
 // GrantType identifies the RFC 7523 authorization grant.
@@ -69,7 +70,11 @@ type Source struct {
 // Custom Doers must honor context and disable redirects. Use ParsePrivateKey for PEM.
 func New(doer httpx.Doer, endpoint, issuer string, signer crypto.Signer, opts ...Option) (*Source, error) {
 	o := newOptions(opts...)
-	if nilcheck.IsNil(doer) || nilcheck.IsNil(signer) || nilcheck.IsNil(o.clock) || strings.TrimSpace(issuer) == "" {
+	if nilcheck.IsNil(doer) || nilcheck.IsNil(signer) || nilcheck.IsNil(o.clock) || issuer == "" {
+		return nil, ErrConfig
+	}
+
+	if !utf8.ValidString(issuer) || !utf8.ValidString(o.keyID) || !utf8.ValidString(o.subject) {
 		return nil, ErrConfig
 	}
 
@@ -113,14 +118,12 @@ func New(doer httpx.Doer, endpoint, issuer string, signer crypto.Signer, opts ..
 }
 
 func validEndpoint(endpoint string, o *options) bool {
-	schemes := []string{"https"}
-	if o.insecureHTTP {
-		schemes = append(schemes, "http")
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Hostname() == "" || u.User != nil || strings.Contains(endpoint, "#") {
+		return false
 	}
 
-	_, err := urlx.ParseBaseURL(endpoint, urlx.WithAllowedSchemes(schemes...), urlx.WithEndpointMode())
-
-	return err == nil
+	return u.Scheme == "https" || (o.insecureHTTP && u.Scheme == "http")
 }
 
 func noRedirect(doer httpx.Doer) httpx.Doer {
@@ -198,5 +201,5 @@ func (s *Source) fetch(ctx context.Context, now time.Time) (Token, error) {
 		return Token{}, err
 	}
 
-	return exchange(ctx, s.doer, s.endpoint, assertion, now, s.opts.optionalExpiry)
+	return exchange(ctx, s.doer, s.endpoint, assertion, now, s.opts)
 }

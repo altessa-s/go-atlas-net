@@ -13,12 +13,15 @@ import (
 
 func FuzzTokenResponse(f *testing.F) {
 	f.Add([]byte(`{"access_token":"secret","expires_in":"3600"}`))
+	f.Add([]byte(`{"access_token":"secret","expires_in":99999999999999999999999999}`))
 	f.Add([]byte(`{"access_token":"secret","expires_in":-1}`))
 
 	now := time.Unix(0, 0)
 
+	opts := defaultOptions()
+
 	f.Fuzz(func(t *testing.T, data []byte) {
-		tok, err := parseResponse(data, now, false)
+		tok, err := parseResponse(data, now, opts)
 		if err != nil {
 			require.Equal(t, ErrResponse, err)
 			require.Zero(t, tok)

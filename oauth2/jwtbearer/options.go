@@ -16,12 +16,14 @@ import (
 const DefaultExpiryMargin = 10 * time.Second
 
 type options struct {
-	clock          clock.Clock   `optgen:"default=clock.Real()"`
-	expiryMargin   time.Duration `optgen:"default=DefaultExpiryMargin" optval:"positive=allow_zero"`
-	scopes         []string
-	subject        string
-	audience       string
-	keyID          string
-	optionalExpiry bool
-	insecureHTTP   bool
+	clock            clock.Clock   `optgen:"default=clock.Real()"`
+	expiryMargin     time.Duration `optgen:"default=DefaultExpiryMargin" optval:"positive=allow_zero"`
+	scopes           []string
+	subject          string `optval:"notrim"`
+	audience         string
+	keyID            string        `optval:"notrim"`
+	maxResponseBytes int64         `optgen:"default=MaxResponseBytes" optval:"positive"`
+	maxLifetime      time.Duration `optval:"positive=allow_zero"`
+	optionalExpiry   bool
+	insecureHTTP     bool
 }

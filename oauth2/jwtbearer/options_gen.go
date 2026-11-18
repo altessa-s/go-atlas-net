@@ -73,12 +73,31 @@ func WithKeyID[T interface{ string | *string }](v T) Option {
 			}
 			value = *t
 		}
-		transformedValue := strings.TrimSpace(value)
 
-		if transformedValue == "" {
+		if value == "" {
 			return
 		}
-		o.keyID = transformedValue
+		o.keyID = value
+	}
+}
+
+// WithMaxLifetime sets the maxLifetime option.
+func WithMaxLifetime(v time.Duration) Option {
+	return func(o *options) {
+		if v < 0 {
+			return
+		}
+		o.maxLifetime = v
+	}
+}
+
+// WithMaxResponseBytes sets the maxResponseBytes option.
+func WithMaxResponseBytes(v int64) Option {
+	return func(o *options) {
+		if v <= 0 {
+			return
+		}
+		o.maxResponseBytes = v
 	}
 }
 
@@ -128,20 +147,20 @@ func WithSubject[T interface{ string | *string }](v T) Option {
 			}
 			value = *t
 		}
-		transformedValue := strings.TrimSpace(value)
 
-		if transformedValue == "" {
+		if value == "" {
 			return
 		}
-		o.subject = transformedValue
+		o.subject = value
 	}
 }
 
 // defaultOptions returns the default values for options.
 func defaultOptions() *options {
 	return &options{
-		clock:        clock.Real(),
-		expiryMargin: DefaultExpiryMargin,
+		clock:            clock.Real(),
+		expiryMargin:     DefaultExpiryMargin,
+		maxResponseBytes: MaxResponseBytes,
 	}
 }
 

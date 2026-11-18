@@ -5,8 +5,13 @@
 package proxyconfig_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"net"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -54,8 +59,12 @@ func TestURL(t *testing.T) {
 	for raw, want := range map[string]error{
 		"": proxyconfig.ErrURL, "http://%": proxyconfig.ErrURL, "proxy": proxyconfig.ErrURL, "http://:123": proxyconfig.ErrURL,
 		"ftp://p:1": proxyconfig.ErrURL, "http://p": proxyconfig.ErrPort, "http://p:0": proxyconfig.ErrPort, "http://p:65536": proxyconfig.ErrPort,
-		"http://u:p@p:1": proxyconfig.ErrURL, "http://p:1/a@b": proxyconfig.ErrURL, "http://p:1?q": proxyconfig.ErrURL,
-		"http://p:1#frag": proxyconfig.ErrURL, "http://p:1/path": proxyconfig.ErrURL,
+		"http://u:p@@p:1": proxyconfig.ErrURL, "http://p:1/a@b": proxyconfig.ErrURL, "http://p:1?q": proxyconfig.ErrURL,
+		"http://p:1/%2F": proxyconfig.ErrURL,
+		"http://p:1/??":  proxyconfig.ErrURL, "http://p:1/##": proxyconfig.ErrURL,
+		"http://p:1/?x#": proxyconfig.ErrURL, "http://p:1/#x?": proxyconfig.ErrURL, "http://p:1#frag": proxyconfig.ErrURL, "http://p:1/path": proxyconfig.ErrURL,
+		"http://p:1?": nil, "http://p:1/#": nil, "http://p:1/?#": nil,
+		"http://u@p:1": nil, "https://u:p%40ss@p:1": nil, "socks5://u:p%2Fss@p:1": nil, "socks5h://u:p@p:1": nil,
 		"http://p:1": nil, "https://p:65535/": nil, "socks5://p:1080": nil, "socks5h://[::1]:1080": nil,
 	} {
 		t.Run(raw, func(t *testing.T) {
@@ -66,7 +75,9 @@ func TestURL(t *testing.T) {
 			require.ErrorIs(t, err, want)
 
 			if want == nil {
-				require.Equal(t, raw, u.String())
+				require.Equal(t, strings.TrimSuffix(raw, "#"), u.String())
+			} else {
+				require.Nil(t, u)
 			}
 		})
 	}
@@ -75,7 +86,10 @@ func TestURL(t *testing.T) {
 func TestHost(t *testing.T) {
 	t.Parallel()
 
-	for _, host := range []string{"[::1]", "fe80::1%lo", "p:80", "p..t", "-p", "p-", "p_t", "bücher", strings.Repeat("a", 64), strings.Repeat("a.", 127) + "x"} {
+	for _, host := range []string{
+		"", "[::1]", "p:80", "127.0.0.1:80", "[fe80::1%lo]:80", "proxy/name", "u@proxy",
+		"p q", "p\u00a0q", "p\x00q", "p\u0085q", "fe80::1%eth/0", "fe80::1%a@b", "fe80::1%a\tb",
+	} {
 		t.Run(host, func(t *testing.T) {
 			t.Parallel()
 
@@ -84,7 +98,10 @@ func TestHost(t *testing.T) {
 		})
 	}
 
-	for _, host := range []string{"proxy.test.", "127.0.0.1", "::1"} {
+	for _, host := range []string{
+		"proxy.test.", "127.0.0.1", "::1", "fe80::1%eth0", "p..t", "-p", "p-", "p_t", "bücher",
+		strings.Repeat("a", 64), strings.Repeat("a.", 127) + "x",
+	} {
 		t.Run(host, func(t *testing.T) {
 			t.Parallel()
 
@@ -92,6 +109,10 @@ func TestHost(t *testing.T) {
 			u, err := c.URLValue()
 			require.NoError(t, err)
 			require.Equal(t, host, u.Hostname())
+			parsed, err := url.Parse(u.String())
+			require.NoError(t, err)
+			require.Equal(t, host, parsed.Hostname())
+			require.Equal(t, "u", parsed.User.Username())
 			_, present := u.User.Password()
 			require.False(t, present)
 		})
@@ -137,17 +158,83 @@ func TestWireSchema(t *testing.T) {
 	}
 }
 
+func TestURLRedaction(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		raw  redacted.RedactedString
+		want error
+	}{
+		{"valid", "https://secret-user:secret-password@proxy:443", nil},
+		{"ambiguous", "http://user:prefix@secret-host:80/rest@proxy:80", proxyconfig.ErrURL},
+		{"malformed", "http://secret-user:%xx@p:80", proxyconfig.ErrURL},
+		{"missing port", "http://secret-user@p", proxyconfig.ErrPort},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := proxyconfig.Config{Mode: proxyconfig.ModeURL, URL: tc.raw}
+			err := c.Validate()
+			require.ErrorIs(t, err, tc.want)
+
+			if err != nil {
+				require.NotContains(t, err.Error(), "secret")
+			}
+
+			j, err := json.Marshal(c)
+			require.NoError(t, err)
+			y, err := yaml.Marshal(c)
+			require.NoError(t, err)
+
+			var logs bytes.Buffer
+			slog.New(slog.NewTextHandler(&logs, nil)).Info("proxy", "config", c)
+
+			for _, out := range []string{string(j), string(y), logs.String(), fmt.Sprintf("%v %+v %#v", c, c, c)} {
+				require.NotContains(t, out, "secret")
+			}
+		})
+	}
+}
+
 func FuzzURLValue(f *testing.F) {
-	f.Add("socks5://proxy:1080")
+	for _, seed := range []string{"socks5://proxy:1080", "https://u:p%40ss@p:443/?#", "http://u:p@@p:80", "fe80::1%eth0", "proxy_local", "p:123"} {
+		f.Add(seed)
+	}
+
 	f.Fuzz(func(t *testing.T, raw string) {
-		c := proxyconfig.Config{Mode: "url", URL: redacted.RedactedString(raw)}
+		c := proxyconfig.Config{Mode: proxyconfig.ModeURL, URL: redacted.RedactedString(raw)}
 
 		u, err := c.URLValue()
-		if err == nil {
-			require.NotNil(t, u)
-			require.Nil(t, u.User)
-			require.NotEmpty(t, u.Port())
+		if err != nil {
+			require.Nil(t, u)
+			require.Contains(t, []error{proxyconfig.ErrURL, proxyconfig.ErrPort}, err)
+		} else {
+			require.False(t, redacted.URL(raw).HasAmbiguousUserInfo())
+			require.Contains(t, []string{"http", "https", "socks5", "socks5h"}, u.Scheme)
+			require.Contains(t, []string{"", "/"}, u.EscapedPath())
+			require.Empty(t, u.RawQuery)
+			require.Empty(t, u.Fragment)
 			require.NotEmpty(t, u.Hostname())
+			port, portErr := strconv.Atoi(u.Port())
+			require.NoError(t, portErr)
+			require.Greater(t, port, 0)
+			require.LessOrEqual(t, port, 65535)
+
+			parsed, parseErr := url.Parse(raw)
+			require.NoError(t, parseErr)
+			require.Equal(t, parsed, u)
+		}
+
+		host := proxyconfig.Config{Mode: proxyconfig.ModeHost, Host: raw, Port: 80}
+
+		u, err = host.URLValue()
+		if err != nil {
+			require.ErrorIs(t, err, proxyconfig.ErrHost)
+			require.Nil(t, u)
+		} else {
+			require.Equal(t, net.JoinHostPort(raw, "80"), u.Host)
+			require.Equal(t, "http", u.Scheme)
 		}
 	})
 }
