@@ -24,6 +24,16 @@ lives in [`http/client`](../http/client), client IP resolution in [`clientip`](.
 | `IsSuccess`  | Reports whether a status code is in the 2xx class |
 | `IsRedirect` | Reports whether a status code is in the 3xx class |
 
+## Header parsing
+
+| Function                            | Description                                                                    |
+|-------------------------------------|--------------------------------------------------------------------------------|
+| `ParseRetryAfter(h, now, maxDelay)` | Reads delta seconds or an HTTP date and caps the result when `maxDelay > 0`    |
+| `ParseBearer(values)`               | Requires one Bearer credential with a token of at most `MaxBearerLength` bytes |
+
+Pass `req.Header.Values("Authorization")` for HTTP or `md.Get("authorization")` for gRPC so the parser can detect duplicates. Use `errors.Is` to check
+for `ErrBearerMissing`, `ErrBearerMultiple`, `ErrBearerMalformed`, or `ErrBearerTooLong`.
+
 ## Usage
 
 ```go

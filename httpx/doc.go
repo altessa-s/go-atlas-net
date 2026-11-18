@@ -23,6 +23,11 @@
 // such as clientip.HeaderGetter; its gRPC counterpart is
 // grpc/metadata.HeaderGetter.
 //
+// # Header parsing
+//
+// [ParseRetryAfter] reads delta seconds or an HTTP date with an optional delay cap.
+// [ParseBearer] reads one Authorization value from HTTP headers or gRPC metadata.
+//
 // # Adapters
 //
 // RoundTripperFunc lets a function implement [net/http.RoundTripper]. Doer is
