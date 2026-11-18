@@ -11,10 +11,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/altessa-s/go-atlas-core/types/redacted"
-
-	"github.com/altessa-s/go-atlas-net/urlx"
 )
 
 // Mode selects the proxy configuration. The empty value preserves transport defaults.
@@ -27,11 +26,7 @@ const (
 	ModeHost Mode = "host"
 )
 
-const (
-	maxHostnameLength  = 253
-	maxHostLabelLength = 63
-	maxPort            = 65535
-)
+const maxPort = 65535
 
 // Validation errors identify the rejected field without retaining its value.
 var (
@@ -91,17 +86,7 @@ func (c *Config) URLValue() (*url.URL, error) {
 	case "", ModeNone:
 		return nil, nil //nolint:nilnil // nil selects no explicit proxy URL
 	case ModeURL:
-		u, err := urlx.ParseBaseURL(c.URL.Expose(), urlx.WithAllowedSchemes("http", "https", "socks5", "socks5h"), urlx.WithEndpointMode())
-		if err != nil || (u.EscapedPath() != "" && u.EscapedPath() != "/") {
-			return nil, ErrURL
-		}
-
-		port, err := strconv.Atoi(u.Port())
-		if err != nil || port < 1 || port > maxPort {
-			return nil, ErrPort
-		}
-
-		return u, nil
+		return parseProxyURL(redacted.URL(c.URL))
 	case ModeHost:
 		if !validProxyHost(c.Host) {
 			return nil, ErrHost
@@ -129,29 +114,41 @@ func (c *Config) URLValue() (*url.URL, error) {
 	}
 }
 
-// validProxyHost accepts an unbracketed, zone-free IP or an ASCII DNS name.
-// International names must be supplied as punycode: URL.String would escape
-// Unicode input. Ports and IPv6 brackets belong only in URLValue's assembly.
-func validProxyHost(host string) bool {
-	if ip, err := netip.ParseAddr(host); err == nil {
-		return ip.Zone() == ""
+func parseProxyURL(raw redacted.URL) (*url.URL, error) {
+	u, err := url.Parse(raw.Expose())
+	if err != nil || u.Hostname() == "" || raw.HasAmbiguousUserInfo() {
+		return nil, ErrURL
 	}
 
-	name := strings.TrimSuffix(host, ".")
-	if name == "" || len(name) > maxHostnameLength {
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return nil, ErrURL
+	}
+
+	if path := u.EscapedPath(); (path != "" && path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return nil, ErrURL
+	}
+
+	port, err := strconv.Atoi(u.Port())
+	if err != nil || port < 1 || port > maxPort {
+		return nil, ErrPort
+	}
+
+	return u, nil
+}
+
+func validProxyHost(host string) bool {
+	if host == "" || strings.ContainsAny(host, "/@") || strings.ContainsFunc(host, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}) {
 		return false
 	}
 
-	for label := range strings.SplitSeq(name, ".") {
-		if len(label) == 0 || len(label) > maxHostLabelLength || label[0] == '-' || label[len(label)-1] == '-' {
-			return false
-		}
-
-		for _, c := range label {
-			if c != '-' && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
-				return false
-			}
-		}
+	// A colon belongs to an unbracketed IPv6 literal. The port is a separate field.
+	if strings.Contains(host, ":") {
+		_, err := netip.ParseAddr(host)
+		return err == nil
 	}
 
 	return true
