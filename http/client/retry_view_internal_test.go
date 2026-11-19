@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -353,3 +354,97 @@ func TestRetryRoundTripper_ZeroRetriesLeaveBodyAsIs(t *testing.T) {
 	require.True(t, sameBody, "the caller's body is handed on unbuffered")
 	require.Equal(t, int32(1), body.closes.Load())
 }
+
+// TestRetryRoundTripper_AwaitsPreviousLiveBody checks that a retry reusing
+// the caller's live trailers waits until the previous attempt's body, still
+// being read when its reply came back, is closed.
+func TestRetryRoundTripper_AwaitsPreviousLiveBody(t *testing.T) {
+	t.Parallel()
+
+	var (
+		calls       int
+		firstClosed atomic.Bool
+		closedAtTwo bool
+	)
+
+	req := newTrailerRequest(t)
+
+	rt := &retryRoundTripper{
+		observer:          NoopObserver{},
+		retryableStatuses: DefaultRetryableStatuses(),
+		next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 {
+				// The reply returns while the upload still holds the body.
+				body := r.Body
+
+				go func() {
+					time.Sleep(50 * time.Millisecond)
+
+					buf := make([]byte, 2)
+					_, _ = body.Read(buf) // a partial read: the body never reaches EOF
+
+					firstClosed.Store(true)
+
+					_ = body.Close()
+				}()
+
+				return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Request: r}, nil
+			}
+
+			closedAtTwo = firstClosed.Load()
+
+			_, _ = io.Copy(io.Discard, r.Body)
+			_ = r.Body.Close()
+
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+		}),
+		retryOpts:   newTestRetryOpts(2),
+		maxAttempts: 2,
+	}
+
+	resp, err := rt.RoundTrip(req)
+	require.NoError(t, err)
+
+	_ = resp.Body.Close()
+
+	require.Equal(t, 2, calls)
+	require.True(t, closedAtTwo, "the retry started only after the first body was closed")
+}
+
+// TestRetryRoundTripper_BufferFailureReportsSnapshot checks that a buffering
+// failure is reported for the snapshot, even when reading the body edited the
+// caller's request.
+func TestRetryRoundTripper_BufferFailureReportsSnapshot(t *testing.T) {
+	t.Parallel()
+
+	var hosts []string
+
+	rt := &retryRoundTripper{
+		observer:          hostRecorder{hosts: &hosts},
+		retryableStatuses: DefaultRetryableStatuses(),
+		next: httpx.RoundTripperFunc(func(*http.Request) (*http.Response, error) {
+			t.Error("no attempt is made")
+			return nil, errors.New("unreachable")
+		}),
+		retryOpts:   newTestRetryOpts(2),
+		maxAttempts: 2,
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, "http://example.com/path", nil)
+	require.NoError(t, err)
+
+	req.Body = io.NopCloser(readerFunc(func([]byte) (int, error) {
+		req.URL = &url.URL{Scheme: "http", Host: "edited.test"}
+		return 0, errors.New("read failed")
+	}))
+
+	_, err = rt.RoundTrip(req) //nolint:bodyclose // a failed round trip returns no response
+	require.Error(t, err)
+	require.Equal(t, []string{"example.com"}, hosts)
+}
+
+// readerFunc adapts a function to io.Reader.
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }

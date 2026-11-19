@@ -262,3 +262,36 @@ func TestResponseView_FullDuplexHTTP2(t *testing.T) {
 	require.Equal(t, "abc", gotTrailer, "the upload's trailer is not the view's edit")
 	require.Equal(t, "abc", req.Trailer.Get("X-Sum"), "the view's edit never reaches the caller's map")
 }
+
+// TestWithHeaders_ReplacesEarlierKeyVariants checks that WithHeaders setting
+// an idempotency key replaces the values an earlier option set under any case
+// of the name, so the request carries only the batch's key.
+func TestWithHeaders_ReplacesEarlierKeyVariants(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu   sync.Mutex
+		keys [][]string
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+
+		keys = append(keys, r.Header.Values("Idempotency-Key"))
+		mu.Unlock()
+	}))
+	t.Cleanup(srv.Close)
+
+	rawKey := func(req *http.Request) { req.Header["idempotency-key"] = []string{"OLD"} }
+
+	resp, err := httpclient.NewHTTPClient(loopback).PostWithOptions(t.Context(), srv.URL, "text/plain", strings.NewReader("x"),
+		rawKey, httpclient.WithHeaders(pairs([2]string{"Idempotency-Key", "A"})))
+	require.NoError(t, err)
+
+	_ = resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	require.Equal(t, [][]string{{"A"}}, keys)
+}

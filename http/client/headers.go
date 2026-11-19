@@ -40,8 +40,9 @@ func setHeaders(h http.Header, entries map[string]string) {
 // setHeaderSeq applies seq to h in iteration order: an ordinary entry replaces
 // the header's values (Set), so the later of two case variants wins. The
 // Idempotency-Key and X-Idempotency-Key entries (one value per exact key, the
-// later winning) replace any earlier value of their header and are all kept
-// (Add), so the client refuses case variants as ambiguous.
+// later winning) replace every earlier value of their header, under any ASCII
+// case of its name, and are all kept (Add), so the client refuses case
+// variants within the batch as ambiguous.
 func setHeaderSeq(h http.Header, seq iter.Seq2[string, string]) {
 	var (
 		keys  []string
@@ -61,8 +62,15 @@ func setHeaderSeq(h http.Header, seq iter.Seq2[string, string]) {
 		value[k] = v
 	}
 
-	for _, k := range keys {
-		h.Del(k)
+	// The batch replaces every earlier value of an idempotency header it
+	// sets, under any case of its name, before adding its own variants.
+	for name := range h {
+		for _, k := range keys {
+			if asciiEqualFold(name, k) {
+				delete(h, name)
+				break
+			}
+		}
 	}
 
 	for _, k := range keys {

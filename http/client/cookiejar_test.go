@@ -289,17 +289,35 @@ func TestCookiesFollowTheHostHeader(t *testing.T) {
 
 // TestRedirectDropsInitialCookiesTheChainSet: like http.Client with a jar, an
 // initial cookie that a redirect reply replaces or deletes is not forwarded
-// to the next hops (the jar's value is sent instead, if any).
+// to the next hops (the jar's value is sent instead, if any). A retry policy
+// that strips Set-Cookie from the reply it sees and from the previous reply
+// of the chain changes nothing: the filtering uses what was received, and the
+// reply's request view exposes no redirect history.
 func TestRedirectDropsInitialCookiesTheChainSet(t *testing.T) {
 	t.Parallel()
+
+	strip := httpclient.WithRetryPolicyHandler(func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		if resp != nil {
+			resp.Header.Del("Set-Cookie")
+
+			if resp.Request != nil && resp.Request.Response != nil {
+				resp.Request.Response.Header.Del("Set-Cookie")
+			}
+		}
+
+		return httpclient.DefaultRetryPolicy(ctx, resp, err)
+	})
 
 	for _, tc := range []struct {
 		name string
 		set  *http.Cookie
 		want string
+		opts []httpclient.Option
 	}{
-		{"replaced", &http.Cookie{Name: "session", Value: "new", Path: "/"}, "user=1; session=new"},
-		{"deleted", &http.Cookie{Name: "session", Path: "/", MaxAge: -1}, "user=1"},
+		{"replaced", &http.Cookie{Name: "session", Value: "new", Path: "/"}, "user=1; session=new", nil},
+		{"deleted", &http.Cookie{Name: "session", Path: "/", MaxAge: -1}, "user=1", nil},
+		{"replaced, policy strips", &http.Cookie{Name: "session", Value: "new", Path: "/"}, "user=1; session=new", []httpclient.Option{strip}},
+		{"deleted, policy strips", &http.Cookie{Name: "session", Path: "/", MaxAge: -1}, "user=1", []httpclient.Option{strip}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -332,7 +350,7 @@ func TestRedirectDropsInitialCookiesTheChainSet(t *testing.T) {
 			srv := httptest.NewServer(mux)
 			t.Cleanup(srv.Close)
 
-			c := httpclient.New(loopback, httpclient.WithCookieJar(newCountingJar(t)))
+			c := httpclient.New(append([]httpclient.Option{loopback, httpclient.WithCookieJar(newCountingJar(t))}, tc.opts...)...)
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/from", nil)
 			require.NoError(t, err)
 			req.Header.Set("Cookie", "session=old; user=1")
