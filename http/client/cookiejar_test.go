@@ -730,3 +730,82 @@ func TestRedirectFromErrorHandlerReplyCarriesCookieNames(t *testing.T) {
 
 	require.Equal(t, []string{"user=1"}, seen)
 }
+
+// TestErrorHandlerRedirectWithoutRequest checks that an ErrorHandler's own
+// redirect reply with no request, and a malformed Location, is handled
+// without a panic, with and without a cookie jar: it gets a fresh view of
+// the attempted request.
+func TestErrorHandlerRedirectWithoutRequest(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	for name, jar := range map[string]bool{"with jar": true, "without jar": false} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			opts := []httpclient.Option{loopback, httpclient.WithRetryMax(0),
+				httpclient.WithErrorHandler(func(resp *http.Response, _ error, _ int) (*http.Response, error) {
+					if resp != nil {
+						_ = resp.Body.Close()
+					}
+
+					return &http.Response{
+						StatusCode: http.StatusFound,
+						Header:     http.Header{"Location": {"http://[::1"}},
+						Body:       http.NoBody,
+					}, nil
+				})}
+			if jar {
+				opts = append(opts, httpclient.WithCookieJar(newCountingJar(t)))
+			}
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+			require.NoError(t, err)
+			req.Header.Set("Cookie", "session=old")
+
+			require.NotPanics(t, func() {
+				resp, doErr := httpclient.New(opts...).Do(req)
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+
+				require.Error(t, doErr, "the malformed Location fails the redirect")
+			})
+		})
+	}
+}
+
+// TestErrorHandlerReplyGetsRequestView checks that an ErrorHandler's own
+// reply with no request reaches the caller with a view of the attempted
+// request.
+func TestErrorHandlerReplyGetsRequestView(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := httpclient.New(loopback, httpclient.WithRetryMax(0),
+		httpclient.WithErrorHandler(func(resp *http.Response, _ error, _ int) (*http.Response, error) {
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody}, nil
+		}))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/path", nil)
+	require.NoError(t, err)
+
+	resp, err := c.Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	require.NotNil(t, resp.Request)
+	require.Equal(t, srv.URL+"/path", resp.Request.URL.String())
+}

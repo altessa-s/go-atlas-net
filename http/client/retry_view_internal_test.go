@@ -9,6 +9,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"reflect"
 	"strings"
@@ -1155,4 +1157,140 @@ func TestRetryRoundTripper_HandedBodyReleased(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, int32(1), replacementCloses.Load(), "the handed replacement is released once")
 	require.Equal(t, int32(1), transportCloses.Load(), "the received body is released once")
+}
+
+// TestDriverUpgrade_CloseWrite checks that a 101 body through a transport
+// driver keeps its CloseWrite (the pool forwards it): the backend answers
+// only after the client half-closed the write side.
+func TestDriverUpgrade_CloseWrite(t *testing.T) {
+	t.Parallel()
+
+	s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, brw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+		_ = brw.Flush()
+
+		got, _ := io.ReadAll(brw) // until the client half-closes
+		_, _ = conn.Write(append([]byte("got "), got...))
+	}))
+	t.Cleanup(s.Close)
+
+	c := New(WithTransport(driverBase(s)), WithTransportDriver(driverFunc(standardDriver)), WithoutRetry(),
+		WithSSRFAllowedCIDRs(netip.MustParsePrefix("127.0.0.0/8")))
+	t.Cleanup(c.CloseIdleConnections)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, s.URL, nil)
+	require.NoError(t, err)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "echo")
+
+	resp, err := c.Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
+
+	rw, ok := resp.Body.(io.ReadWriteCloser)
+	require.True(t, ok, "writable, got %T", resp.Body)
+
+	cw, ok := resp.Body.(interface{ CloseWrite() error })
+	require.True(t, ok, "CloseWrite kept, got %T", resp.Body)
+
+	_, err = rw.Write([]byte("ping"))
+	require.NoError(t, err)
+	require.NoError(t, cw.CloseWrite())
+
+	reply, err := io.ReadAll(rw)
+	require.NoError(t, err)
+	require.Equal(t, "got ping", string(reply))
+}
+
+// TestRetryRoundTripper_PolicyReplacementsNeverCompared checks replacement
+// bodies a policy supplies that cannot be compared (a func-backed reader in
+// io.NopCloser, a value type holding a func): no panic, the replacement
+// closed exactly once, the received body released exactly once.
+func TestRetryRoundTripper_PolicyReplacementsNeverCompared(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		status int // of the first reply; 503 is retried, 200 returned
+	}{
+		"returned to the caller": {status: http.StatusOK},
+		"discarded for a retry":  {status: http.StatusServiceUnavailable},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var (
+				calls             int
+				transportCloses   atomic.Int32
+				replacementCloses atomic.Int32
+			)
+
+			rt := &retryRoundTripper{
+				observer:          NoopObserver{},
+				retryableStatuses: DefaultRetryableStatuses(),
+				retryPolicyHandler: func(_ context.Context, resp *http.Response, _ error) (bool, error) {
+					if calls > 1 {
+						return false, nil
+					}
+
+					if resp.StatusCode == http.StatusOK {
+						resp.Body = funcBody{
+							Reader:  io.NopCloser(readerFunc(func([]byte) (int, error) { return 0, io.EOF })),
+							onClose: func() { replacementCloses.Add(1) },
+						}
+
+						return false, nil
+					}
+
+					resp.Body = funcBody{Reader: strings.NewReader("x"), onClose: func() { replacementCloses.Add(1) }}
+
+					return true, nil
+				},
+				next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+					calls++
+
+					status := tc.status
+					if calls > 1 {
+						status = http.StatusOK
+					}
+
+					return &http.Response{
+						StatusCode: status,
+						Body:       countingBody{Reader: strings.NewReader("received"), closes: &transportCloses},
+						Request:    r,
+					}, nil
+				}),
+				retryOpts:   newTestRetryOpts(2),
+				maxAttempts: 2,
+			}
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com", nil)
+			require.NoError(t, err)
+
+			resp, err := rt.RoundTrip(req)
+			require.NoError(t, err)
+
+			_, _ = io.Copy(io.Discard, resp.Body)
+			require.NoError(t, resp.Body.Close())
+
+			require.Equal(t, int32(1), replacementCloses.Load(), "the replacement is closed exactly once")
+
+			wantTransport := int32(1)
+			if tc.status == http.StatusServiceUnavailable {
+				wantTransport = 2 // the discarded reply and the returned one
+			}
+
+			require.Equal(t, wantTransport, transportCloses.Load())
+		})
+	}
 }

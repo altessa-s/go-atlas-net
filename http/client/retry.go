@@ -364,8 +364,8 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 			// the ErrorHandler sees it with zero attempts, as it does when the
 			// context ended before the first attempt of a body it need not
 			// buffer.
-			resp, err := rt.finish(nil, nil, bufErr, 0)
-			resp, err = call.settle(resp, err, nil)
+			resp, handed, err := rt.finish(nil, nil, bufErr, 0)
+			resp, err = call.settle(resp, err, handed)
 			rt.requestDone(call.base, start, "unknown", 0, true)
 
 			return resp, err
@@ -414,12 +414,7 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	failed := retryErr != nil || call.lastErr != nil
 	lastResp := call.lastResp
 
-	var handed io.ReadCloser
-	if lastResp != nil {
-		handed = lastResp.Body
-	}
-
-	resp, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts)
+	resp, handed, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts)
 	resp, err = call.settle(resp, err, handed)
 
 	switch {
@@ -429,6 +424,11 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		// policy or the ErrorHandler did to the one they saw (its URL, its
 		// context and the cookie names recorded there), the redirect
 		// handling reads the library's own.
+		resp.Request = call.responseView(call.lastAttemptReq, call.cookieNameList())
+	case resp.Request == nil || resp.Request.URL == nil:
+		// An ErrorHandler's own reply without a usable request (a redirect
+		// among them) gets a fresh view of the attempted request, with the
+		// cookie names this hop's replies set.
 		resp.Request = call.responseView(call.lastAttemptReq, call.cookieNameList())
 	case rt.jar != nil:
 		// An ErrorHandler's own reply may be a redirect too: it carries the
@@ -651,7 +651,7 @@ func lowerASCII(b byte) byte {
 // It returns buffered false, leaving the body unread, when no buffering is
 // needed; otherwise getBody returns a fresh reader over the private copy.
 func (rt *retryRoundTripper) bufferBody(req *http.Request) (getBody func() (io.ReadCloser, error), buffered bool, err error) {
-	if req.Body == nil || req.Body == http.NoBody || req.GetBody != nil || rt.maxAttempts == 0 {
+	if req.Body == nil || isNoBody(req.Body) || req.GetBody != nil || rt.maxAttempts == 0 {
 		return nil, false, nil
 	}
 
@@ -782,7 +782,7 @@ type retryCall struct {
 	// owned is the body of the last reply, owned by the attempt until it is
 	// disposed of (dispose) or handed back to the caller. lastContentLength,
 	// lastRetryable and lastUnexpected record that reply as received.
-	owned             *ownedBody
+	owned             *bodyHandle
 	lastContentLength int64
 	lastRetryable     *retryableStatusError
 	lastUnexpected    *UnexpectedStatusError
@@ -1072,7 +1072,7 @@ func (c *retryCall) prepareTrailers(attempt *http.Request) {
 		attempt.Trailer = c.base.Trailer.Clone()
 	}
 
-	if c.req.Trailer == nil || c.callerBodyClosed || attempt.Body == nil || attempt.Body == http.NoBody {
+	if c.req.Trailer == nil || c.callerBodyClosed || attempt.Body == nil || isNoBody(attempt.Body) {
 		return // no trailers, or a private buffered copy that writes none
 	}
 
@@ -1091,7 +1091,7 @@ func (c *retryCall) prepareTrailers(attempt *http.Request) {
 			}
 
 			body, err := c.getBody()
-			if err != nil || body == nil || body == http.NoBody {
+			if err != nil || body == nil || isNoBody(body) {
 				return body, err
 			}
 
@@ -1147,7 +1147,7 @@ func (c *retryCall) try(ctx context.Context) error {
 	attempt := c.base.Clone(ctx)
 	attempt.Body = c.firstBody
 
-	hasBody := c.firstBody != nil && c.firstBody != http.NoBody
+	hasBody := c.firstBody != nil && !isNoBody(c.firstBody)
 	if !c.firstAttempt && hasBody {
 		// No body may still write the live trailers when the caller's
 		// GetBody is asked for the next one.
@@ -1351,43 +1351,55 @@ func unexpectedStatus(resp *http.Response) *UnexpectedStatusError {
 }
 
 // finish turns the outcome of the retry loop, after attempts attempts, into
-// the round trip result, before its bodies are settled (see settle).
-func (rt *retryRoundTripper) finish(lastResp *http.Response, lastErr, retryErr error, attempts int) (*http.Response, error) {
+// the round trip result, before its bodies are settled (see settle). The
+// ErrorHandler receives the reply with its body behind a close-once handle of
+// its own (handed), returned for the settlement.
+func (rt *retryRoundTripper) finish(
+	lastResp *http.Response, lastErr, retryErr error, attempts int,
+) (*http.Response, *bodyHandle, error) {
 	// Handle retry exhaustion and terminal errors (possibly with a response,
 	// e.g. a non-retryable or exhausted retryable status).
 	if retryErr != nil {
 		if rt.errorHandler != nil {
+			var handed *bodyHandle
+			if lastResp != nil && lastResp.Body != nil {
+				handed = &bodyHandle{ReadCloser: lastResp.Body}
+				lastResp.Body = withWriteSide(handed, lastResp.Body)
+			}
+
 			resp, err := rt.errorHandler(lastResp, retryErr, attempts)
 			// The handler's error is returned: it renders trusted text only,
 			// as a transport error does (it may quote resp.Request.URL).
-			return resp, redactTransportError(err)
+			return resp, handed, redactTransportError(err)
 		}
 
-		return lastResp, retryErr
+		return lastResp, nil, retryErr
 	}
 
-	return lastResp, lastErr
+	return lastResp, nil, lastErr
 }
 
 // settle disposes of the bodies of the round trip's outcome, enforcing the
 // [http.RoundTripper] contract that a response accompanies only a nil error
 // ([http.Client] drops a response returned with an error without closing
-// it). Three handles are involved: the body the last attempt received
-// (owned), the body the callbacks were last handed (handed: the reply's
-// body before the ErrorHandler ran, possibly a policy's replacement) and the
-// body of the reply returned (returned). With an error every one is released
-// exactly once. Without, a handle that is the returned body passes to the
-// caller, and the others are released when the returned body is closed (it
-// may wrap them), or at once when no body is returned.
-func (c *retryCall) settle(resp *http.Response, err error, handed io.ReadCloser) (*http.Response, error) {
+// it). Ownership is decided only by the identity of the library's own
+// close-once handles (bodyHandle), never by comparing bodies: the body the
+// last attempt received (owned), the handle the ErrorHandler got (handed),
+// and whatever body is returned. With an error every one is released, each
+// handle once. Without, the returned body passes to the caller, and the
+// handles it is not are released when it is closed (it may wrap them), or at
+// once when no body is returned.
+func (c *retryCall) settle(resp *http.Response, err error, handed *bodyHandle) (*http.Response, error) {
 	if err != nil {
-		var returned io.ReadCloser
 		if resp != nil {
-			returned = resp.Body
+			c.discardBody(resp.Body)
 		}
 
-		c.release(returned, handed)
-		c.dispose(nil)
+		if handed != nil {
+			_ = handed.Close()
+		}
+
+		c.releaseOwned()
 
 		return nil, err
 	}
@@ -1397,46 +1409,15 @@ func (c *retryCall) settle(resp *http.Response, err error, handed io.ReadCloser)
 	return resp, nil
 }
 
-// release closes each handle once, skipping nil, http.NoBody and the owned
-// handle (disposed of by dispose).
-func (c *retryCall) release(handles ...io.ReadCloser) {
-	var done []io.ReadCloser
-
-	for _, h := range handles {
-		if h == nil || h == http.NoBody || c.owns(h) || slices.ContainsFunc(done, func(d io.ReadCloser) bool { return sameHandle(d, h) }) {
-			continue
-		}
-
-		done = append(done, h)
-		_ = h.Close()
-	}
-}
-
-// sameHandle reports whether a and b are the same body. A body of a type that
-// cannot be compared (a struct value holding a func, say) is never the same as
-// another: comparing it would panic.
-func sameHandle(a, b io.ReadCloser) bool {
-	if a == nil || b == nil {
-		return false
-	}
-
-	t := reflect.TypeOf(a)
-	if t != reflect.TypeOf(b) || !t.Comparable() {
-		return false
-	}
-
-	return a == b
-}
-
 // maxDiscardDrain caps how many bytes of a discarded response body are read
 // before closing it. Draining lets HTTP/1.1 reuse the connection; larger
 // bodies are cheaper to abandon together with their connection.
 const maxDiscardDrain = 64 << 10
 
-// ownedBody is the body of a reply, owned by the attempt that received it:
-// identified by this pointer, never by comparing arbitrary bodies, and
-// closed once.
-type ownedBody struct {
+// bodyHandle is a close-once pointer handle on a body: the body an attempt
+// received (owned), or the one the ErrorHandler is given. The library tells
+// bodies apart only by the identity of these handles.
+type bodyHandle struct {
 	io.ReadCloser
 
 	once sync.Once
@@ -1444,9 +1425,21 @@ type ownedBody struct {
 }
 
 // Close closes the body once.
-func (b *ownedBody) Close() error {
+func (b *bodyHandle) Close() error {
 	b.once.Do(func() { b.err = b.ReadCloser.Close() })
 	return b.err
+}
+
+// handleOf returns the bodyHandle body is (behind its write side), or nil.
+func handleOf(body io.ReadCloser) *bodyHandle {
+	h, _ := readSide(body).(*bodyHandle)
+	return h
+}
+
+// isNoBody reports whether body is http.NoBody, by its type: no body value is
+// ever compared.
+func isNoBody(body io.ReadCloser) bool {
+	return body != nil && reflect.TypeOf(body) == reflect.TypeOf(http.NoBody)
 }
 
 // own makes the attempt the owner of resp's body and returns the body to
@@ -1457,48 +1450,42 @@ func (c *retryCall) own(resp *http.Response) io.ReadCloser {
 		return nil
 	}
 
-	ob := &ownedBody{ReadCloser: resp.Body}
-	c.owned = ob
+	h := &bodyHandle{ReadCloser: resp.Body}
+	c.owned = h
 
-	return withWriteSide(ob, resp.Body)
+	return withWriteSide(h, resp.Body)
 }
 
-// owns reports whether body is the one the last attempt received and still
-// owns.
+// owns reports whether body is the handle of the body the last attempt
+// received, still owned.
 func (c *retryCall) owns(body io.ReadCloser) bool {
-	if c.owned == nil {
-		return false
-	}
-
-	b, ok := readSide(body).(*ownedBody)
-
-	return ok && b == c.owned
+	return c.owned != nil && handleOf(body) == c.owned
 }
 
-// handOver settles the received body when resp goes back to the caller, by
-// one rule whatever produced resp (the reply itself, a policy's edit, an
-// ErrorHandler's own reply): when resp.Body is the owned handle, ownership
-// passes to the caller; otherwise the received body is released when the
-// returned body is closed (it may wrap it), or at once when there is no
-// returned body to close (nil or http.NoBody). The returned stream is never
-// read or closed here.
-func (c *retryCall) handOver(resp *http.Response, handed io.ReadCloser) {
+// handOver settles the bodies when resp goes back to the caller: its body,
+// whatever it is (the received one, a policy's replacement, an
+// ErrorHandler's), passes to the caller; the owned and handed handles it is
+// not are released when it is closed, or at once when there is none (nil or
+// http.NoBody). The returned stream is never read or closed here.
+func (c *retryCall) handOver(resp *http.Response, handed *bodyHandle) {
 	var returned io.ReadCloser
 	if resp != nil {
 		returned = resp.Body
 	}
 
+	h := handleOf(returned)
+
 	var releases []io.Closer
 
-	if ob := c.owned; ob != nil {
-		c.owned = nil
-
-		if b, ok := readSide(returned).(*ownedBody); !ok || b != ob {
-			releases = append(releases, ob)
+	if c.owned != nil {
+		if h != c.owned {
+			releases = append(releases, c.owned)
 		}
+
+		c.owned = nil
 	}
 
-	if handed != nil && handed != http.NoBody && !isOwnedHandle(handed) && !sameHandle(handed, returned) {
+	if handed != nil && h != handed {
 		releases = append(releases, handed)
 	}
 
@@ -1506,7 +1493,7 @@ func (c *retryCall) handOver(resp *http.Response, handed io.ReadCloser) {
 		return
 	}
 
-	if returned == nil || returned == http.NoBody {
+	if returned == nil || isNoBody(returned) {
 		for _, r := range releases {
 			_ = r.Close()
 		}
@@ -1517,14 +1504,8 @@ func (c *retryCall) handOver(resp *http.Response, handed io.ReadCloser) {
 	resp.Body = withWriteSide(&releasingBody{ReadCloser: returned, release: releases}, returned)
 }
 
-// isOwnedHandle reports whether body is an owned reply handle (any attempt's).
-func isOwnedHandle(body io.ReadCloser) bool {
-	_, ok := readSide(body).(*ownedBody)
-	return ok
-}
-
 // releasingBody is a body handed to the caller in place of the received one:
-// closing it also releases the received body.
+// closing it also releases the handles it stands in for, once.
 type releasingBody struct {
 	io.ReadCloser
 
@@ -1532,7 +1513,7 @@ type releasingBody struct {
 	once    sync.Once
 }
 
-// Close closes the body, then releases the received one.
+// Close closes the body, then releases the handles.
 func (b *releasingBody) Close() error {
 	err := b.ReadCloser.Close()
 
@@ -1545,36 +1526,52 @@ func (b *releasingBody) Close() error {
 	return err
 }
 
-// dispose disposes of a discarded reply exactly once: a body a callback put in
-// place of the received one is closed directly; the received body, whatever
-// resp.Body now holds (nil included), is drained when the attempt ran under
-// its own deadline and the reply as received was small enough, then closed
-// (which also releases the attempt's deadline), and the attempt's ownership
-// ends.
-//
-// Bodies of a larger known length and protocol upgrades are closed without
-// reading, and so is every body of an attempt without a deadline: a stalled
-// upstream must not block the caller indefinitely. The drain stays
-// synchronous although [http.Transport] drains an unread body after Close
-// itself (Go 1.27): that drain runs in the background, so a retry sent right
-// after Close finds the connection still busy and dials another.
+// dispose disposes of a discarded reply between attempts (see discardBody
+// and releaseOwned).
 func (c *retryCall) dispose(resp *http.Response) {
-	if resp != nil && resp.Body != nil && !c.owns(resp.Body) {
-		_ = resp.Body.Close()
+	if resp != nil {
+		c.discardBody(resp.Body)
 	}
 
-	ob := c.owned
-	if ob == nil {
+	c.releaseOwned()
+}
+
+// discardBody disposes of a discarded body. The owned handle is drained first
+// when the attempt ran under its own deadline and the reply as received was
+// small enough: bodies of a larger known length and protocol upgrades are
+// closed without reading, and so is every body of an attempt without a
+// deadline, so a stalled upstream cannot block the caller. The drain stays
+// synchronous although [http.Transport] drains an unread body after Close
+// itself (Go 1.27): that drain runs in the background, so a retry sent right
+// after Close finds the connection still busy and dials another. Any other
+// body (a callback's) is closed directly, never read.
+func (c *retryCall) discardBody(body io.ReadCloser) {
+	if body == nil {
 		return
 	}
 
-	c.owned = nil
+	if c.owns(body) {
+		ob := c.owned
+		c.owned = nil
 
-	if c.attemptHasDeadline() && c.lastStatus != http.StatusSwitchingProtocols && c.lastContentLength <= maxDiscardDrain {
-		_, _ = io.Copy(io.Discard, io.LimitReader(ob.ReadCloser, maxDiscardDrain))
+		if c.attemptHasDeadline() && c.lastStatus != http.StatusSwitchingProtocols && c.lastContentLength <= maxDiscardDrain {
+			_, _ = io.Copy(io.Discard, io.LimitReader(ob.ReadCloser, maxDiscardDrain))
+		}
+
+		_ = ob.Close()
+
+		return
 	}
 
-	_ = ob.Close()
+	_ = body.Close()
+}
+
+// releaseOwned closes the owned handle, if still owned, without reading it.
+func (c *retryCall) releaseOwned() {
+	if c.owned != nil {
+		_ = c.owned.Close()
+		c.owned = nil
+	}
 }
 
 // attemptHasDeadline reports whether the last attempt ran under a deadline,
