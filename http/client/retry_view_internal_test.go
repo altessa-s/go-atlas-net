@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -861,10 +862,16 @@ type gatedBody struct {
 	release chan struct{}
 	r       io.Reader
 	trailer http.Header
-	done    *atomic.Bool // set as the Read returns
+	done    *atomic.Bool  // set as the Read returns
+	started chan struct{} // closed once a Read has begun (and is registered)
+	once    sync.Once
 }
 
 func (b *gatedBody) Read(p []byte) (int, error) {
+	if b.started != nil {
+		b.once.Do(func() { close(b.started) })
+	}
+
 	<-b.release
 
 	n, err := b.r.Read(p)
@@ -896,7 +903,8 @@ func TestRetryRoundTripper_TransportGetBodyAwaitsReads(t *testing.T) {
 	require.NoError(t, err)
 
 	req.Trailer = http.Header{"X-Sum": nil}
-	req.Body = &gatedBody{release: release, r: strings.NewReader("payload"), trailer: req.Trailer, done: &readDone}
+	started := make(chan struct{})
+	req.Body = &gatedBody{release: release, r: strings.NewReader("payload"), trailer: req.Trailer, done: &readDone, started: started}
 	req.GetBody = func() (io.ReadCloser, error) {
 		doneAtCall.Store(readDone.Load())
 		return &trailerBody{r: strings.NewReader("payload"), trailer: req.Trailer}, nil
@@ -907,17 +915,13 @@ func TestRetryRoundTripper_TransportGetBodyAwaitsReads(t *testing.T) {
 		retryableStatuses: DefaultRetryableStatuses(),
 		next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
 			body := r.Body
-			readStarted := make(chan struct{})
 
 			go func() {
-				close(readStarted)
-
 				buf := make([]byte, 64)
 				_, _ = body.Read(buf) // held until release
 			}()
 
-			<-readStarted
-			time.Sleep(10 * time.Millisecond) // let the Read begin
+			<-started // the Read is in flight, registered by the hook
 
 			_ = body.Close() // closed while the Read is still in flight
 
@@ -1048,4 +1052,107 @@ func TestRetryRoundTripper_ReturnedBodyOwnership(t *testing.T) {
 			require.Equal(t, int32(1), closes.Load(), "the received body is released exactly once")
 		})
 	}
+}
+
+// TestRetryRoundTripper_TransportRewindBoundedByAttempt checks that a
+// transport rewind waiting for an earlier body that never finishes gives up
+// at the attempt's deadline, though the request's context lives on.
+func TestRetryRoundTripper_TransportRewindBoundedByAttempt(t *testing.T) {
+	t.Parallel()
+
+	never := make(chan struct{})
+
+	t.Cleanup(func() { close(never) })
+
+	var readDone atomic.Bool
+
+	started := make(chan struct{})
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, "http://example.com", nil)
+	require.NoError(t, err)
+
+	req.Trailer = http.Header{"X-Sum": nil}
+	req.Body = &gatedBody{release: never, r: strings.NewReader("payload"), trailer: req.Trailer, done: &readDone, started: started}
+	req.GetBody = func() (io.ReadCloser, error) {
+		return &trailerBody{r: strings.NewReader("payload"), trailer: req.Trailer}, nil
+	}
+
+	var (
+		rewindErr error
+		waited    time.Duration
+	)
+
+	rt := &retryRoundTripper{
+		observer:          NoopObserver{},
+		retryableStatuses: DefaultRetryableStatuses(),
+		attemptTimeout:    100 * time.Millisecond,
+		next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			body := r.Body
+
+			go func() {
+				buf := make([]byte, 64)
+				_, _ = body.Read(buf) // never returns
+			}()
+
+			<-started
+
+			begin := time.Now()
+			_, rewindErr = r.GetBody()
+			waited = time.Since(begin)
+
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+		}),
+		retryOpts:   newTestRetryOpts(0),
+		maxAttempts: 0,
+	}
+
+	resp, err := rt.RoundTrip(req)
+	require.NoError(t, err)
+
+	_ = resp.Body.Close()
+
+	require.ErrorIs(t, rewindErr, context.DeadlineExceeded)
+	require.Less(t, waited, 5*time.Second)
+	require.NoError(t, t.Context().Err(), "the request's context is still live")
+}
+
+// TestRetryRoundTripper_HandedBodyReleased checks that the body a policy put
+// in place of the reply's, handed to the ErrorHandler, is released once when
+// the handler returns only an error, and the received body with it.
+func TestRetryRoundTripper_HandedBodyReleased(t *testing.T) {
+	t.Parallel()
+
+	var transportCloses, replacementCloses atomic.Int32
+
+	rt := &retryRoundTripper{
+		observer:          NoopObserver{},
+		retryableStatuses: DefaultRetryableStatuses(),
+		retryPolicyHandler: func(_ context.Context, resp *http.Response, _ error) (bool, error) {
+			pr, pw := io.Pipe()
+			_ = pw.Close()
+			resp.Body = countingBody{Reader: pr, closes: &replacementCloses}
+
+			return true, nil
+		},
+		errorHandler: func(*http.Response, error, int) (*http.Response, error) {
+			return nil, errors.New("handled")
+		},
+		next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Body:       countingBody{Reader: strings.NewReader("busy"), closes: &transportCloses},
+				Request:    r,
+			}, nil
+		}),
+		retryOpts:   newTestRetryOpts(0),
+		maxAttempts: 0,
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com", nil)
+	require.NoError(t, err)
+
+	_, err = rt.RoundTrip(req) //nolint:bodyclose // a failed round trip returns no response
+	require.Error(t, err)
+	require.Equal(t, int32(1), replacementCloses.Load(), "the handed replacement is released once")
+	require.Equal(t, int32(1), transportCloses.Load(), "the received body is released once")
 }

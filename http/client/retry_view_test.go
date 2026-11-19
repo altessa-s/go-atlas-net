@@ -594,3 +594,60 @@ func TestErrorHandler_ReplacedBodyNotDrained(t *testing.T) {
 		t.Fatal("the replaced body was drained")
 	}
 }
+
+// TestUpgrade_CloseWriteSurvivesWrappers checks that a 101 body keeps its
+// CloseWrite through the client's wrappers: the backend answers only after
+// the client half-closed the write side.
+func TestUpgrade_CloseWriteSurvivesWrappers(t *testing.T) {
+	t.Parallel()
+
+	for name, opts := range map[string][]httpclient.Option{
+		"default":         nil,
+		"attempt timeout": {httpclient.WithAttemptTimeout(time.Minute)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				conn, brw, err := http.NewResponseController(w).Hijack()
+				if err != nil {
+					t.Errorf("hijack: %v", err)
+					return
+				}
+				defer conn.Close()
+
+				_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+				_ = brw.Flush()
+
+				got, _ := io.ReadAll(brw) // until the client half-closes
+				_, _ = conn.Write(append([]byte("got "), got...))
+			}))
+			t.Cleanup(srv.Close)
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+			require.NoError(t, err)
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", "echo")
+
+			resp, err := httpclient.New(append([]httpclient.Option{loopback}, opts...)...).Do(req)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = resp.Body.Close() })
+
+			require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
+
+			rw, ok := resp.Body.(io.ReadWriteCloser)
+			require.True(t, ok, "writable, got %T", resp.Body)
+
+			cw, ok := resp.Body.(interface{ CloseWrite() error })
+			require.True(t, ok, "CloseWrite kept, got %T", resp.Body)
+
+			_, err = rw.Write([]byte("ping"))
+			require.NoError(t, err)
+			require.NoError(t, cw.CloseWrite())
+
+			reply, err := io.ReadAll(rw)
+			require.NoError(t, err)
+			require.Equal(t, "got ping", string(reply))
+		})
+	}
+}

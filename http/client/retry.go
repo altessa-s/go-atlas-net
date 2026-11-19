@@ -17,6 +17,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -128,14 +129,21 @@ func retryAfterDelay(backoff coreretry.NextDelayFunc) coreretry.NextDelayFunc {
 	}
 }
 
+// attemptContext returns the context of one attempt: ctx bounded by the
+// attempt timeout, with its cancel func, or ctx itself and nil without one.
+func (rt *retryRoundTripper) attemptContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if rt.attemptTimeout <= 0 {
+		return ctx, nil
+	}
+
+	return context.WithTimeout(ctx, rt.attemptTimeout)
+}
+
 // attemptRequest prepares req, an attempt's private request, for sending:
 // with a cookie jar, its Cookie header becomes the caller's original one
 // (callerCookie, captured before any attempt) plus the jar's cookies for the
-// URL read now, edited in place; with an attempt timeout, it returns a copy
-// under its own deadline and the deadline's cancel func.
-func (rt *retryRoundTripper) attemptRequest(
-	ctx context.Context, req *http.Request, callerCookie []string,
-) (*http.Request, context.CancelFunc) {
+// URL read now, edited in place.
+func (rt *retryRoundTripper) attemptRequest(req *http.Request, callerCookie []string) *http.Request {
 	out := req
 	if rt.jar != nil {
 		out.Header.Del("Cookie")
@@ -149,13 +157,7 @@ func (rt *retryRoundTripper) attemptRequest(
 		}
 	}
 
-	if rt.attemptTimeout <= 0 {
-		return out, nil
-	}
-
-	actx, cancel := context.WithTimeout(ctx, rt.attemptTimeout)
-
-	return out.WithContext(actx), cancel
+	return out
 }
 
 // cookieURL is the URL cookies of req are looked up and stored under, as in
@@ -362,7 +364,8 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 			// the ErrorHandler sees it with zero attempts, as it does when the
 			// context ended before the first attempt of a body it need not
 			// buffer.
-			resp, err := rt.finish(nil, nil, bufErr, 0, call.dispose)
+			resp, err := rt.finish(nil, nil, bufErr, 0)
+			resp, err = call.settle(resp, err, nil)
 			rt.requestDone(call.base, start, "unknown", 0, true)
 
 			return resp, err
@@ -411,12 +414,13 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	failed := retryErr != nil || call.lastErr != nil
 	lastResp := call.lastResp
 
-	resp, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts, call.dispose)
-	if err == nil {
-		call.handOver(resp)
-	} else {
-		call.dispose(nil) // the received body, if a handler's reply left it
+	var handed io.ReadCloser
+	if lastResp != nil {
+		handed = lastResp.Body
 	}
+
+	resp, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts)
+	resp, err = call.settle(resp, err, handed)
 
 	switch {
 	case resp == nil || call.lastAttemptReq == nil:
@@ -1082,7 +1086,7 @@ func (c *retryCall) prepareTrailers(attempt *http.Request) {
 			// As before the retry layer's own rewind: no earlier body may
 			// still write the caller's trailers when the caller's GetBody
 			// is asked for another.
-			if err := c.awaitLiveBodies(ctx); err != nil {
+			if err := cmp.Or(c.awaitLiveBodies(ctx), ctx.Err()); err != nil {
 				return nil, err
 			}
 
@@ -1147,7 +1151,7 @@ func (c *retryCall) try(ctx context.Context) error {
 	if !c.firstAttempt && hasBody {
 		// No body may still write the live trailers when the caller's
 		// GetBody is asked for the next one.
-		if err := c.awaitLiveBodies(ctx); err != nil {
+		if err := cmp.Or(c.awaitLiveBodies(ctx), ctx.Err()); err != nil {
 			c.lastErr = err
 			return &NonRetryableError{Err: err}
 		}
@@ -1169,11 +1173,16 @@ func (c *retryCall) try(ctx context.Context) error {
 
 	attempt.GetBody = c.getBody
 
+	// The attempt's own context (its deadline) exists before the trailer
+	// hooks are installed: a transport rewind waits under it.
+	actx, cancel := c.rt.attemptContext(ctx)
+	attempt = attempt.WithContext(actx)
+
 	c.prepareTrailers(attempt)
 
 	c.firstAttempt = false
 
-	attemptReq, cancel := c.rt.attemptRequest(ctx, attempt, c.callerCookie)
+	attemptReq := c.rt.attemptRequest(attempt, c.callerCookie)
 	c.attempts++
 	c.bodyHanded = true
 	resp, err := c.rt.next.RoundTrip(attemptReq) //nolint:bodyclose // resp is stored in lastResp and either closed on next retry or returned to caller
@@ -1342,11 +1351,8 @@ func unexpectedStatus(resp *http.Response) *UnexpectedStatusError {
 }
 
 // finish turns the outcome of the retry loop, after attempts attempts, into
-// the round trip result; dispose disposes of a discarded reply. A reply
-// returned without an error is handed over by the caller (see handOver).
-func (rt *retryRoundTripper) finish(
-	lastResp *http.Response, lastErr, retryErr error, attempts int, dispose func(*http.Response),
-) (*http.Response, error) {
+// the round trip result, before its bodies are settled (see settle).
+func (rt *retryRoundTripper) finish(lastResp *http.Response, lastErr, retryErr error, attempts int) (*http.Response, error) {
 	// Handle retry exhaustion and terminal errors (possibly with a response,
 	// e.g. a non-retryable or exhausted retryable status).
 	if retryErr != nil {
@@ -1354,27 +1360,72 @@ func (rt *retryRoundTripper) finish(
 			resp, err := rt.errorHandler(lastResp, retryErr, attempts)
 			// The handler's error is returned: it renders trusted text only,
 			// as a transport error does (it may quote resp.Request.URL).
-			err = redactTransportError(err)
-
-			return discardOnError(resp, err, dispose)
+			return resp, redactTransportError(err)
 		}
 
-		return discardOnError(lastResp, retryErr, dispose)
+		return lastResp, retryErr
 	}
 
-	return discardOnError(lastResp, lastErr, dispose)
+	return lastResp, lastErr
 }
 
-// discardOnError enforces the [http.RoundTripper] contract that a response
-// accompanies only a nil error: [http.Client] drops a response returned
-// together with an error without closing it, so its body would leak.
-func discardOnError(resp *http.Response, err error, dispose func(*http.Response)) (*http.Response, error) {
+// settle disposes of the bodies of the round trip's outcome, enforcing the
+// [http.RoundTripper] contract that a response accompanies only a nil error
+// ([http.Client] drops a response returned with an error without closing
+// it). Three handles are involved: the body the last attempt received
+// (owned), the body the callbacks were last handed (handed: the reply's
+// body before the ErrorHandler ran, possibly a policy's replacement) and the
+// body of the reply returned (returned). With an error every one is released
+// exactly once. Without, a handle that is the returned body passes to the
+// caller, and the others are released when the returned body is closed (it
+// may wrap them), or at once when no body is returned.
+func (c *retryCall) settle(resp *http.Response, err error, handed io.ReadCloser) (*http.Response, error) {
 	if err != nil {
-		dispose(resp)
+		var returned io.ReadCloser
+		if resp != nil {
+			returned = resp.Body
+		}
+
+		c.release(returned, handed)
+		c.dispose(nil)
+
 		return nil, err
 	}
 
+	c.handOver(resp, handed)
+
 	return resp, nil
+}
+
+// release closes each handle once, skipping nil, http.NoBody and the owned
+// handle (disposed of by dispose).
+func (c *retryCall) release(handles ...io.ReadCloser) {
+	var done []io.ReadCloser
+
+	for _, h := range handles {
+		if h == nil || h == http.NoBody || c.owns(h) || slices.ContainsFunc(done, func(d io.ReadCloser) bool { return sameHandle(d, h) }) {
+			continue
+		}
+
+		done = append(done, h)
+		_ = h.Close()
+	}
+}
+
+// sameHandle reports whether a and b are the same body. A body of a type that
+// cannot be compared (a struct value holding a func, say) is never the same as
+// another: comparing it would panic.
+func sameHandle(a, b io.ReadCloser) bool {
+	if a == nil || b == nil {
+		return false
+	}
+
+	t := reflect.TypeOf(a)
+	if t != reflect.TypeOf(b) || !t.Comparable() {
+		return false
+	}
+
+	return a == b
 }
 
 // maxDiscardDrain caps how many bytes of a discarded response body are read
@@ -1398,13 +1449,6 @@ func (b *ownedBody) Close() error {
 	return b.err
 }
 
-// ownedRWBody is an [ownedBody] that keeps the io.Writer of a writable
-// (101 Switching Protocols) body.
-type ownedRWBody struct {
-	*ownedBody
-	io.Writer
-}
-
 // own makes the attempt the owner of resp's body and returns the body to
 // hand on in its place.
 func (c *retryCall) own(resp *http.Response) io.ReadCloser {
@@ -1416,11 +1460,7 @@ func (c *retryCall) own(resp *http.Response) io.ReadCloser {
 	ob := &ownedBody{ReadCloser: resp.Body}
 	c.owned = ob
 
-	if w, ok := resp.Body.(io.Writer); ok {
-		return &ownedRWBody{ownedBody: ob, Writer: w}
-	}
-
-	return ob
+	return withWriteSide(ob, resp.Body)
 }
 
 // owns reports whether body is the one the last attempt received and still
@@ -1430,14 +1470,9 @@ func (c *retryCall) owns(body io.ReadCloser) bool {
 		return false
 	}
 
-	switch b := body.(type) {
-	case *ownedBody:
-		return b == c.owned
-	case *ownedRWBody:
-		return b.ownedBody == c.owned
-	}
+	b, ok := readSide(body).(*ownedBody)
 
-	return false
+	return ok && b == c.owned
 }
 
 // handOver settles the received body when resp goes back to the caller, by
@@ -1447,34 +1482,45 @@ func (c *retryCall) owns(body io.ReadCloser) bool {
 // returned body is closed (it may wrap it), or at once when there is no
 // returned body to close (nil or http.NoBody). The returned stream is never
 // read or closed here.
-func (c *retryCall) handOver(resp *http.Response) {
-	ob := c.owned
-	if ob == nil {
+func (c *retryCall) handOver(resp *http.Response, handed io.ReadCloser) {
+	var returned io.ReadCloser
+	if resp != nil {
+		returned = resp.Body
+	}
+
+	var releases []io.Closer
+
+	if ob := c.owned; ob != nil {
+		c.owned = nil
+
+		if b, ok := readSide(returned).(*ownedBody); !ok || b != ob {
+			releases = append(releases, ob)
+		}
+	}
+
+	if handed != nil && handed != http.NoBody && !isOwnedHandle(handed) && !sameHandle(handed, returned) {
+		releases = append(releases, handed)
+	}
+
+	if len(releases) == 0 {
 		return
 	}
 
-	c.owned = nil
+	if returned == nil || returned == http.NoBody {
+		for _, r := range releases {
+			_ = r.Close()
+		}
 
-	if resp == nil || resp.Body == nil || resp.Body == http.NoBody {
-		_ = ob.Close()
 		return
 	}
 
-	if b, ok := resp.Body.(*ownedBody); ok && b == ob {
-		return
-	}
+	resp.Body = withWriteSide(&releasingBody{ReadCloser: returned, release: releases}, returned)
+}
 
-	if b, ok := resp.Body.(*ownedRWBody); ok && b.ownedBody == ob {
-		return
-	}
-
-	tied := &releasingBody{ReadCloser: resp.Body, release: ob}
-	if w, ok := resp.Body.(io.Writer); ok {
-		resp.Body = &releasingRWBody{releasingBody: tied, Writer: w}
-		return
-	}
-
-	resp.Body = tied
+// isOwnedHandle reports whether body is an owned reply handle (any attempt's).
+func isOwnedHandle(body io.ReadCloser) bool {
+	_, ok := readSide(body).(*ownedBody)
+	return ok
 }
 
 // releasingBody is a body handed to the caller in place of the received one:
@@ -1482,22 +1528,21 @@ func (c *retryCall) handOver(resp *http.Response) {
 type releasingBody struct {
 	io.ReadCloser
 
-	release io.Closer
+	release []io.Closer
+	once    sync.Once
 }
 
 // Close closes the body, then releases the received one.
 func (b *releasingBody) Close() error {
 	err := b.ReadCloser.Close()
-	_ = b.release.Close()
+
+	b.once.Do(func() {
+		for _, r := range b.release {
+			_ = r.Close()
+		}
+	})
 
 	return err
-}
-
-// releasingRWBody is a [releasingBody] that keeps the io.Writer of a
-// writable body.
-type releasingRWBody struct {
-	*releasingBody
-	io.Writer
 }
 
 // dispose disposes of a discarded reply exactly once: a body a callback put in
