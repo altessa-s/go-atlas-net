@@ -519,3 +519,109 @@ func TestRetryRoundTripper_AwaitsRewoundBody(t *testing.T) {
 	require.Equal(t, int32(2), getBodies.Load())
 	require.True(t, closedAtAsk.Load(), "GetBody was asked only after the replacement was closed")
 }
+
+// deferredDoer answers at once and keeps every request body unread, as a
+// transport does whose reply arrives before it has sent the upload.
+type deferredDoer struct{ bodies []io.ReadCloser }
+
+func (d *deferredDoer) Do(req *http.Request) (*http.Response, error) {
+	d.bodies = append(d.bodies, req.Body)
+	return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+}
+
+// TestDoJSONRequest_RequestOwnsBody checks that a JSON request owns its
+// encoded bytes: a body still unsent when the call returns is not changed by
+// the next call reusing the pooled buffer.
+func TestDoJSONRequest_RequestOwnsBody(t *testing.T) {
+	t.Parallel()
+
+	d := &deferredDoer{}
+
+	for _, v := range []string{"aaaa", "bbbb"} {
+		resp, err := doJSONRequest(t.Context(), d, http.MethodPost, "http://example.com", map[string]string{"v": v})
+		require.NoError(t, err)
+
+		_ = resp.Body.Close()
+	}
+
+	require.Len(t, d.bodies, 2)
+
+	for i, want := range []string{`{"v":"aaaa"}` + "\n", `{"v":"bbbb"}` + "\n"} {
+		got, err := io.ReadAll(d.bodies[i])
+		require.NoError(t, err)
+		require.Equal(t, want, string(got))
+	}
+}
+
+// TestRetryRoundTripper_TracksBodiesAfterFinalTrailers checks that every
+// caller body stays tracked once the trailers are final: the first attempt
+// reads its body to the end, the second replies early and closes its body
+// late, and the caller's GetBody is asked for the third attempt's body only
+// after that.
+func TestRetryRoundTripper_TracksBodiesAfterFinalTrailers(t *testing.T) {
+	t.Parallel()
+
+	var (
+		calls        int
+		getBodies    atomic.Int32
+		secondClosed atomic.Bool
+		closedAtAsk  atomic.Bool
+	)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, "http://example.com", nil)
+	require.NoError(t, err)
+
+	req.Trailer = http.Header{"X-Sum": nil}
+	req.Body = &trailerBody{r: strings.NewReader("payload"), trailer: req.Trailer}
+	req.GetBody = func() (io.ReadCloser, error) {
+		if getBodies.Add(1) == 2 { // the third attempt's body
+			closedAtAsk.Store(secondClosed.Load())
+		}
+
+		return &trailerBody{r: strings.NewReader("payload"), trailer: req.Trailer}, nil
+	}
+
+	rt := &retryRoundTripper{
+		observer:          NoopObserver{},
+		retryableStatuses: DefaultRetryableStatuses(),
+		next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+
+			switch calls {
+			case 1:
+				_, _ = io.Copy(io.Discard, r.Body) // the trailers become final
+				_ = r.Body.Close()
+			case 2:
+				body := r.Body
+
+				go func() {
+					time.Sleep(50 * time.Millisecond)
+
+					buf := make([]byte, 2)
+					_, _ = body.Read(buf)
+
+					secondClosed.Store(true)
+
+					_ = body.Close()
+				}()
+			default:
+				_, _ = io.Copy(io.Discard, r.Body)
+				_ = r.Body.Close()
+
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+			}
+
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Request: r}, nil
+		}),
+		retryOpts:   newTestRetryOpts(2),
+		maxAttempts: 2,
+	}
+
+	resp, err := rt.RoundTrip(req)
+	require.NoError(t, err)
+
+	_ = resp.Body.Close()
+
+	require.Equal(t, 3, calls)
+	require.True(t, closedAtAsk.Load(), "GetBody was asked only after the second body was closed")
+}

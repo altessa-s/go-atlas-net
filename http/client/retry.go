@@ -297,28 +297,13 @@ func releaseWithBody(resp *http.Response, err error, cancel context.CancelFunc) 
 		return resp
 	}
 
-	if err != nil || resp == nil || resp.Body == nil {
+	if err != nil || resp == nil {
 		cancel()
 		return resp
 	}
 
-	resp.Body = &cancelOnClose{ReadCloser: resp.Body, cancel: cancel}
-
-	return resp
-}
-
-// cancelOnClose releases an attempt's deadline when its body is closed.
-type cancelOnClose struct {
-	io.ReadCloser
-	cancel context.CancelFunc
-}
-
-// Close closes the body and releases the attempt deadline.
-func (c *cancelOnClose) Close() error {
-	err := c.ReadCloser.Close()
-	c.cancel()
-
-	return err
+	// attachCancel keeps a writable (101 Switching Protocols) body writable.
+	return attachCancel(resp, cancel)
 }
 
 // CloseIdleConnections forwards to the wrapped transport so
@@ -420,7 +405,16 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	// A pass-through policy (WithoutRetry) clears retryErr but leaves the
 	// attempt's error in lastErr, which finish returns: still a failure.
 	failed := retryErr != nil || call.lastErr != nil
+	lastResp := call.lastResp
 	resp, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts)
+
+	if resp != nil && resp == lastResp && call.lastAttemptReq != nil {
+		// The reply goes back to http.Client with a fresh view: whatever a
+		// policy or the ErrorHandler did to the one they saw (its URL, its
+		// context and the cookie names recorded there), the redirect
+		// handling reads the library's own.
+		resp.Request = call.responseView(call.lastAttemptReq, call.lastCookieNames)
+	}
 	// Retries count the calls actually made to the next round tripper.
 	rt.requestDone(call.base, start, statusClass, max(call.attempts-1, 0), failed)
 
@@ -759,6 +753,11 @@ type retryCall struct {
 	// trailerMu guards finalTrailer and trailerFinal: a body reaches EOF on
 	// the transport's writing goroutine.
 	trailerMu sync.Mutex
+	// lastAttemptReq is the request of the last reply received and
+	// lastCookieNames the names of the cookies that reply set as received:
+	// the reply returned to http.Client gets a fresh view built from them.
+	lastAttemptReq  *http.Request
+	lastCookieNames []string
 	// liveBodies holds a close signal for every body that may write the
 	// caller's live trailers: each attempt's body and each body the transport
 	// got from the attempt's GetBody (see awaitLiveBodies). Guarded by
@@ -800,9 +799,10 @@ func (c *retryCall) captureLiveTrailers() {
 }
 
 // awaitLiveBodies waits, bounded by ctx, until every body that may write the
-// caller's live trailers is closed: until then the transport may still read
-// one and fill those trailers, which the next attempt must not share, and the
-// caller's GetBody must not be asked for another body.
+// caller's trailers is closed with no Read in flight: until then the
+// transport may still read one and fill those trailers, which the next
+// attempt must not share, and the caller's GetBody must not be asked for
+// another body.
 func (c *retryCall) awaitLiveBodies(ctx context.Context) error {
 	c.trailerMu.Lock()
 	bodies := slices.Clone(c.liveBodies)
@@ -830,10 +830,10 @@ func (c *retryCall) awaitLiveBodies(ctx context.Context) error {
 // With a cookie jar the view's context also records the names of the cookies
 // resp set as received, for the redirect cookie filtering
 // (filterRedirectCookies): editing the reply's header cannot change them.
-func (c *retryCall) responseView(req *http.Request, resp *http.Response) *http.Request {
+func (c *retryCall) responseView(req *http.Request, cookieNames []string) *http.Request {
 	ctx := req.Context()
 	if c.rt.jar != nil {
-		ctx = context.WithValue(ctx, receivedCookiesKey{}, receivedCookieNames(resp))
+		ctx = context.WithValue(ctx, receivedCookiesKey{}, cookieNames)
 	}
 
 	view := req.WithContext(ctx)
@@ -881,55 +881,83 @@ func (c *retryCall) setFinalTrailers(t http.Header) {
 // closed once the body is closed.
 type eofHookBody struct {
 	io.ReadCloser
-	onEOF     func()
-	done      bool
+	onEOF func()
+	done  bool // touched by the reading goroutine only
+
+	mu        sync.Mutex
+	reads     int  // Reads in flight
+	isClosed  bool // Close was called
 	closed    chan struct{}
 	closeOnce sync.Once
 }
 
-// Close closes the body and signals closed.
+// Close closes the body; closed is signaled once no Read is in flight.
 func (b *eofHookBody) Close() error {
 	err := b.ReadCloser.Close()
-	b.closeOnce.Do(func() { close(b.closed) })
+
+	b.mu.Lock()
+	b.isClosed = true
+	b.signalIdle()
+	b.mu.Unlock()
 
 	return err
 }
 
 // Read reads from the body and calls onEOF on its end.
 func (b *eofHookBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	b.reads++
+	b.mu.Unlock()
+
 	n, err := b.ReadCloser.Read(p)
 	if err == io.EOF && !b.done { //nolint:errorlint // io.Reader returns io.EOF itself, never wrapped
 		b.done = true
 		b.onEOF()
 	}
 
+	b.mu.Lock()
+	b.reads--
+	b.signalIdle()
+	b.mu.Unlock()
+
 	return n, err
 }
 
+// signalIdle closes closed once the body is closed and no Read is in flight.
+// b.mu is held.
+func (b *eofHookBody) signalIdle() {
+	if b.isClosed && b.reads == 0 {
+		b.closeOnce.Do(func() { close(b.closed) })
+	}
+}
+
 // prepareTrailers sets the trailers of attempt: a copy of the final ones when
-// known; otherwise the caller's live map, with the attempt's body (and any
-// body the transport rewinds) hooked to capture them at its end.
+// known; otherwise the caller's live map, which the (rewound) body fills as
+// it is read, captured at the body's end. Every body of the caller (its
+// original and every GetBody result, the transport's rewinds included) may
+// write the caller's trailer map for the whole call, so each is tracked
+// (see awaitLiveBodies) whether or not the trailers are final.
 func (c *retryCall) prepareTrailers(attempt *http.Request) {
 	if final, ok := c.finalTrailers(); ok {
 		attempt.Trailer = final.Clone()
 	} else {
-		// No transmission has read the body to its end yet: this one sends
-		// the caller's live map, which the (rewound) body fills as it is
-		// read, and captures its values when the body reaches EOF.
 		attempt.Trailer = c.req.Trailer
-		if c.req.Trailer != nil && attempt.Body != nil && attempt.Body != http.NoBody {
-			attempt.Body = c.captureTrailersAtEOF(attempt.Body)
-			// A body net/http rewinds itself is hooked the same way.
-			if c.getBody != nil {
-				attempt.GetBody = func() (io.ReadCloser, error) {
-					body, err := c.getBody()
-					if err != nil || body == nil || body == http.NoBody {
-						return body, err
-					}
+	}
 
-					return c.captureTrailersAtEOF(body), nil
-				}
+	if c.req.Trailer == nil || c.callerBodyClosed || attempt.Body == nil || attempt.Body == http.NoBody {
+		return // no trailers, or a private buffered copy that writes none
+	}
+
+	attempt.Body = c.captureTrailersAtEOF(attempt.Body)
+
+	if c.getBody != nil {
+		attempt.GetBody = func() (io.ReadCloser, error) {
+			body, err := c.getBody()
+			if err != nil || body == nil || body == http.NoBody {
+				return body, err
 			}
+
+			return c.captureTrailersAtEOF(body), nil
 		}
 	}
 }
@@ -1027,7 +1055,12 @@ func (c *retryCall) try(ctx context.Context) error {
 		// Policies, the ErrorHandler and the caller see a detached view of
 		// the attempt: editing it reaches neither the request the transport
 		// may still be sending (an early reply) nor the next attempt.
-		resp.Request = c.responseView(attemptReq, resp)
+		c.lastAttemptReq = attemptReq
+		if c.rt.jar != nil {
+			c.lastCookieNames = receivedCookieNames(resp)
+		}
+
+		resp.Request = c.responseView(attemptReq, c.lastCookieNames)
 	}
 
 	c.lastResp = resp

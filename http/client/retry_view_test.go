@@ -331,3 +331,15 @@ func TestBuilder_RefusesAmbiguousKeyForAnyDoer(t *testing.T) {
 	require.Len(t, obs.done, 1, "the guarded client reports the refusal once")
 	require.True(t, obs.done[0].Failed)
 }
+
+// TestAmbiguousIdempotencyKey_ErrorText checks that the refusal keeps its
+// sentinel and its text through NewHTTPClient's error redaction.
+func TestAmbiguousIdempotencyKey_ErrorText(t *testing.T) {
+	t.Parallel()
+
+	_, err := httpclient.NewHTTPClient(loopback).PostWithOptions(t.Context(), "http://127.0.0.1:1/?token=secret", "text/plain", //nolint:bodyclose // refused
+		strings.NewReader("x"), httpclient.WithHeaders(pairs([2]string{"Idempotency-Key", "A"}, [2]string{"idempotency-key", "B"})))
+	require.ErrorIs(t, err, httpclient.ErrAmbiguousIdempotencyKey)
+	require.Contains(t, err.Error(), "ambiguous idempotency key")
+	require.NotContains(t, err.Error(), "secret")
+}

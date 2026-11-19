@@ -159,8 +159,8 @@ for the snapshot's origin, starting from its `Cookie` header. A body without `Ge
 `GetBody` and `ContentLength` are never assigned, and every attempt keeps the original framing (an unknown length is sent chunked each time).
 Trailers: until a transmission has read the body to its end, an attempt sends the caller's live `Trailer` map, which the (rewound) body
 fills as it is read, and the values are captured at that end; a retry that would share the live map first waits (bounded by the request
-context) until every body that could write it — each attempt's body and each body the transport got from `GetBody` — is closed, before
-the caller's `GetBody` is asked for the next one; a buffered body is read to its end by buffering. Every later attempt sends
+context) until every body that could write the caller's trailer map — each body of the caller and each one the transport got from
+`GetBody`, tracked for the whole call — is closed with no read in flight, before the caller's `GetBody` is asked for the next one; a buffered body is read to its end by buffering. Every later attempt sends
 its own copy of the captured trailers, so an edit to an attempt's trailers (by a policy, say) never reaches the next one. The caller's request gets no `GetBody`, so `http.Client` does not
 follow a 307/308 redirect of a body without one.
 

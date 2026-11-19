@@ -307,6 +307,20 @@ func TestRedirectDropsInitialCookiesTheChainSet(t *testing.T) {
 
 		return httpclient.DefaultRetryPolicy(ctx, resp, err)
 	})
+	// stripAndReplace also replaces the view's context, dropping the cookie
+	// names recorded there: the reply handed back to http.Client gets a
+	// fresh view.
+	stripAndReplace := httpclient.WithRetryPolicyHandler(func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		if resp != nil {
+			resp.Header.Del("Set-Cookie")
+
+			if resp.Request != nil {
+				resp.Request = resp.Request.WithContext(context.Background())
+			}
+		}
+
+		return httpclient.DefaultRetryPolicy(ctx, resp, err)
+	})
 
 	for _, tc := range []struct {
 		name    string
@@ -322,6 +336,7 @@ func TestRedirectDropsInitialCookiesTheChainSet(t *testing.T) {
 		// http.Client.Timeout wraps every reply body (cancelTimerBody): the
 		// names received travel with the reply's request view instead.
 		{"deleted, policy strips, client timeout", &http.Cookie{Name: "session", Path: "/", MaxAge: -1}, "user=1", []httpclient.Option{strip}, true},
+		{"deleted, policy replaces the view", &http.Cookie{Name: "session", Path: "/", MaxAge: -1}, "user=1", []httpclient.Option{stripAndReplace}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -511,6 +526,20 @@ func TestDefaultRedirectLimitWithJar(t *testing.T) {
 func TestUpgradeWithJarKeepsBodyWritable(t *testing.T) {
 	t.Parallel()
 
+	for name, opts := range map[string][]httpclient.Option{
+		"default":         nil,
+		"attempt timeout": {httpclient.WithAttemptTimeout(time.Minute)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			testUpgradeWithJar(t, opts...)
+		})
+	}
+}
+
+func testUpgradeWithJar(t *testing.T, opts ...httpclient.Option) {
+	t.Helper()
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		conn, brw, err := http.NewResponseController(w).Hijack()
 		if err != nil {
@@ -531,7 +560,7 @@ func TestUpgradeWithJarKeepsBodyWritable(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	jar := newCountingJar(t)
-	c := httpclient.New(loopback, httpclient.WithCookieJar(jar))
+	c := httpclient.New(append([]httpclient.Option{loopback, httpclient.WithCookieJar(jar)}, opts...)...)
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
 	require.NoError(t, err)
@@ -558,4 +587,38 @@ func TestUpgradeWithJarKeepsBodyWritable(t *testing.T) {
 	u, err := url.Parse(srv.URL)
 	require.NoError(t, err)
 	require.Len(t, jar.Cookies(u), 1)
+}
+
+// TestMalformedRedirectPolicyClearsViewURL checks that a policy clearing the
+// URL of the view it sees on a redirect with a malformed Location cannot
+// break the redirect handling: the reply goes back with a fresh view.
+func TestMalformedRedirectPolicyClearsViewURL(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "http://[::1")
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := httpclient.New(loopback, httpclient.WithCookieJar(newCountingJar(t)),
+		httpclient.WithRetryPolicyHandler(func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+			if resp != nil && resp.Request != nil {
+				resp.Request.URL = nil
+			}
+
+			return httpclient.DefaultRetryPolicy(ctx, resp, err)
+		}))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+
+	require.NotPanics(t, func() {
+		resp, doErr := c.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+
+		require.Error(t, doErr, "the malformed Location fails the redirect")
+	})
 }

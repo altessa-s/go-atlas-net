@@ -404,7 +404,10 @@ func doJSONRequest(ctx context.Context, client httpx.Doer, method, url string, b
 		return nil, coreerrs.WrapOperation(err, "marshal JSON body")
 	}
 
-	return doRequest(ctx, client, method, url, bytes.NewReader(buf.Bytes()), "application/json", "")
+	// The request owns its bytes: the transport may still be reading the body
+	// after doRequest returned (an early or full-duplex reply), while the
+	// pooled buffer is reused.
+	return doRequest(ctx, client, method, url, bytes.NewReader(bytes.Clone(buf.Bytes())), "application/json", "")
 }
 
 // NewHTTPClient creates a new [HTTPClient] with convenient helper methods for common HTTP operations.
