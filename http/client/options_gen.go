@@ -321,11 +321,12 @@ func WithoutRedirects() Option {
 // connections, net/http may resend even a possibly processed request with
 // no body (nil or http.NoBody) or GetBody and method GET, HEAD, OPTIONS,
 // TRACE or an Idempotency-Key or X-Idempotency-Key header (any value or
-// count). A request the retry layer does not consider replayable (not an
-// idempotent method and not exactly one non-blank key) or one marked with
-// ContextWithoutRetry is handed to the transport once, and when it has a
-// body without GetBody, so net/http does not resend it; a bodyless one with
-// a key header may still be resent. An ordinary POST/PATCH without either
+// count), so WithoutRetry alone does not keep such a request from being
+// sent twice. A request the retry layer does not consider replayable (not
+// an idempotent method and not exactly one non-blank key) or one marked
+// with ContextWithoutRetry is handed to the transport once, in a form
+// net/http does not resend (only a bodyless TRACE stays replayable; see
+// ContextWithoutRetry). An ordinary POST/PATCH without either
 // header is not replayed after it may have been processed; net/http may
 // retry it if nothing was written and it has no body or GetBody.
 // On HTTP/2, only proven unprocessed requests with replayable bodies may

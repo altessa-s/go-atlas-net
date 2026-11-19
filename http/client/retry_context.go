@@ -16,11 +16,11 @@ type retryDisabledKey struct{}
 // yields a [RetryExhaustedError] after the one attempt; a policy still
 // classifies it). Use it for a request that must never be resent by the
 // client, such as a non-idempotent call whose key the caller cannot vouch for.
-// The request is handed to the next round tripper once; when it has a body,
-// that attempt carries no GetBody, so net/http does not resend it either. A
-// bodyless request carrying an Idempotency-Key or X-Idempotency-Key header
-// may still be resent by net/http on a reused HTTP/1.1 connection (see
-// [TransportDriver]).
+// The request is handed to the next round tripper once, in a form net/http
+// does not resend on a reused connection either (a body without GetBody, an
+// empty body for a bodyless GET, HEAD or OPTIONS, idempotency key names in
+// lower case); only a bodyless TRACE stays replayable by net/http (see
+// [TransportDriver]). The caller's request is not modified.
 func ContextWithoutRetry(ctx context.Context) context.Context {
 	return context.WithValue(ctx, retryDisabledKey{}, true)
 }

@@ -465,20 +465,67 @@ func lowerASCII(b byte) byte {
 }
 
 // singleTransmission makes the outgoing attempt of a request the retry layer
-// sends once not replayable by net/http: a request with a body and no GetBody
-// is never resent by net/http's transport, which otherwise replays a request
-// carrying an Idempotency-Key or X-Idempotency-Key header (any value, any
-// count) after a failure on a reused connection. The caller's request keeps
-// its GetBody (http.Client needs it for 307/308 redirects). A request without
-// a body cannot be made non-replayable this way; net/http may still resend it
-// (see [TransportDriver]).
+// sends once not replayable by net/http, whose transport otherwise resends a
+// request after certain failures on a reused HTTP/1.1 connection, even after
+// writing it, when the request has no body (nil or http.NoBody) or a GetBody
+// and either method GET, HEAD, OPTIONS or TRACE or an Idempotency-Key or
+// X-Idempotency-Key map key (any value, any count). Request.Close does not
+// prevent this: it does not keep the transport from picking an idle
+// connection. The attempt is a shallow copy; the caller's request, its header
+// and GetBody (http.Client needs it for 307/308 redirects) are left as they
+// are:
+//
+//   - a request with a body is handed on without GetBody;
+//   - a bodyless GET, HEAD or OPTIONS gets an empty body without GetBody:
+//     net/http probes it, finds it empty and sends no body and no
+//     Content-Length, as for no body, over HTTP/1.1;
+//   - the values of a canonical Idempotency-Key or X-Idempotency-Key map key
+//     move to the lower-case name, which net/http does not look up for its
+//     replay check; header names are case-insensitive, so the server receives
+//     the same field.
+//
+// A bodyless TRACE (net/http would send an empty body chunked) remains
+// replayable by net/http.
 func singleTransmission(req *http.Request) *http.Request {
-	if req.GetBody == nil || req.Body == nil || req.Body == http.NoBody {
-		return req
-	}
-
 	out := req.WithContext(req.Context())
 	out.GetBody = nil
+
+	if req.Body == nil || req.Body == http.NoBody {
+		switch req.Method {
+		case "", http.MethodGet, http.MethodHead, http.MethodOptions:
+			out.Body = io.NopCloser(strings.NewReader(""))
+			out.ContentLength = 0
+		}
+
+		out.Header = lowerIdempotencyKeys(req.Header)
+	}
+
+	return out
+}
+
+// lowerIdempotencyKeys returns h, or a copy of it when it has a canonical
+// Idempotency-Key or X-Idempotency-Key map key, with those values moved to
+// the lower-case name (after any values already there). h and its slices are
+// not modified.
+func lowerIdempotencyKeys(h http.Header) http.Header {
+	_, key := h[headerIdempotencyKey]
+	_, xkey := h[headerXIdempotencyKey]
+
+	if !key && !xkey {
+		return h
+	}
+
+	out := h.Clone()
+	for _, name := range []string{headerIdempotencyKey, headerXIdempotencyKey} {
+		values, ok := out[name]
+		if !ok {
+			continue
+		}
+
+		lower := strings.ToLower(name)
+		out[lower] = append(out[lower], values...)
+		delete(out, name)
+	}
 
 	return out
 }

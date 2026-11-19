@@ -141,10 +141,17 @@ req.Header.Set("Idempotency-Key", orderID) // the POST is now retried like a GET
 `ContextWithoutRetry` opts a single request out of the retry layer: it is attempted once whatever its method, key, the client's retry options
 or policy (`RetryDisabled` reports the mark).
 
-A request the retry layer sends once (not eligible, or marked with `ContextWithoutRetry`) is handed to the next round tripper exactly once. When it
-has a body, that attempt carries no `GetBody`, so net/http does not resend it on a reused connection even with a (duplicate or blank) idempotency
-key header; the caller's request keeps `GetBody` for redirects. A bodyless request carrying an `Idempotency-Key` or `X-Idempotency-Key` header —
-any value, blank or duplicate included — may still be resent by net/http on a reused HTTP/1.1 connection (see below).
+A request the retry layer sends once (not eligible, or marked with `ContextWithoutRetry`) is handed to the next round tripper exactly once, as a
+copy net/http's HTTP/1.1 transport does not resend on a reused connection (`Request.Close` would not help: it does not keep the transport off an
+idle connection):
+
+- a request with a body is handed on without `GetBody` (the caller's request keeps it for 307/308 redirects);
+- a bodyless GET, HEAD or OPTIONS gets an empty body without `GetBody`; net/http probes it and sends no body, `Content-Length` or chunking, as
+  for no body (over HTTP/2 the stream ends with an empty DATA frame);
+- the values of a canonical `Idempotency-Key` or `X-Idempotency-Key` map key move to the lower-case name, which net/http's replay check does not
+  look up; header names are case-insensitive, so the server receives the same field values.
+
+Only a bodyless TRACE stays replayable by net/http. The caller's request and header are never modified.
 
 ```go
 req, _ := http.NewRequestWithContext(httpclient.ContextWithoutRetry(ctx), http.MethodPost, url, body)
@@ -406,10 +413,10 @@ body (`nil` or `http.NoBody`) or `GetBody`, and uses GET, HEAD, OPTIONS, TRACE
 or carries an `Idempotency-Key` or `X-Idempotency-Key` header. Unlike the client's
 retry classification above, net/http does not classify PUT/DELETE as idempotent
 without such a header; it checks only that the header is present, so a blank or
-duplicate key counts. The retry layer hands a request it sends once with a body to
-the transport without `GetBody`, which rules this replay out for it; otherwise there
-is no transport option to disable this replay; it occurs below the client retry
-layer and `WithoutRetry` does not prevent it.
+duplicate key counts. The retry layer hands a request it sends once (see above) to
+the transport in a form that rules this replay out, except a bodyless TRACE. For any
+other request there is no transport option to disable this replay; it occurs below
+the client retry layer and `WithoutRetry` does not prevent it.
 This applies to the non-driver client, the conformance reference driver, and
 drivers using the standard HTTP/1.1 transport.
 An ordinary POST/PATCH without either header is never replayed after it may have

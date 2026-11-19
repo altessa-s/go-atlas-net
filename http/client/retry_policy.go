@@ -46,9 +46,10 @@ var defaultRetryableStatuses = DefaultRetryableStatuses()
 // the statuses of the built-in classification, which applies when no
 // [WithRetryPolicyHandler] is set.
 //
-// DefaultRetryPolicy classifies by status and error only, never by method:
-// a policy built on it replays a POST like a GET. The built-in classification
-// and the retry layer under any policy replay only idempotent requests (GET,
+// DefaultRetryPolicy classifies by status and error only, never by method: it
+// classifies the same status or error identically for a GET and a POST. Whether
+// a retry it asks for happens is up to the retry layer, which under any policy,
+// as in the built-in classification, replays only idempotent requests (GET,
 // HEAD, OPTIONS, TRACE, PUT, DELETE) and requests with exactly one non-blank
 // Idempotency-Key or X-Idempotency-Key value: any other request is attempted
 // once and the policy only classifies that attempt's outcome. A custom policy
@@ -65,9 +66,11 @@ var defaultRetryableStatuses = DefaultRetryableStatuses()
 //	c := httpclient.New(httpclient.WithRetryPolicyHandler(policy))
 //
 // Never replaying a POST on a retryable status (resp.Request is the attempt's
-// request). A transport error comes without a response, so a policy cannot see
-// the method there: a separate client built with [WithoutRetry] for
-// non-idempotent requests avoids every replay.
+// request), even one with a single idempotency key. A transport error comes
+// without a response, so a policy cannot see the method there: mark such a
+// request with [ContextWithoutRetry], which makes it one attempt handed once to
+// the transport. [WithoutRetry] only makes one client-layer attempt: net/http
+// may still resend a request it considers replayable (see [TransportDriver]).
 //
 //	noPostReplay := func(ctx context.Context, resp *http.Response, err error) (bool, error) {
 //	    retry, perr := httpclient.DefaultRetryPolicy(ctx, resp, err)

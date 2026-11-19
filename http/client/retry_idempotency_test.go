@@ -6,6 +6,7 @@ package client_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -93,51 +94,81 @@ func TestIdempotencyKey_ConnectionClosedBeforeReply(t *testing.T) {
 }
 
 // TestIdempotencyKey_ReusedConnectionClosedBeforeReply warms an HTTP/1.1
-// connection, then sends a POST over it that the server reads and answers by
-// closing the connection. net/http resends a request with an idempotency key
-// header after such a failure on a reused connection unless the request is
-// not rewindable; the retry layer hands a request it sends once with a body
-// on without GetBody, so the server sees it once. A bodyless one is resent by
-// net/http (the documented caveat).
+// connection, then sends a request over it that the server reads and answers
+// by closing the connection. net/http resends a replayable request after such
+// a failure on a reused connection; a request the retry layer sends once must
+// reach the server exactly once, with its idempotency key values intact.
 func TestIdempotencyKey_ReusedConnectionClosedBeforeReply(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		header   http.Header
-		body     bool
-		ctx      func(context.Context) context.Context
-		wantHits int32
+		name    string
+		method  string
+		header  http.Header
+		body    bool
+		ctx     func(context.Context) context.Context
+		wantKey []string
 	}{
-		{name: "duplicate key values", header: http.Header{"Idempotency-Key": {"order-1", "order-2"}}, body: true, wantHits: 1},
-		{name: "blank key", header: http.Header{"Idempotency-Key": {""}}, body: true, wantHits: 1},
-		{name: "both header names", header: http.Header{
+		{name: "duplicate key values", method: http.MethodPost, header: http.Header{"Idempotency-Key": {"order-1", "order-2"}}, body: true},
+		{name: "blank key", method: http.MethodPost, header: http.Header{"Idempotency-Key": {""}}, body: true},
+		{name: "both header names", method: http.MethodPost, header: http.Header{
 			"Idempotency-Key": {"order-1"}, "X-Idempotency-Key": {"order-1"},
-		}, body: true, wantHits: 1},
+		}, body: true},
 		{
-			name:     "single key under ContextWithoutRetry",
-			header:   http.Header{"Idempotency-Key": {"order-1"}},
-			body:     true,
-			ctx:      httpclient.ContextWithoutRetry,
-			wantHits: 1,
+			name:   "single key under ContextWithoutRetry",
+			method: http.MethodPost,
+			header: http.Header{"Idempotency-Key": {"order-1"}},
+			body:   true,
+			ctx:    httpclient.ContextWithoutRetry,
 		},
-		{name: "bodyless duplicate key is resent by net/http", header: http.Header{"Idempotency-Key": {"order-1", "order-2"}}, wantHits: 2},
+		{
+			name:    "bodyless duplicate key",
+			method:  http.MethodPost,
+			header:  http.Header{"Idempotency-Key": {"order-1", "order-2"}},
+			wantKey: []string{"order-1", "order-2"},
+		},
+		{name: "bodyless blank key", method: http.MethodPost, header: http.Header{"Idempotency-Key": {""}}, wantKey: []string{""}},
+		{
+			name:    "bodyless canonical and lower-case keys",
+			method:  http.MethodPatch,
+			header:  http.Header{"Idempotency-Key": {"order-1"}, "idempotency-key": {"order-2"}},
+			wantKey: []string{"order-2", "order-1"},
+		},
+		{
+			name:    "bodyless single key under ContextWithoutRetry",
+			method:  http.MethodPost,
+			header:  http.Header{"X-Idempotency-Key": {"order-1"}},
+			ctx:     httpclient.ContextWithoutRetry,
+			wantKey: nil,
+		},
+		{name: "bodyless GET under ContextWithoutRetry", method: http.MethodGet, header: http.Header{}, ctx: httpclient.ContextWithoutRetry},
+		{name: "bodyless HEAD under ContextWithoutRetry", method: http.MethodHead, header: http.Header{}, ctx: httpclient.ContextWithoutRetry},
+		{name: "bodyless OPTIONS under ContextWithoutRetry", method: http.MethodOptions, header: http.Header{}, ctx: httpclient.ContextWithoutRetry},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			var posts atomic.Int32
+			var (
+				hits    atomic.Int32
+				gotKey  atomic.Pointer[[]string]
+				gotBody atomic.Pointer[string]
+			)
 
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost {
+				if r.URL.Path == "/warm" {
 					_, _ = io.WriteString(w, "warm")
 					return
 				}
 
-				posts.Add(1)
+				hits.Add(1)
 
-				_, _ = io.Copy(io.Discard, r.Body)
+				key := r.Header.Values("Idempotency-Key")
+				gotKey.Store(&key)
+
+				b, _ := io.ReadAll(r.Body)
+				framing := fmt.Sprintf("%s|%d|%v", b, r.ContentLength, r.TransferEncoding)
+				gotBody.Store(&framing)
 
 				conn, _, err := http.NewResponseController(w).Hijack()
 				if err != nil {
@@ -153,7 +184,7 @@ func TestIdempotencyKey_ReusedConnectionClosedBeforeReply(t *testing.T) {
 
 			var reused atomic.Bool
 
-			// The POST's first connection is the warmed one; a replay by
+			// The request's first connection is the warmed one; a replay by
 			// net/http dials a fresh one.
 			trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
 				if info.Reused {
@@ -161,7 +192,7 @@ func TestIdempotencyKey_ReusedConnectionClosedBeforeReply(t *testing.T) {
 				}
 			}}
 
-			warm, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+			warm, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/warm", nil)
 			require.NoError(t, err)
 
 			resp, err := c.Do(warm)
@@ -180,10 +211,11 @@ func TestIdempotencyKey_ReusedConnectionClosedBeforeReply(t *testing.T) {
 				body = strings.NewReader("order")
 			}
 
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL, body)
+			req, err := http.NewRequestWithContext(ctx, tc.method, srv.URL, body)
 			require.NoError(t, err)
 
 			req.Header = tc.header
+			sent := req.Header.Clone()
 
 			resp, err = c.Do(req)
 			if resp != nil {
@@ -191,8 +223,17 @@ func TestIdempotencyKey_ReusedConnectionClosedBeforeReply(t *testing.T) {
 			}
 
 			require.Error(t, err)
-			require.True(t, reused.Load(), "the POST must go over the warmed connection")
-			require.Equal(t, tc.wantHits, posts.Load())
+			require.True(t, reused.Load(), "the request must go over the warmed connection")
+			require.Equal(t, int32(1), hits.Load())
+			require.Equal(t, sent, req.Header, "the caller's header is not modified")
+
+			if tc.wantKey != nil {
+				require.Equal(t, tc.wantKey, *gotKey.Load())
+			}
+
+			if !tc.body {
+				require.Equal(t, "|0|[]", *gotBody.Load(), "a bodyless request is sent without body, length or chunking")
+			}
 		})
 	}
 }
