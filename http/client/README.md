@@ -448,7 +448,12 @@ or carries an `Idempotency-Key` or `X-Idempotency-Key` header. Unlike the client
 retry classification above, net/http does not classify PUT/DELETE as idempotent
 without such a header; it checks only that the header is present, so a blank or
 duplicate key would count — the client refuses such a non-idempotent request with
-`ErrAmbiguousIdempotencyKey` before the limiter and the transport. There is no
+`ErrAmbiguousIdempotencyKey` before the limiter and the transport. The two scans
+differ: net/http looks the header up under its canonical map keys only
+(`Idempotency-Key`, `X-Idempotency-Key`), while go-atlas scans every map key ASCII
+case-insensitively. A key stored under a non-canonical map key (`idempotency-key`)
+therefore counts for go-atlas's eligibility and ambiguity rules but does not make
+net/http replay the request on HTTP/1. There is no
 transport option to disable this replay; it occurs below the client retry layer and
 neither `WithoutRetry` nor `ContextWithoutRetry` prevents it.
 This applies to the non-driver client, the conformance reference driver, and

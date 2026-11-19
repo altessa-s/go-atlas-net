@@ -482,3 +482,111 @@ func TestTrailers_ProbedEmptyBody(t *testing.T) {
 		})
 	}
 }
+
+// eofWithDataBody returns its whole payload with io.EOF in one Read (or, when
+// empty, io.EOF at once) and sets its trailer's X-Sum then.
+type eofWithDataBody struct {
+	data    string
+	trailer http.Header
+	read    bool
+}
+
+func (b *eofWithDataBody) Read(p []byte) (int, error) {
+	if b.read {
+		return 0, io.EOF
+	}
+
+	b.read = true
+	b.trailer.Set("X-Sum", "abc")
+
+	return copy(p, b.data), io.EOF
+}
+
+func (b *eofWithDataBody) Close() error { return nil }
+
+// TestTrailers_HTTP2FinalValues checks that the final trailer values reach
+// an HTTP/2 server when the body ends in the Read that returns its data and
+// when an empty body ends in its first Read.
+func TestTrailers_HTTP2FinalValues(t *testing.T) {
+	t.Parallel()
+
+	for name, data := range map[string]string{"data with EOF": "order", "empty": ""} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			type seen struct{ body, trailer string }
+
+			got := make(chan seen, 1)
+
+			srv := httptest.NewUnstartedServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				got <- seen{body: string(b), trailer: r.Trailer.Get("X-Sum")}
+			}))
+			srv.EnableHTTP2 = true
+			srv.StartTLS()
+			t.Cleanup(srv.Close)
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, nil)
+			require.NoError(t, err)
+
+			req.Trailer = http.Header{"X-Sum": nil}
+			req.Body = &eofWithDataBody{data: data, trailer: req.Trailer}
+
+			c := httpclient.New(httpclient.WithoutSSRFProtection(), httpclient.WithClient(srv.Client()))
+
+			resp, err := c.Do(req)
+			require.NoError(t, err)
+
+			_ = resp.Body.Close()
+
+			require.Equal(t, 2, resp.ProtoMajor)
+			require.Equal(t, seen{body: data, trailer: "abc"}, <-got)
+		})
+	}
+}
+
+// TestErrorHandler_ReplacedBodyNotDrained checks that a body an ErrorHandler
+// put in place of the reply's is closed, not drained: a pipe that never ends
+// does not block the call, even under an attempt deadline.
+func TestErrorHandler_ReplacedBodyNotDrained(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	pr, pw := io.Pipe()
+
+	t.Cleanup(func() { _ = pw.Close() })
+
+	c := httpclient.New(loopback, httpclient.WithRetryMax(0), httpclient.WithAttemptTimeout(time.Minute),
+		httpclient.WithErrorHandler(func(resp *http.Response, _ error, _ int) (*http.Response, error) {
+			resp.Body = pr // never ends
+			return resp, errors.New("handled")
+		}))
+
+	done := make(chan error, 1)
+
+	go func() {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
+		if err != nil {
+			done <- err
+			return
+		}
+
+		resp, err := c.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the replaced body was drained")
+	}
+}

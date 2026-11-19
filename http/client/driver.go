@@ -40,7 +40,10 @@ const DefaultDialTimeout = 30 * time.Second
 // a reused HTTP/1.1 connection net/http may resend a replayable request after
 // certain connection failures, even after writing it. Replayable means no body
 // (nil or http.NoBody) or GetBody, and GET, HEAD, OPTIONS, TRACE or the presence
-// of an Idempotency-Key or X-Idempotency-Key header. The retry layer refuses a
+// of an Idempotency-Key or X-Idempotency-Key header, looked up under those
+// canonical map keys only (the retry layer's own scan matches every map key
+// ASCII case-insensitively, so a non-canonical key counts for its rules but
+// not for this replay). The retry layer refuses a
 // non-idempotent request whose key is ambiguous (several values or a blank
 // one) with ErrAmbiguousIdempotencyKey before it reaches the driver, so a
 // non-idempotent request a driver sees carries no key or exactly one valid

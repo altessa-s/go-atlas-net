@@ -368,10 +368,11 @@ func attachCancel(resp *http.Response, cancel context.CancelFunc) *http.Response
 		return resp
 	}
 
-	body := cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
+	// Pointers, so a body can be told apart by identity (see discardPolicy).
+	body := &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
 	if w, ok := resp.Body.(io.Writer); ok {
 		// 101 Switching Protocols bodies are writable; keep that capability.
-		resp.Body = cancelOnCloseReadWriteBody{cancelOnCloseBody: body, Writer: w}
+		resp.Body = &cancelOnCloseReadWriteBody{cancelOnCloseBody: body, Writer: w}
 		return resp
 	}
 
@@ -386,7 +387,7 @@ type cancelOnCloseBody struct {
 	cancel context.CancelFunc
 }
 
-func (b cancelOnCloseBody) Close() error {
+func (b *cancelOnCloseBody) Close() error {
 	err := b.ReadCloser.Close()
 	b.cancel()
 
@@ -396,7 +397,7 @@ func (b cancelOnCloseBody) Close() error {
 // cancelOnCloseReadWriteBody is a [cancelOnCloseBody] that keeps the
 // [io.Writer] of a writable (protocol-switch) response body.
 type cancelOnCloseReadWriteBody struct {
-	cancelOnCloseBody
+	*cancelOnCloseBody
 	io.Writer
 }
 

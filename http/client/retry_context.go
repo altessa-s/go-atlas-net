@@ -25,7 +25,9 @@ type retryDisabledKey struct{}
 //
 //   - after a possible processing: on a reused HTTP/1.1 connection net/http
 //     may resend a request it already wrote if it is idempotent by method
-//     (GET, HEAD, OPTIONS, TRACE) or carries an idempotency key, and has no
+//     (GET, HEAD, OPTIONS, TRACE) or carries an idempotency key under the
+//     canonical map key Idempotency-Key or X-Idempotency-Key (net/http does
+//     not match other cases, which the client's own scan does), and has no
 //     body or a GetBody. The method or the single key makes the repeat safe
 //     (an ambiguous key is refused with [ErrAmbiguousIdempotencyKey]); an
 //     unkeyed POST or PATCH is never resent once it may have been processed.
