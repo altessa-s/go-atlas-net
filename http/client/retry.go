@@ -315,18 +315,22 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 
 	ctx := req.Context()
 
+	base := snapshotRequest(req)
 	call := &retryCall{
 		rt:   rt,
 		req:  req,
 		ctx:  ctx,
-		base: snapshotRequest(req),
-		// The caller's Cookie header as received: with a jar the retry layer
-		// owns cookie handling (http.Client.Jar is nil), so nothing was injected;
-		// on a redirect hop it was already filtered by redirectPolicy.
-		callerCookie: req.Header.Values("Cookie"),
+		base: base,
+		// The caller's Cookie header as received, from the snapshot: with a
+		// jar the retry layer owns cookie handling (http.Client.Jar is nil),
+		// so nothing was injected; on a redirect hop it was already filtered
+		// by redirectPolicy.
+		callerCookie: base.Header.Values("Cookie"),
 		firstAttempt: true,
 		firstBody:    req.Body,
 		getBody:      req.GetBody,
+		// A body read while it is sent fills the caller's live trailers.
+		trailer: req.Trailer,
 	}
 
 	// A request marked with ContextWithoutRetry is attempted once, whatever
@@ -352,6 +356,10 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 			call.getBody = getBody
 			call.firstBody, _ = getBody()
 			call.callerBodyClosed = true
+			// Buffering read the body to its end, so the trailers are final:
+			// every attempt sends this copy of them.
+			call.trailer = req.Trailer.Clone()
+			call.base.Trailer = call.trailer.Clone()
 		}
 	}
 
@@ -374,8 +382,8 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	}
 
 	statusClass := "unknown"
-	if call.lastResp != nil {
-		statusClass = statusToClass(call.lastResp.StatusCode)
+	if call.lastStatus != 0 {
+		statusClass = statusToClass(call.lastStatus)
 	}
 
 	if retryErr != nil && ctx.Err() == nil && retryable(retryErr) {
@@ -385,7 +393,8 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	// attempt's error in lastErr, which finish returns: still a failure.
 	failed := retryErr != nil || call.lastErr != nil
 	resp, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts)
-	rt.requestDone(req, start, statusClass, call.retryAttempts, failed)
+	// Retries count the calls actually made to the next round tripper.
+	rt.requestDone(req, start, statusClass, max(call.attempts-1, 0), failed)
 
 	return resp, err
 }
@@ -443,7 +452,31 @@ func ambiguousIdempotencyKey(req *http.Request) bool {
 
 	present, single := idempotencyKey(req.Header)
 
-	return present && !single
+	return present && (!single || connectionNamesIdempotencyKey(req.Header))
+}
+
+// connectionNamesIdempotencyKey reports whether a Connection header of h
+// (under any map key that matches it ASCII case-insensitively; every value,
+// comma-separated, tokens trimmed) names Idempotency-Key or X-Idempotency-Key:
+// such a key is hop-by-hop, so an intermediary drops it and the server may
+// not see the key the request is replayed under.
+func connectionNamesIdempotencyKey(h http.Header) bool {
+	for name, values := range h {
+		if !asciiEqualFold(name, "Connection") {
+			continue
+		}
+
+		for _, v := range values {
+			for token := range strings.SplitSeq(v, ",") {
+				token = strings.Trim(token, " \t")
+				if asciiEqualFold(token, headerIdempotencyKey) || asciiEqualFold(token, headerXIdempotencyKey) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
 }
 
 // Idempotency key header names, in their canonical form.
@@ -611,16 +644,19 @@ func snapshotRequest(req *http.Request) *http.Request {
 	return base
 }
 
-// errRequestChanged stops a retry when the caller's request changed after the
-// snapshot its attempts are built from (a policy, an observer or a callback
-// edited it): the retry layer neither resends the old request nor sends the
-// new one.
+// errRequestChanged stops a retry when the request handed to the retry layer
+// changed after the snapshot its attempts are built from (a policy, an
+// observer or a callback edited it): the retry layer neither resends the
+// snapshot nor sends the edited request.
 var errRequestChanged = errors.New("request changed during the retry loop; not replayed")
 
-// requestChanged reports whether the caller's request differs from base in
-// what an attempt sends: method, URL, Host or header.
+// requestChanged reports whether req, the request handed to the retry layer,
+// differs from its snapshot base in one of the compared fields: Method, URL,
+// Host, Header, ContentLength or TransferEncoding. Body, GetBody and Trailer
+// are not compared (a streaming body fills its trailers as it is sent).
 func requestChanged(req, base *http.Request) bool {
 	return req.Method != base.Method || req.Host != base.Host || req.URL.String() != base.URL.String() ||
+		req.ContentLength != base.ContentLength || !slices.Equal(req.TransferEncoding, base.TransferEncoding) ||
 		!maps.EqualFunc(req.Header, base.Header, slices.Equal[[]string])
 }
 
@@ -633,8 +669,6 @@ type retryCall struct {
 	callerCookie []string
 	lastResp     *http.Response
 	lastErr      error
-	// retryAttempts counts the retries made so far.
-	retryAttempts int
 	// attempts counts the attempts handed to the next round tripper so far.
 	attempts     int
 	firstAttempt bool
@@ -651,11 +685,16 @@ type retryCall struct {
 	// callerBodyClosed reports that buffering already read and closed the
 	// caller's body.
 	callerBodyClosed bool
+	// trailer is the Trailer of every attempt: the caller's live map for a
+	// streaming body, a copy of the final trailers for a buffered one.
+	trailer http.Header
+	// lastStatus is the status of the last reply received, kept whatever
+	// happens to the reply's body.
+	lastStatus int
 }
 
 // onRetry runs before each retry's backoff sleep.
 func (c *retryCall) onRetry(attempt int, err error, delay time.Duration) {
-	c.retryAttempts++
 	// A retry follows: release the discarded response before the
 	// backoff sleep so its connection returns to the pool meanwhile.
 	// With an ErrorHandler the response must stay readable in case
@@ -719,6 +758,7 @@ func (c *retryCall) try(ctx context.Context) error {
 	}
 
 	attempt.GetBody = c.getBody
+	attempt.Trailer = c.trailer
 	c.firstAttempt = false
 
 	attemptReq, cancel := c.rt.attemptRequest(ctx, attempt, c.callerCookie)
@@ -731,9 +771,14 @@ func (c *retryCall) try(ctx context.Context) error {
 	resp = releaseWithBody(resp, err, cancel) //nolint:bodyclose // same response, closed like resp above
 	// Every reply's cookies are stored exactly once, on receipt, whatever
 	// happens to the reply next (retried, returned, discarded).
-	c.rt.storeCookies(c.req, resp)
+	c.rt.storeCookies(c.base, resp)
 	c.lastResp = resp
 	c.lastErr = err
+
+	if resp != nil {
+		c.lastStatus = resp.StatusCode
+	}
+
 	// A breaker rejection is reported from the attempt's own outcome, once,
 	// before any classification: a retry policy (WithoutRetry's pass-through
 	// among them) may replace or suppress the error the caller then gets.

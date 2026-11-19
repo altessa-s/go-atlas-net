@@ -56,9 +56,11 @@
 //     key is sent once. One with an ambiguous key — several values, keys under both names, or a present but blank
 //     one — is refused before any transmission with [ErrAmbiguousIdempotencyKey], since net/http replays a request
 //     carrying either header whatever its values. A policy set with [WithRetryPolicyHandler] classifies the outcome
-//     but cannot replay a request the rule sends once. Every attempt is built from a private snapshot of the request
-//     taken before the first transmission (the caller's request is never modified; a change to it during the loop
-//     stops the retries). [ContextWithoutRetry] limits the retry loop to at most one call to the next round tripper
+//     but cannot replay a request the rule sends once. What is sent is a private snapshot of the request taken before
+//     the first transmission (method, URL, Host, header, framing), copied afresh per attempt, so callbacks that edit
+//     the request they see change nothing sent; separately, a change to one of those compared fields of the request
+//     handed to the retry layer stops the retries (with http.Client.Timeout that is a shallow copy of the caller's,
+//     so only header edits of the original are seen). [ContextWithoutRetry] limits the retry loop to at most one call to the next round tripper
 //     whatever the method, key or policy ([RetryDisabled] reports the mark); the transport's own retries — a replay
 //     after possible processing of an idempotent or validly keyed request, a retry of any request when no processing
 //     occurred — are outside its scope (see [ContextWithoutRetry] and [TransportDriver]).

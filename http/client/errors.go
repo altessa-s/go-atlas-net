@@ -27,7 +27,8 @@ var (
 	// (POST, PATCH, ...) whose idempotency key is not exactly one non-blank
 	// value: several values across Idempotency-Key and X-Idempotency-Key (in
 	// any header-name case, under one name or both), or a present but blank
-	// one. The client refuses it before any transmission: net/http replays a
+	// one, or a key named by a Connection header (hop-by-hop, so dropped by an
+	// intermediary). The client refuses it before any transmission: net/http replays a
 	// request carrying either header after certain connection failures
 	// whatever its values, and the server may dedupe on another value than
 	// the caller intended. Send exactly one key, or none.

@@ -99,6 +99,10 @@ func (c *Client) retractableClient() *http.Client {
 		panic(err)
 	}
 
+	if c.options.proxy != nil {
+		c.options.proxy = isolatedProxy(c.options.proxy)
+	}
+
 	if err := validateSSRFTransport(&c.options); err != nil {
 		panic(err)
 	}

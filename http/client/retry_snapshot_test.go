@@ -9,7 +9,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,6 +31,9 @@ type recordedRequest struct {
 	body             string
 	contentLength    int64
 	transferEncoding []string
+	trailer          string
+	cookie           string
+	extra            string
 }
 
 // recordingServer answers every request with 503 and records it.
@@ -50,9 +55,13 @@ func recordingServer(t *testing.T) (*httptest.Server, func() []recordedRequest) 
 			body:             string(b),
 			contentLength:    r.ContentLength,
 			transferEncoding: r.TransferEncoding,
+			trailer:          r.Trailer.Get("X-Sum"),
+			cookie:           r.Header.Get("Cookie"),
+			extra:            r.Header.Get("X-Extra"),
 		})
 		mu.Unlock()
 
+		http.SetCookie(w, &http.Cookie{Name: "sid", Value: "a"})
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	t.Cleanup(srv.Close)
@@ -106,30 +115,106 @@ func TestRetrySnapshot_PolicyCannotChangeResentRequest(t *testing.T) {
 	}
 }
 
-// TestRetrySnapshot_CallerChangeStopsReplay checks that a change to the
-// caller's request during the retry loop stops it before the next attempt:
-// neither the old nor the edited request is resent.
+// TestRetrySnapshot_CallerChangeStopsReplay checks that a change to a
+// compared field of the request handed to the retry layer stops the loop
+// before the next attempt: neither the snapshot nor the edited request is
+// resent, and the request is reported once with the last status it got.
 func TestRetrySnapshot_CallerChangeStopsReplay(t *testing.T) {
 	t.Parallel()
 
-	srv, seen := recordingServer(t)
+	tests := []struct {
+		name   string
+		change func(*http.Request)
+	}{
+		{name: "header", change: func(r *http.Request) { r.Header.Set("Idempotency-Key", "B") }},
+		{name: "content length", change: func(r *http.Request) { r.ContentLength = 99 }},
+		{name: "transfer encoding", change: func(r *http.Request) { r.TransferEncoding = []string{"chunked"} }},
+		{name: "url", change: func(r *http.Request) { r.URL.Path = "/other" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	var req *http.Request
+			srv, seen := recordingServer(t)
+			obs := &recordingObserver{}
 
-	c := fastRetry(httpclient.WithRetryPolicyHandler(func(ctx context.Context, resp *http.Response, err error) (bool, error) {
-		req.Header.Set("Idempotency-Key", "B")
-		return httpclient.DefaultRetryPolicy(ctx, resp, err)
-	}))
+			var req *http.Request
 
-	var err error
+			c := fastRetry(httpclient.WithObserver(obs),
+				httpclient.WithRetryPolicyHandler(func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+					tc.change(req)
+					return httpclient.DefaultRetryPolicy(ctx, resp, err)
+				}))
 
-	req, err = http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("order"))
-	require.NoError(t, err)
-	req.Header.Set("Idempotency-Key", "A")
+			var err error
 
-	_, err = c.Do(req) //nolint:bodyclose // a failed request returns no response
-	require.ErrorContains(t, err, "request changed during the retry loop")
-	require.Len(t, seen(), 1)
+			req, err = http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("order"))
+			require.NoError(t, err)
+			req.Header.Set("Idempotency-Key", "A")
+
+			_, err = c.Do(req) //nolint:bodyclose // a failed request returns no response
+			require.ErrorContains(t, err, "request changed during the retry loop")
+			require.Len(t, seen(), 1)
+
+			obs.mu.Lock()
+			defer obs.mu.Unlock()
+
+			require.Len(t, obs.done, 1)
+			require.Zero(t, obs.done[0].Retries, "one call to the transport, no retry")
+			require.Equal(t, "5xx", obs.done[0].StatusClass)
+			require.True(t, obs.done[0].Failed)
+		})
+	}
+}
+
+// TestRetrySnapshot_ClientTimeoutShallowCopy documents the limit of change
+// detection: with http.Client.Timeout set, the client hands the transport a
+// shallow copy of the caller's request, so a change to a field of the
+// original (ContentLength here) is not seen, while a change to the shared
+// header map is. Either way what is sent is the snapshot.
+func TestRetrySnapshot_ClientTimeoutShallowCopy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		change   func(*http.Request)
+		wantHits int
+	}{
+		{name: "field of the original is not detected", change: func(r *http.Request) { r.ContentLength = 99 }, wantHits: 3},
+		{name: "shared header map is detected", change: func(r *http.Request) { r.Header.Set("X-Extra", "B") }, wantHits: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv, seen := recordingServer(t)
+
+			var req *http.Request
+
+			c := fastRetry(httpclient.WithRetryPolicyHandler(func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+				tc.change(req)
+				return httpclient.DefaultRetryPolicy(ctx, resp, err)
+			}))
+			c.Timeout = time.Minute
+
+			var err error
+
+			req, err = http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("order"))
+			require.NoError(t, err)
+			req.Header.Set("Idempotency-Key", "A")
+
+			_, err = c.Do(req) //nolint:bodyclose // a failed request returns no response
+			require.Error(t, err)
+
+			got := seen()
+			require.Len(t, got, tc.wantHits)
+
+			for _, r := range got {
+				require.Equal(t, int64(5), r.contentLength, "the snapshot's framing is sent")
+				require.Empty(t, r.extra)
+			}
+		})
+	}
 }
 
 // TestRetrySnapshot_KeepsFramingAndCallerFields checks that buffering a body
@@ -282,4 +367,183 @@ func TestBuilder_StoredContextWithoutRetry(t *testing.T) {
 	unset, err := httpclient.NewRequestBuilder(c).GET(srv.URL).Build()
 	require.NoError(t, err)
 	require.False(t, httpclient.RetryDisabled(unset.Context()))
+}
+
+// TestRetrySnapshot_ProxyResolverSeesCopy checks that a proxy resolver that
+// edits the request it is given changes nothing that is sent.
+func TestRetrySnapshot_ProxyResolverSeesCopy(t *testing.T) {
+	t.Parallel()
+
+	srv, seen := recordingServer(t)
+	c := fastRetry(httpclient.WithProxyFunc(func(r *http.Request) (*url.URL, error) {
+		r.Header.Del("Idempotency-Key")
+		r.Header.Set("X-Extra", "resolver")
+		r.URL.Path = "/elsewhere"
+
+		return nil, nil
+	}))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("order"))
+	require.NoError(t, err)
+	req.Header.Set("Idempotency-Key", "A")
+
+	_, err = c.Do(req) //nolint:bodyclose // an exhausted request returns no response
+	require.ErrorIs(t, err, httpclient.ErrMaxRetriesExceeded)
+
+	got := seen()
+	require.Len(t, got, 3)
+
+	for _, r := range got {
+		require.Equal(t, []string{"A"}, r.key)
+		require.Empty(t, r.extra)
+	}
+}
+
+// TestAmbiguousIdempotencyKey_HopByHop checks that a key named by a
+// Connection header (it would be dropped by an intermediary) is refused.
+func TestAmbiguousIdempotencyKey_HopByHop(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]http.Header{
+		"canonical":            {"Idempotency-Key": {"A"}, "Connection": {"keep-alive, idempotency-key"}},
+		"second value":         {"X-Idempotency-Key": {"A"}, "Connection": {"keep-alive", " X-IDEMPOTENCY-KEY "}},
+		"non-canonical header": {"Idempotency-Key": {"A"}, "connection": {"Idempotency-Key"}},
+	}
+	for name, header := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			srv, seen := recordingServer(t)
+			c := fastRetry()
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("order"))
+			require.NoError(t, err)
+
+			req.Header = header
+
+			_, err = c.Do(req) //nolint:bodyclose // a refused request returns no response
+			require.ErrorIs(t, err, httpclient.ErrAmbiguousIdempotencyKey)
+			require.Empty(t, seen())
+		})
+	}
+
+	srv, seen := recordingServer(t)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+
+	req.Header = http.Header{"Idempotency-Key": {"A"}, "Connection": {"Idempotency-Key"}}
+
+	_, err = fastRetry().Do(req) //nolint:bodyclose // an exhausted request returns no response
+	require.ErrorIs(t, err, httpclient.ErrMaxRetriesExceeded, "an idempotent method is not checked")
+	require.Len(t, seen(), 3)
+}
+
+// TestRetrySnapshot_CookiesFromSnapshot checks that the jar is consulted and
+// filled for the snapshot's origin: a policy redirecting the attempt it sees
+// to another host neither stores cookies for it nor changes the next attempt.
+func TestRetrySnapshot_CookiesFromSnapshot(t *testing.T) {
+	t.Parallel()
+
+	srv, seen := recordingServer(t)
+
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+
+	c := fastRetry(httpclient.WithCookieJar(jar),
+		httpclient.WithRetryPolicyHandler(func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+			if resp != nil && resp.Request != nil {
+				resp.Request.URL.Host = "localhost:1"
+				resp.Request.Header.Set("Cookie", "evil=1")
+			}
+
+			return httpclient.DefaultRetryPolicy(ctx, resp, err)
+		}))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("order"))
+	require.NoError(t, err)
+	req.Header.Set("Idempotency-Key", "A")
+	req.Header.Set("Cookie", "pre=1")
+
+	_, err = c.Do(req) //nolint:bodyclose // an exhausted request returns no response
+	require.ErrorIs(t, err, httpclient.ErrMaxRetriesExceeded)
+
+	got := seen()
+	require.Len(t, got, 3)
+	require.Equal(t, "pre=1", got[0].cookie)
+
+	for _, r := range got[1:] {
+		require.Equal(t, "pre=1; sid=a", r.cookie)
+	}
+
+	other, err := url.Parse("http://localhost:1/")
+	require.NoError(t, err)
+	require.Empty(t, jar.Cookies(other))
+
+	origin, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+	require.Len(t, jar.Cookies(origin), 1)
+}
+
+// trailerFillingBody is a streaming body that sets its request's X-Sum
+// trailer once it is read to the end, as net/http's trailer contract asks.
+type trailerFillingBody struct {
+	r       io.Reader
+	trailer http.Header
+}
+
+func (b *trailerFillingBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		b.trailer.Set("X-Sum", "abc")
+	}
+
+	return n, err
+}
+
+func (b *trailerFillingBody) Close() error { return nil }
+
+// TestRetrySnapshot_Trailers checks that a streaming body sent once carries
+// the trailers it fills while being sent, and that a buffered body carries
+// its final trailers on every attempt.
+func TestRetrySnapshot_Trailers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		key      string
+		wantHits int
+	}{
+		{name: "stream sent once", wantHits: 1},
+		{name: "buffered and retried", key: "A", wantHits: 3},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv, seen := recordingServer(t)
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, nil)
+			require.NoError(t, err)
+
+			req.Trailer = http.Header{"X-Sum": nil}
+			req.Body = &trailerFillingBody{r: strings.NewReader("order"), trailer: req.Trailer}
+
+			if tc.key != "" {
+				req.Header.Set("Idempotency-Key", tc.key)
+			}
+
+			_, err = fastRetry().Do(req) //nolint:bodyclose // an exhausted request returns no response
+			require.Error(t, err)
+
+			got := seen()
+			require.Len(t, got, tc.wantHits)
+
+			for _, r := range got {
+				require.Equal(t, "order", r.body)
+				require.Equal(t, "abc", r.trailer)
+				require.Equal(t, []string{"chunked"}, r.transferEncoding)
+			}
+		})
+	}
 }

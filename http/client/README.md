@@ -95,7 +95,7 @@ Callers with their own retry loop can use `httpx.ParseRetryAfter(h, now, max)`. 
 | `RetryExhaustedError`   | `ErrMaxRetriesExceeded`   | All retry attempts exhausted, wraps last error (see below) |
 | `SSRFError`             | `ErrSSRFBlocked`          | Connection to private/local address blocked, or refused by an egress rule (`Rule`) |
 | `NonRetryableError`     | `ErrNonRetryable`         | Error that must not be retried (context, TLS, SSRF) |
-| --                      | `ErrAmbiguousIdempotencyKey` | Non-idempotent request with several idempotency key values or a blank one, refused before any transmission |
+| --                      | `ErrAmbiguousIdempotencyKey` | Non-idempotent request with several idempotency key values, a blank one or one named by `Connection`, refused before any transmission |
 | --                      | `ErrUninspectableCause`   | Stands for the causes of an error whose cause graph is too large to search (more than 1024 visits: causes shared exponentially, a cause unwrapping to itself); they are dropped |
 
 A request whose retry loop stops on a retryable failure because no further attempt is allowed — the retries, the `WithRetryMaxElapsed` budget or
@@ -137,17 +137,27 @@ outcome of that attempt but cannot ask for another: to replay a POST the server 
 A non-idempotent request with an ambiguous key — several values (under one name, both names or differently cased map keys) or a present but
 blank one — is refused before any transmission with `ErrAmbiguousIdempotencyKey` (match it with `errors.Is`). net/http's transport replays a
 request carrying either header whatever its values, and the server may dedupe on another value than the caller meant, so such a request can
-be sent neither once reliably nor safely twice. Idempotent methods are not checked.
+be sent neither once reliably nor safely twice. A key named by a `Connection` header (any value, comma-separated, case-insensitive) is refused
+the same way: it is hop-by-hop, so an intermediary drops it. Idempotent methods are not checked.
 
 ```go
 req.Header.Set("Idempotency-Key", orderID) // the POST is now retried like a GET
 ```
 
-Every attempt is built from a private snapshot of the request (method, URL, header, framing) taken before the first transmission: a policy,
-observer or callback that edits the request it sees cannot change what is resent, and a change to the caller's request during the loop stops
-it before the next attempt. A body without `GetBody` is buffered privately for replay; the caller's `Body`, `GetBody` and `ContentLength` are
-never assigned, and every attempt keeps the original framing (an unknown length is sent chunked each time). The caller's request therefore
-gets no `GetBody`, so `http.Client` does not follow a 307/308 redirect of such a body.
+**Snapshot isolation.** What is sent is a private snapshot of the request — method, URL, Host, header, `ContentLength`, `TransferEncoding`,
+taken before the first transmission — copied afresh for every attempt. A policy, observer, proxy resolver (it gets its own copy of the
+header and URL) or the next round tripper that edits the request it sees cannot change what is sent next. Cookies are looked up and stored
+for the snapshot's origin, starting from its `Cookie` header. A body without `GetBody` is buffered privately for replay; the caller's `Body`,
+`GetBody` and `ContentLength` are never assigned, and every attempt keeps the original framing (an unknown length is sent chunked each time).
+Trailers: a streaming body is sent with the caller's live `Trailer` map, which it fills as it is read; a buffered body is sent on every
+attempt with the trailers as they stood once buffering read it to the end. The caller's request gets no `GetBody`, so `http.Client` does not
+follow a 307/308 redirect of a body without one.
+
+**Change detection.** Before each retry the request handed to the retry layer is compared with its snapshot on Method, URL, Host, Header,
+`ContentLength` and `TransferEncoding`; on a difference the loop stops with an error and nothing more is sent. It sees the request
+`http.Client` hands its transport: with `http.Client.Timeout` set (or on a redirect hop) that is a shallow copy of the caller's request, so a
+change to a field of the original (its `ContentLength`, say) is not detected, while a change to the shared header map is. Either way the
+snapshot is what is sent.
 
 `ContextWithoutRetry` opts a single request out of the retry loop: the retry layer makes at most one call to the next round tripper whatever
 the method, key, the client's retry options or policy (`RetryDisabled` reports the mark). Its scope is the client's retry loop only; the
