@@ -128,17 +128,16 @@ func retryAfterDelay(backoff coreretry.NextDelayFunc) coreretry.NextDelayFunc {
 	}
 }
 
-// attemptRequest returns the request of one attempt: with a cookie jar, a
-// copy whose Cookie header is the caller's original one (callerCookie,
-// captured before any attempt) plus the jar's cookies for the URL read now;
-// with an attempt timeout, a copy under its own deadline, whose cancel func
-// is returned.
+// attemptRequest prepares req, an attempt's private request, for sending:
+// with a cookie jar, its Cookie header becomes the caller's original one
+// (callerCookie, captured before any attempt) plus the jar's cookies for the
+// URL read now, edited in place; with an attempt timeout, it returns a copy
+// under its own deadline and the deadline's cancel func.
 func (rt *retryRoundTripper) attemptRequest(
 	ctx context.Context, req *http.Request, callerCookie []string,
 ) (*http.Request, context.CancelFunc) {
 	out := req
 	if rt.jar != nil {
-		out = req.Clone(ctx)
 		out.Header.Del("Cookie")
 
 		for _, v := range callerCookie {
@@ -329,8 +328,6 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		firstAttempt: true,
 		firstBody:    req.Body,
 		getBody:      req.GetBody,
-		// A body read while it is sent fills the caller's live trailers.
-		trailer: req.Trailer,
 	}
 
 	// A request marked with ContextWithoutRetry is attempted once, whatever
@@ -357,9 +354,9 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 			call.firstBody, _ = getBody()
 			call.callerBodyClosed = true
 			// Buffering read the body to its end, so the trailers are final:
-			// every attempt sends this copy of them.
-			call.trailer = req.Trailer.Clone()
-			call.base.Trailer = call.trailer.Clone()
+			// every attempt sends its own copy of them.
+			call.finalTrailer = req.Trailer.Clone()
+			call.trailerFinal = true
 		}
 	}
 
@@ -450,26 +447,27 @@ func ambiguousIdempotencyKey(req *http.Request) bool {
 		return false
 	}
 
-	present, single := idempotencyKey(req.Header)
+	present, single, carrier := effectiveIdempotencyKey(req.Header)
 
-	return present && (!single || connectionNamesIdempotencyKey(req.Header))
+	return present && (!single || connectionNames(req.Header, carrier))
 }
 
-// connectionNamesIdempotencyKey reports whether a Connection header of h
-// (under any map key that matches it ASCII case-insensitively; every value,
-// comma-separated, tokens trimmed) names Idempotency-Key or X-Idempotency-Key:
-// such a key is hop-by-hop, so an intermediary drops it and the server may
-// not see the key the request is replayed under.
-func connectionNamesIdempotencyKey(h http.Header) bool {
-	for name, values := range h {
-		if !asciiEqualFold(name, "Connection") {
+// connectionNames reports whether a Connection header of h (under any map key
+// that matches it ASCII case-insensitively; every value, comma-separated,
+// tokens trimmed) names the header field name: such a field is hop-by-hop, so
+// an intermediary drops it and the server may not see the key the request is
+// replayed under. A token naming the other key header, which carries no
+// value, is harmless.
+func connectionNames(h http.Header, name string) bool {
+	for key, values := range h {
+		if !asciiEqualFold(key, "Connection") {
 			continue
 		}
 
 		for _, v := range values {
 			for token := range strings.SplitSeq(v, ",") {
 				token = strings.Trim(token, " \t")
-				if asciiEqualFold(token, headerIdempotencyKey) || asciiEqualFold(token, headerXIdempotencyKey) {
+				if asciiEqualFold(token, name) {
 					return true
 				}
 			}
@@ -531,25 +529,42 @@ func (g idempotencyKeyGuard) CloseIdleConnections() { closeIdleConnections(g.nex
 // single reports exactly one value in total that is not empty once HTTP
 // whitespace (SP, HTAB) is trimmed. The caller's slices are only read.
 func idempotencyKey(h http.Header) (present, single bool) {
+	present, single, _ = effectiveIdempotencyKey(h)
+	return present, single
+}
+
+// effectiveIdempotencyKey is [idempotencyKey] that also returns, when single,
+// the canonical name of the header carrying the key (Idempotency-Key or
+// X-Idempotency-Key).
+func effectiveIdempotencyKey(h http.Header) (present, single bool, carrier string) {
 	var (
 		count int
 		value string
 	)
 
 	for name, values := range h {
-		if !asciiEqualFold(name, headerIdempotencyKey) && !asciiEqualFold(name, headerXIdempotencyKey) {
-			continue
+		canonical := headerIdempotencyKey
+		if !asciiEqualFold(name, headerIdempotencyKey) {
+			if !asciiEqualFold(name, headerXIdempotencyKey) {
+				continue
+			}
+
+			canonical = headerXIdempotencyKey
 		}
 
 		present = true
 		count += len(values)
 
 		if len(values) == 1 {
-			value = values[0]
+			value, carrier = values[0], canonical
 		}
 	}
 
-	return present, count == 1 && strings.Trim(value, " \t") != ""
+	if count != 1 || strings.Trim(value, " \t") == "" {
+		return present, false, ""
+	}
+
+	return present, true, carrier
 }
 
 // asciiEqualFold reports whether s and t are equal under ASCII case folding
@@ -685,9 +700,13 @@ type retryCall struct {
 	// callerBodyClosed reports that buffering already read and closed the
 	// caller's body.
 	callerBodyClosed bool
-	// trailer is the Trailer of every attempt: the caller's live map for a
-	// streaming body, a copy of the final trailers for a buffered one.
-	trailer http.Header
+	// finalTrailer holds the request's trailers once final (trailerFinal):
+	// after buffering, or after the first transmission of a streaming body,
+	// which sends the caller's live map as the body fills it. Every attempt
+	// from then on sends its own copy, so an edit to one attempt's trailers
+	// never reaches the next.
+	finalTrailer http.Header
+	trailerFinal bool
 	// lastStatus is the status of the last reply received, kept whatever
 	// happens to the reply's body.
 	lastStatus int
@@ -758,7 +777,18 @@ func (c *retryCall) try(ctx context.Context) error {
 	}
 
 	attempt.GetBody = c.getBody
-	attempt.Trailer = c.trailer
+
+	if c.firstAttempt && !c.trailerFinal {
+		// A streaming body fills the caller's trailers as it is sent.
+		attempt.Trailer = c.req.Trailer
+	} else {
+		if !c.trailerFinal {
+			c.finalTrailer, c.trailerFinal = c.req.Trailer.Clone(), true
+		}
+
+		attempt.Trailer = c.finalTrailer.Clone()
+	}
+
 	c.firstAttempt = false
 
 	attemptReq, cancel := c.rt.attemptRequest(ctx, attempt, c.callerCookie)

@@ -369,38 +369,9 @@ func TestBuilder_StoredContextWithoutRetry(t *testing.T) {
 	require.False(t, httpclient.RetryDisabled(unset.Context()))
 }
 
-// TestRetrySnapshot_ProxyResolverSeesCopy checks that a proxy resolver that
-// edits the request it is given changes nothing that is sent.
-func TestRetrySnapshot_ProxyResolverSeesCopy(t *testing.T) {
-	t.Parallel()
-
-	srv, seen := recordingServer(t)
-	c := fastRetry(httpclient.WithProxyFunc(func(r *http.Request) (*url.URL, error) {
-		r.Header.Del("Idempotency-Key")
-		r.Header.Set("X-Extra", "resolver")
-		r.URL.Path = "/elsewhere"
-
-		return nil, nil
-	}))
-
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("order"))
-	require.NoError(t, err)
-	req.Header.Set("Idempotency-Key", "A")
-
-	_, err = c.Do(req) //nolint:bodyclose // an exhausted request returns no response
-	require.ErrorIs(t, err, httpclient.ErrMaxRetriesExceeded)
-
-	got := seen()
-	require.Len(t, got, 3)
-
-	for _, r := range got {
-		require.Equal(t, []string{"A"}, r.key)
-		require.Empty(t, r.extra)
-	}
-}
-
-// TestAmbiguousIdempotencyKey_HopByHop checks that a key named by a
-// Connection header (it would be dropped by an intermediary) is refused.
+// TestAmbiguousIdempotencyKey_HopByHop checks that a key whose carrying
+// header is named by a Connection header (an intermediary would drop it) is
+// refused, while a token naming the other key header is accepted.
 func TestAmbiguousIdempotencyKey_HopByHop(t *testing.T) {
 	t.Parallel()
 
@@ -424,6 +395,27 @@ func TestAmbiguousIdempotencyKey_HopByHop(t *testing.T) {
 			_, err = c.Do(req) //nolint:bodyclose // a refused request returns no response
 			require.ErrorIs(t, err, httpclient.ErrAmbiguousIdempotencyKey)
 			require.Empty(t, seen())
+		})
+	}
+
+	accepted := map[string]http.Header{
+		"X key, Connection names the plain name": {"X-Idempotency-Key": {"A"}, "Connection": {"Idempotency-Key"}},
+		"plain key, Connection names the X name": {"Idempotency-Key": {"A"}, "Connection": {"keep-alive, x-idempotency-key"}},
+	}
+	for name, header := range accepted {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			srv, seen := recordingServer(t)
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("order"))
+			require.NoError(t, err)
+
+			req.Header = header
+
+			_, err = fastRetry().Do(req) //nolint:bodyclose // an exhausted request returns no response
+			require.ErrorIs(t, err, httpclient.ErrMaxRetriesExceeded)
+			require.Len(t, seen(), 3)
 		})
 	}
 
@@ -509,13 +501,29 @@ func (b *trailerFillingBody) Close() error { return nil }
 func TestRetrySnapshot_Trailers(t *testing.T) {
 	t.Parallel()
 
+	// mutate edits the trailers of the attempt a policy sees.
+	mutate := httpclient.WithRetryPolicyHandler(func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		if resp != nil && resp.Request != nil && resp.Request.Trailer != nil {
+			resp.Request.Trailer.Set("X-Sum", "evil")
+		}
+
+		return httpclient.DefaultRetryPolicy(ctx, resp, err)
+	})
+
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+
 	tests := []struct {
 		name     string
 		key      string
+		opts     []httpclient.Option
 		wantHits int
 	}{
 		{name: "stream sent once", wantHits: 1},
+		{name: "stream sent once with a jar", opts: []httpclient.Option{httpclient.WithCookieJar(jar)}, wantHits: 1},
 		{name: "buffered and retried", key: "A", wantHits: 3},
+		{name: "buffered and retried with a jar", key: "A", opts: []httpclient.Option{httpclient.WithCookieJar(jar)}, wantHits: 3},
+		{name: "buffered, policy edits the attempt's trailers", key: "A", opts: []httpclient.Option{mutate}, wantHits: 3},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -533,7 +541,7 @@ func TestRetrySnapshot_Trailers(t *testing.T) {
 				req.Header.Set("Idempotency-Key", tc.key)
 			}
 
-			_, err = fastRetry().Do(req) //nolint:bodyclose // an exhausted request returns no response
+			_, err = fastRetry(tc.opts...).Do(req) //nolint:bodyclose // an exhausted request returns no response
 			require.Error(t, err)
 
 			got := seen()

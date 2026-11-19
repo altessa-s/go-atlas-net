@@ -48,12 +48,15 @@ var defaultRetryableStatuses = DefaultRetryableStatuses()
 //
 // DefaultRetryPolicy classifies by status and error only, never by method: it
 // classifies the same status or error identically for a GET and a POST. Whether
-// a retry it asks for happens is up to the retry layer, which under any policy,
-// as in the built-in classification, replays only idempotent requests (GET,
-// HEAD, OPTIONS, TRACE, PUT, DELETE) and requests with exactly one non-blank
-// Idempotency-Key or X-Idempotency-Key value: any other request is attempted
-// once and the policy only classifies that attempt's outcome. A custom policy
-// that wants a stricter guard checks resp.Request.Method (see the second example).
+// a retry it asks for happens is up to the retry layer, which has the same three
+// outcomes under any policy as in the built-in classification: an eligible
+// request (an idempotent method — GET, HEAD, OPTIONS, TRACE, PUT, DELETE — or
+// exactly one non-blank Idempotency-Key or X-Idempotency-Key value) may be
+// retried; a non-idempotent request without a key is attempted once, the
+// policy only classifying that attempt; a non-idempotent request with an
+// ambiguous key is refused with [ErrAmbiguousIdempotencyKey] before any
+// transmission, so the policy never sees it. A custom policy that wants a
+// stricter guard checks resp.Request.Method (see the second example).
 //
 // Example:
 //

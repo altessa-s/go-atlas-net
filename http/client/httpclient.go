@@ -48,6 +48,10 @@ type ErrorHandler func(resp *http.Response, err error, numTries int) (*http.Resp
 // Set it via [WithRetryPolicyHandler]. The handler receives the request context, HTTP response
 // (may be nil), and any error that occurred. It returns true if the request should be retried,
 // false otherwise. The handler can also return a modified error to provide additional context.
+// It decides only for an eligible request (an idempotent method or exactly one non-blank
+// idempotency key); a non-idempotent request without a key is attempted once whatever it
+// returns, and one with an ambiguous key is refused with [ErrAmbiguousIdempotencyKey] before
+// the handler is consulted.
 type RetryPolicyHandler func(ctx context.Context, resp *http.Response, err error) (bool, error)
 
 // Client holds the resolved configuration and produces a fully-wired
@@ -97,10 +101,6 @@ func New(opt ...Option) *http.Client {
 func (c *Client) retractableClient() *http.Client {
 	if err := validateDriverTransport(&c.options); err != nil {
 		panic(err)
-	}
-
-	if c.options.proxy != nil {
-		c.options.proxy = isolatedProxy(c.options.proxy)
 	}
 
 	if err := validateSSRFTransport(&c.options); err != nil {

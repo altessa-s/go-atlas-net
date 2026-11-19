@@ -267,9 +267,11 @@ func WithObserver(v Observer) Option {
 
 // WithProxyFunc sets the proxy option.
 //
-// proxy resolves the proxy URL for outgoing requests. The auto-generated
-// setter is named WithProxyFunc to free the WithProxy name for the more
-// common host/port/auth convenience setter declared below.
+// proxy resolves the proxy URL for outgoing requests. As with
+// http.Transport.Proxy, it receives the request being transmitted and
+// must treat it as read-only: the client does not give it a copy. The
+// auto-generated setter is named WithProxyFunc to free the WithProxy name
+// for the more common host/port/auth convenience setter declared below.
 func WithProxyFunc(v ProxyFunc) Option {
 	return func(o *options) {
 		o.proxy = v

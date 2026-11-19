@@ -205,12 +205,7 @@ func applyTransportDriver(c *http.Client, opts options) *http.Client {
 		httpBase.TLSClientConfig = opts.proxyTLSConfig.Clone()
 	}
 
-	d := &driverTransport{base: httpBase}
-	if base.Proxy != nil {
-		// The resolver sees a copy, never the request about to be sent.
-		d.proxy = isolatedProxy(base.Proxy)
-	}
-
+	d := &driverTransport{base: httpBase, proxy: base.Proxy}
 	build := func(u *url.URL) (http.RoundTripper, error) {
 		dial, err := driverDial(base, opts, u)
 		if err != nil {

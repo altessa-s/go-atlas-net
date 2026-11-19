@@ -52,11 +52,12 @@
 //     custom policies set with [WithRetryPolicyHandler]. The built-in classification replays only requests that are
 //     safe to repeat: an idempotent method of RFC 9110 (GET, HEAD, OPTIONS, TRACE, PUT, DELETE; case-sensitive, an
 //     empty method is GET) or a request with exactly one non-blank idempotency key — one value in total across
-//     Idempotency-Key and X-Idempotency-Key, header names matched ASCII case-insensitively. A POST or PATCH without a
-//     key is sent once. One with an ambiguous key — several values, keys under both names, or a present but blank
-//     one — is refused before any transmission with [ErrAmbiguousIdempotencyKey], since net/http replays a request
-//     carrying either header whatever its values. A policy set with [WithRetryPolicyHandler] classifies the outcome
-//     but cannot replay a request the rule sends once. What is sent is a private snapshot of the request taken before
+//     Idempotency-Key and X-Idempotency-Key, header names matched ASCII case-insensitively. The outcomes are the same
+//     under any policy: an eligible request may be retried; a non-idempotent request without a key is attempted
+//     once (a policy set with [WithRetryPolicyHandler] only classifies that attempt); one with an ambiguous key —
+//     several values, keys under both names, a present but blank one, or one whose carrying header a Connection
+//     header names — is refused with [ErrAmbiguousIdempotencyKey] before any transmission and before the policy,
+//     since net/http replays a request carrying either header whatever its values. What is sent is a private snapshot of the request taken before
 //     the first transmission (method, URL, Host, header, framing), copied afresh per attempt, so callbacks that edit
 //     the request they see change nothing sent; separately, a change to one of those compared fields of the request
 //     handed to the retry layer stops the retries (with http.Client.Timeout that is a shallow copy of the caller's,

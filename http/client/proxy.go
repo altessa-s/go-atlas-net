@@ -63,22 +63,3 @@ func proxyAwareDialer(proxyFn ProxyFunc, proxyTLSCfg *tls.Config) func(context.C
 		}
 	}
 }
-
-// isolatedProxy wraps a caller's proxy resolver so it never receives the
-// request about to be transmitted: it is handed a shallow copy with its own
-// Header, Trailer and URL, so a resolver that edits them (deleting an
-// idempotency key, say) changes nothing that is sent.
-func isolatedProxy(proxy ProxyFunc) ProxyFunc {
-	return func(req *http.Request) (*url.URL, error) {
-		view := req.WithContext(req.Context())
-		view.Header = req.Header.Clone()
-		view.Trailer = req.Trailer.Clone()
-
-		if req.URL != nil {
-			u := *req.URL
-			view.URL = &u
-		}
-
-		return proxy(view)
-	}
-}

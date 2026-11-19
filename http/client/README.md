@@ -54,7 +54,7 @@ constructors are available: `New` returns a bare `*http.Client` suitable for any
 | `WithTransport`              | --            | Custom `*http.Transport` override; start from `DefaultPooledTransport()` (a fresh clone of the default) to keep the pool tuning                      |
 | `WithProxy`                  | none          | Route requests through `http://host:port` with optional `*url.Userinfo`                                                                              |
 | `WithProxyURL`               | none          | Route requests through any proxy URL (http, https, socks5, socks5h)                                                                                  |
-| `WithProxyFunc`              | none          | Custom resolver matching `http.Transport.Proxy` signature                                                                                            |
+| `WithProxyFunc`              | none          | Custom resolver matching `http.Transport.Proxy` signature; it receives the request being sent and must treat it as read-only                            |
 | `WithoutProxy`               | none          | Disable proxy resolution, including `HTTP_PROXY`/`HTTPS_PROXY` defaults                                                                              |
 | `WithProxyTLSConfig`         | system        | Custom `*tls.Config` for the handshake to an `https://` proxy (self-signed CA, mTLS); isolates proxy TLS from destination TLS via custom DialContext |
 | `WithErrorHandler`           | nil           | Custom error handler                                                                                                                                 |
@@ -130,27 +130,31 @@ The built-in classification replays only requests that are safe to repeat: an id
 (GET, HEAD, OPTIONS, TRACE, PUT, DELETE; method names are case-sensitive, so `post` or `put` is not idempotent, and an empty method is GET) or a
 request carrying exactly one non-blank idempotency key. The values of `Idempotency-Key` and `X-Idempotency-Key` are counted together, under every
 header map key that matches either name ASCII case-insensitively (no Unicode folding); the total must be one and the value non-empty after
-trimming spaces and tabs. A POST or PATCH without a key is sent once — a server that processed it before failing never sees it twice — and a
-retryable failure is returned as a `RetryExhaustedError` after that single attempt. A policy set with `WithRetryPolicyHandler` classifies the
-outcome of that attempt but cannot ask for another: to replay a POST the server deduplicates, give it exactly one key.
+trimming spaces and tabs. A request therefore has one of three outcomes, the same under any `WithRetryPolicyHandler` policy:
 
-A non-idempotent request with an ambiguous key — several values (under one name, both names or differently cased map keys) or a present but
-blank one — is refused before any transmission with `ErrAmbiguousIdempotencyKey` (match it with `errors.Is`). net/http's transport replays a
-request carrying either header whatever its values, and the server may dedupe on another value than the caller meant, so such a request can
-be sent neither once reliably nor safely twice. A key named by a `Connection` header (any value, comma-separated, case-insensitive) is refused
-the same way: it is hop-by-hop, so an intermediary drops it. Idempotent methods are not checked.
+- **eligible** (an idempotent method, or exactly one valid key): it may be retried;
+- **non-idempotent without a key**: it is attempted once — a server that processed it before failing never sees it twice — and a retryable
+  failure is returned as a `RetryExhaustedError` after that single attempt; a policy only classifies that attempt. To replay a POST the
+  server deduplicates, give it exactly one key;
+- **non-idempotent with an ambiguous key** — several values (under one name, both names or differently cased map keys), a present but blank
+  one, or a single key whose carrying header a `Connection` header names (any value, comma-separated, case-insensitive; hop-by-hop, so an
+  intermediary drops it; a token naming the other key header is harmless): it is refused with `ErrAmbiguousIdempotencyKey` (match it with
+  `errors.Is`) before any transmission, the limiter, the policy and the `ErrorHandler`. net/http's transport replays a request carrying
+  either header whatever its values, and the server may dedupe on another value than the caller meant, so such a request can be sent
+  neither once reliably nor safely twice. Idempotent methods are not checked.
 
 ```go
 req.Header.Set("Idempotency-Key", orderID) // the POST is now retried like a GET
 ```
 
 **Snapshot isolation.** What is sent is a private snapshot of the request — method, URL, Host, header, `ContentLength`, `TransferEncoding`,
-taken before the first transmission — copied afresh for every attempt. A policy, observer, proxy resolver (it gets its own copy of the
-header and URL) or the next round tripper that edits the request it sees cannot change what is sent next. Cookies are looked up and stored
+taken before the first transmission — copied afresh for every attempt. A policy or observer that edits the request it sees cannot change
+what is sent next. Transport hooks — a `WithProxyFunc` resolver or one on a caller transport, custom round trippers and dialers — receive the
+request being transmitted and must treat it as read-only, as in net/http; go-atlas does not isolate them. Cookies are looked up and stored
 for the snapshot's origin, starting from its `Cookie` header. A body without `GetBody` is buffered privately for replay; the caller's `Body`,
 `GetBody` and `ContentLength` are never assigned, and every attempt keeps the original framing (an unknown length is sent chunked each time).
-Trailers: a streaming body is sent with the caller's live `Trailer` map, which it fills as it is read; a buffered body is sent on every
-attempt with the trailers as they stood once buffering read it to the end. The caller's request gets no `GetBody`, so `http.Client` does not
+Trailers: the first transmission of a streaming body uses the caller's live `Trailer` map, which the body fills as it is read; a buffered
+body, and every later attempt, sends its own copy of the final trailers (as they stood once the body was read to the end). The caller's request gets no `GetBody`, so `http.Client` does not
 follow a 307/308 redirect of a body without one.
 
 **Change detection.** Before each retry the request handed to the retry layer is compared with its snapshot on Method, URL, Host, Header,

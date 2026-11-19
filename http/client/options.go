@@ -182,9 +182,11 @@ type options struct {
 	// observer receives the client's telemetry events (see [Observer]).
 	// Defaults to [NoopObserver]; set it with the generated WithObserver.
 	observer Observer `optgen:"default=defaultObserver(),notnil"`
-	// proxy resolves the proxy URL for outgoing requests. The auto-generated
-	// setter is named WithProxyFunc to free the WithProxy name for the more
-	// common host/port/auth convenience setter declared below.
+	// proxy resolves the proxy URL for outgoing requests. As with
+	// http.Transport.Proxy, it receives the request being transmitted and
+	// must treat it as read-only: the client does not give it a copy. The
+	// auto-generated setter is named WithProxyFunc to free the WithProxy name
+	// for the more common host/port/auth convenience setter declared below.
 	proxy ProxyFunc `opt:"ProxyFunc"`
 	// proxyTLSConfig customizes the TLS handshake to https:// proxies
 	// (e.g. a corporate proxy fronted by a self-signed cert). When set,
@@ -343,6 +345,10 @@ func WithSSRFAllowedCIDRs(cidrs ...netip.Prefix) Option {
 // its WithSSRFGuard option instead. WithTransportDriver does this automatically
 // for HTTPS: proxy routes are selected per request, and destinations are resolved,
 // guarded and pinned locally before opening their tunnels.
+//
+// A ProxyFunc, like every transport hook (custom round trippers, dialers),
+// receives the request being transmitted and must treat it as read-only, as
+// net/http requires of http.Transport.Proxy: the client does not isolate it.
 type ProxyFunc = func(*http.Request) (*url.URL, error)
 
 // WithProxy routes all requests through an HTTP proxy at host:port with
