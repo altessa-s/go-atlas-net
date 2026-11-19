@@ -53,13 +53,13 @@
 //     safe to repeat: an idempotent method of RFC 9110 (GET, HEAD, OPTIONS, TRACE, PUT, DELETE; case-sensitive, an
 //     empty method is GET) or a request with exactly one non-blank idempotency key — one value in total across
 //     Idempotency-Key and X-Idempotency-Key, header names matched ASCII case-insensitively. A POST or PATCH without a
-//     key, with several values, keys under both names or a blank key is sent once. A policy set with
-//     [WithRetryPolicyHandler] classifies the outcome but cannot replay a request the rule sends once.
-//     [ContextWithoutRetry] makes the retry layer attempt one request once whatever its method, key or policy
-//     ([RetryDisabled] reports the mark). A request sent once is handed to the next round tripper once, in a form
-//     net/http's HTTP/1.1 transport does not resend on a reused connection: a body without GetBody, a bodyless GET,
-//     HEAD or OPTIONS with an empty body net/http drops on the wire, canonical idempotency key names in lower case
-//     (the same header fields). Only a bodyless TRACE stays replayable by net/http (see [TransportDriver]).
+//     key is sent once. One with an ambiguous key — several values, keys under both names, or a present but blank
+//     one — is refused before any transmission with [ErrAmbiguousIdempotencyKey], since net/http replays a request
+//     carrying either header whatever its values. A policy set with [WithRetryPolicyHandler] classifies the outcome
+//     but cannot replay a request the rule sends once. [ContextWithoutRetry] limits the retry layer to exactly one
+//     call to the next round tripper whatever the method, key or policy ([RetryDisabled] reports the mark); the
+//     request is passed on unmodified, and net/http's own connection-level replay of an idempotent or validly keyed
+//     request is not affected (see [ContextWithoutRetry] and [TransportDriver]).
 //     [WithClock] sets the time source of the retry layer (a clock.Fake in tests).
 //   - Protection: a circuit breaker per destination host, so one failing endpoint never rejects requests to
 //     another; tune hosts with [WithCircuitBreakerSettings] and bound lazily created breakers with [WithMaxHostBreakers].
@@ -93,6 +93,8 @@
 //   - [IsRetryExhaustedError] extracts [RetryExhaustedError] (matches [ErrMaxRetriesExceeded]).
 //   - [IsSSRFError] extracts [SSRFError] (matches [ErrSSRFBlocked]).
 //   - [IsTemporaryError] checks for transient conditions that may succeed on retry.
+//   - [ErrAmbiguousIdempotencyKey] is returned, before any transmission, for a non-idempotent request whose
+//     idempotency key is not exactly one non-blank value.
 //
 // # Redaction
 //

@@ -95,6 +95,7 @@ Callers with their own retry loop can use `httpx.ParseRetryAfter(h, now, max)`. 
 | `RetryExhaustedError`   | `ErrMaxRetriesExceeded`   | All retry attempts exhausted, wraps last error (see below) |
 | `SSRFError`             | `ErrSSRFBlocked`          | Connection to private/local address blocked, or refused by an egress rule (`Rule`) |
 | `NonRetryableError`     | `ErrNonRetryable`         | Error that must not be retried (context, TLS, SSRF) |
+| --                      | `ErrAmbiguousIdempotencyKey` | Non-idempotent request with several idempotency key values or a blank one, refused before any transmission |
 | --                      | `ErrUninspectableCause`   | Stands for the causes of an error whose cause graph is too large to search (more than 1024 visits: causes shared exponentially, a cause unwrapping to itself); they are dropped |
 
 A request whose retry loop stops on a retryable failure because no further attempt is allowed — the retries, the `WithRetryMaxElapsed` budget or
@@ -128,30 +129,26 @@ c := httpclient.New(httpclient.WithRetryableStatuses(408, 429, 500, 502, 503, 50
 The built-in classification replays only requests that are safe to repeat: an idempotent method of RFC 9110
 (GET, HEAD, OPTIONS, TRACE, PUT, DELETE; method names are case-sensitive, so `post` or `put` is not idempotent, and an empty method is GET) or a
 request carrying exactly one non-blank idempotency key. The values of `Idempotency-Key` and `X-Idempotency-Key` are counted together, under every
-header map key that matches either name case-insensitively; the total must be one and the value non-empty after trimming spaces and tabs. A POST
-or PATCH without a key, with several values, with keys under both names or with a blank key is sent once — a server that processed it before
-failing never sees it twice — and a retryable failure is returned as a `RetryExhaustedError` after that single attempt. Header names are
-matched ASCII case-insensitively (no Unicode folding). A policy set with `WithRetryPolicyHandler` classifies the outcome of that attempt but cannot
-ask for another: to replay a POST the server deduplicates, give it exactly one key.
+header map key that matches either name ASCII case-insensitively (no Unicode folding); the total must be one and the value non-empty after
+trimming spaces and tabs. A POST or PATCH without a key is sent once — a server that processed it before failing never sees it twice — and a
+retryable failure is returned as a `RetryExhaustedError` after that single attempt. A policy set with `WithRetryPolicyHandler` classifies the
+outcome of that attempt but cannot ask for another: to replay a POST the server deduplicates, give it exactly one key.
+
+A non-idempotent request with an ambiguous key — several values (under one name, both names or differently cased map keys) or a present but
+blank one — is refused before any transmission with `ErrAmbiguousIdempotencyKey` (match it with `errors.Is`). net/http's transport replays a
+request carrying either header whatever its values, and the server may dedupe on another value than the caller meant, so such a request can
+be sent neither once reliably nor safely twice. Idempotent methods are not checked.
 
 ```go
 req.Header.Set("Idempotency-Key", orderID) // the POST is now retried like a GET
 ```
 
-`ContextWithoutRetry` opts a single request out of the retry layer: it is attempted once whatever its method, key, the client's retry options
-or policy (`RetryDisabled` reports the mark).
-
-A request the retry layer sends once (not eligible, or marked with `ContextWithoutRetry`) is handed to the next round tripper exactly once, as a
-copy net/http's HTTP/1.1 transport does not resend on a reused connection (`Request.Close` would not help: it does not keep the transport off an
-idle connection):
-
-- a request with a body is handed on without `GetBody` (the caller's request keeps it for 307/308 redirects);
-- a bodyless GET, HEAD or OPTIONS gets an empty body without `GetBody`; net/http probes it and sends no body, `Content-Length` or chunking, as
-  for no body (over HTTP/2 the stream ends with an empty DATA frame);
-- the values of a canonical `Idempotency-Key` or `X-Idempotency-Key` map key move to the lower-case name, which net/http's replay check does not
-  look up; header names are case-insensitive, so the server receives the same field values.
-
-Only a bodyless TRACE stays replayable by net/http. The caller's request and header are never modified.
+`ContextWithoutRetry` opts a single request out of the retry loop: the retry layer makes exactly one call to the next round tripper whatever
+the method, key, the client's retry options or policy (`RetryDisabled` reports the mark). The request is passed on unmodified. Its scope is the
+client's retry loop only: net/http's own connection-level replay (an HTTP/1.1 request resent after certain failures on a reused connection, an
+HTTP/2 request retried after REFUSED_STREAM or a GOAWAY below its stream ID) is not affected. That replay applies only to requests that are
+idempotent or carry an idempotency key — an unkeyed POST or PATCH is never resent after it may have been processed, and an ambiguous key is
+refused above — so it is safe by the request's own semantics.
 
 ```go
 req, _ := http.NewRequestWithContext(httpclient.ContextWithoutRetry(ctx), http.MethodPost, url, body)
@@ -413,10 +410,10 @@ body (`nil` or `http.NoBody`) or `GetBody`, and uses GET, HEAD, OPTIONS, TRACE
 or carries an `Idempotency-Key` or `X-Idempotency-Key` header. Unlike the client's
 retry classification above, net/http does not classify PUT/DELETE as idempotent
 without such a header; it checks only that the header is present, so a blank or
-duplicate key counts. The retry layer hands a request it sends once (see above) to
-the transport in a form that rules this replay out, except a bodyless TRACE. For any
-other request there is no transport option to disable this replay; it occurs below
-the client retry layer and `WithoutRetry` does not prevent it.
+duplicate key would count — the client refuses such a non-idempotent request with
+`ErrAmbiguousIdempotencyKey` before it reaches the transport. There is no transport
+option to disable this replay; it occurs below the client retry layer and neither
+`WithoutRetry` nor `ContextWithoutRetry` prevents it.
 This applies to the non-driver client, the conformance reference driver, and
 drivers using the standard HTTP/1.1 transport.
 An ordinary POST/PATCH without either header is never replayed after it may have

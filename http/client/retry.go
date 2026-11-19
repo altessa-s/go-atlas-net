@@ -304,6 +304,20 @@ func (rt *retryRoundTripper) CloseIdleConnections() { closeIdleConnections(rt.ne
 func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	start := rt.now()
 
+	if ambiguousIdempotencyKey(req) {
+		// Refused before any transmission: net/http's transport replays a
+		// request carrying an idempotency key header whatever its values,
+		// and the server may dedupe on another value than intended.
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+
+		resp, err := rt.finish(nil, nil, ErrAmbiguousIdempotencyKey, 0)
+		rt.requestDone(req, start, "unknown", 0, true)
+
+		return resp, err
+	}
+
 	// A request marked with ContextWithoutRetry is attempted once, whatever
 	// its method, headers or the retry policy.
 	replay := !RetryDisabled(req.Context()) && replayable(req)
@@ -332,7 +346,6 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		// on a redirect hop it was already filtered by redirectPolicy.
 		callerCookie: req.Header.Values("Cookie"),
 		firstAttempt: true,
-		singleSend:   !replay,
 	}
 	perRequestOpts := append(make([]coreretry.Option, 0, len(rt.retryOpts)+2), rt.retryOpts...)
 
@@ -386,18 +399,44 @@ func (rt *retryRoundTripper) requestDone(req *http.Request, start time.Time, sta
 // replayable reports whether the retry layer may send req more than once:
 // an idempotent method of RFC 9110 (GET, HEAD, OPTIONS, TRACE, PUT, DELETE;
 // method names are case-sensitive, an empty method is GET) or a request
-// carrying exactly one non-blank idempotency key (see [singleIdempotencyKey]).
+// carrying exactly one non-blank idempotency key (see [idempotencyKey]).
 // Any other request (POST, PATCH, a lowercase "post", ...) is attempted once,
 // so a server that processed it before failing never sees it twice. The rule
 // holds under a [RetryPolicyHandler] too: the policy classifies the outcome of
 // that one attempt but cannot ask for another.
 func replayable(req *http.Request) bool {
-	switch req.Method {
+	if idempotentMethod(req.Method) {
+		return true
+	}
+
+	_, single := idempotencyKey(req.Header)
+
+	return single
+}
+
+// idempotentMethod reports whether method is idempotent per RFC 9110: GET,
+// HEAD, OPTIONS, TRACE, PUT or DELETE, matched case-sensitively; an empty
+// method is GET.
+func idempotentMethod(method string) bool {
+	switch method {
 	case "", http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace, http.MethodPut, http.MethodDelete:
 		return true
 	}
 
-	return singleIdempotencyKey(req.Header)
+	return false
+}
+
+// ambiguousIdempotencyKey reports whether req, a request of a non-idempotent
+// method, carries an idempotency key header that is not exactly one
+// non-blank value (see [ErrAmbiguousIdempotencyKey]).
+func ambiguousIdempotencyKey(req *http.Request) bool {
+	if idempotentMethod(req.Method) {
+		return false
+	}
+
+	present, single := idempotencyKey(req.Header)
+
+	return present && !single
 }
 
 // Idempotency key header names, in their canonical form.
@@ -406,15 +445,13 @@ const (
 	headerXIdempotencyKey = "X-Idempotency-Key"
 )
 
-// singleIdempotencyKey reports whether h carries exactly one effective
-// idempotency key: the values of Idempotency-Key and X-Idempotency-Key under
-// every map key that matches either name ASCII case-insensitively (header
-// names are ASCII tokens; no Unicode folding) total one, and
-// that value is not empty once HTTP whitespace (SP, HTAB) is trimmed. Two
-// values (under one name, both names or differently cased map keys) are
-// ambiguous: the server may dedupe on a different one than intended, so the
-// request is not replayed. The caller's slices are only read.
-func singleIdempotencyKey(h http.Header) bool {
+// idempotencyKey inspects the idempotency key of h: the values of
+// Idempotency-Key and X-Idempotency-Key under every map key that matches
+// either name ASCII case-insensitively (header names are ASCII tokens; no
+// Unicode folding). present reports such a map key, even with no value;
+// single reports exactly one value in total that is not empty once HTTP
+// whitespace (SP, HTAB) is trimmed. The caller's slices are only read.
+func idempotencyKey(h http.Header) (present, single bool) {
 	var (
 		count int
 		value string
@@ -425,17 +462,15 @@ func singleIdempotencyKey(h http.Header) bool {
 			continue
 		}
 
+		present = true
 		count += len(values)
-		if count > 1 {
-			return false
-		}
 
 		if len(values) == 1 {
 			value = values[0]
 		}
 	}
 
-	return count == 1 && strings.Trim(value, " \t") != ""
+	return present, count == 1 && strings.Trim(value, " \t") != ""
 }
 
 // asciiEqualFold reports whether s and t are equal under ASCII case folding
@@ -462,72 +497,6 @@ func lowerASCII(b byte) byte {
 	}
 
 	return b
-}
-
-// singleTransmission makes the outgoing attempt of a request the retry layer
-// sends once not replayable by net/http, whose transport otherwise resends a
-// request after certain failures on a reused HTTP/1.1 connection, even after
-// writing it, when the request has no body (nil or http.NoBody) or a GetBody
-// and either method GET, HEAD, OPTIONS or TRACE or an Idempotency-Key or
-// X-Idempotency-Key map key (any value, any count). Request.Close does not
-// prevent this: it does not keep the transport from picking an idle
-// connection. The attempt is a shallow copy; the caller's request, its header
-// and GetBody (http.Client needs it for 307/308 redirects) are left as they
-// are:
-//
-//   - a request with a body is handed on without GetBody;
-//   - a bodyless GET, HEAD or OPTIONS gets an empty body without GetBody:
-//     net/http probes it, finds it empty and sends no body and no
-//     Content-Length, as for no body, over HTTP/1.1;
-//   - the values of a canonical Idempotency-Key or X-Idempotency-Key map key
-//     move to the lower-case name, which net/http does not look up for its
-//     replay check; header names are case-insensitive, so the server receives
-//     the same field.
-//
-// A bodyless TRACE (net/http would send an empty body chunked) remains
-// replayable by net/http.
-func singleTransmission(req *http.Request) *http.Request {
-	out := req.WithContext(req.Context())
-	out.GetBody = nil
-
-	if req.Body == nil || req.Body == http.NoBody {
-		switch req.Method {
-		case "", http.MethodGet, http.MethodHead, http.MethodOptions:
-			out.Body = io.NopCloser(strings.NewReader(""))
-			out.ContentLength = 0
-		}
-
-		out.Header = lowerIdempotencyKeys(req.Header)
-	}
-
-	return out
-}
-
-// lowerIdempotencyKeys returns h, or a copy of it when it has a canonical
-// Idempotency-Key or X-Idempotency-Key map key, with those values moved to
-// the lower-case name (after any values already there). h and its slices are
-// not modified.
-func lowerIdempotencyKeys(h http.Header) http.Header {
-	_, key := h[headerIdempotencyKey]
-	_, xkey := h[headerXIdempotencyKey]
-
-	if !key && !xkey {
-		return h
-	}
-
-	out := h.Clone()
-	for _, name := range []string{headerIdempotencyKey, headerXIdempotencyKey} {
-		values, ok := out[name]
-		if !ok {
-			continue
-		}
-
-		lower := strings.ToLower(name)
-		out[lower] = append(out[lower], values...)
-		delete(out, name)
-	}
-
-	return out
 }
 
 // bufferBody prepares req's body for replay. It prefers the caller-provided
@@ -602,9 +571,6 @@ type retryCall struct {
 	// bodyHanded reports whether an attempt handed the request body to the
 	// next round tripper, which then owns closing it.
 	bodyHanded bool
-	// singleSend reports that the request is sent once: its attempt is
-	// handed on without GetBody (see singleTransmission).
-	singleSend bool
 }
 
 // onRetry runs before each retry's backoff sleep.
@@ -658,10 +624,6 @@ func (c *retryCall) try(ctx context.Context) error {
 	c.firstAttempt = false
 
 	attemptReq, cancel := c.rt.attemptRequest(ctx, c.req, c.callerCookie)
-	if c.singleSend {
-		attemptReq = singleTransmission(attemptReq)
-	}
-
 	c.attempts++
 	c.bodyHanded = true
 	resp, err := c.rt.next.RoundTrip(attemptReq) //nolint:bodyclose // resp is stored in lastResp and either closed on next retry or returned to caller

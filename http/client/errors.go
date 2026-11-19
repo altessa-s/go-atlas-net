@@ -23,6 +23,16 @@ var (
 	// or [IsCircuitBreakerOpen] to inspect the error.
 	ErrCircuitBreakerOpen = errors.New("circuit breaker is open")
 
+	// ErrAmbiguousIdempotencyKey indicates a request of a non-idempotent method
+	// (POST, PATCH, ...) whose idempotency key is not exactly one non-blank
+	// value: several values across Idempotency-Key and X-Idempotency-Key (in
+	// any header-name case, under one name or both), or a present but blank
+	// one. The client refuses it before any transmission: net/http replays a
+	// request carrying either header after certain connection failures
+	// whatever its values, and the server may dedupe on another value than
+	// the caller intended. Send exactly one key, or none.
+	ErrAmbiguousIdempotencyKey = errors.New("ambiguous idempotency key")
+
 	// ErrResponseSizeExceeded indicates response size exceeded the configured limit
 	// set via [WithMaxResponseSize]. Returned (as a [ResponseSizeError]) by the
 	// response-size transport, above the circuit breaker, when Content-Length

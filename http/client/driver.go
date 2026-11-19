@@ -40,14 +40,12 @@ const DefaultDialTimeout = 30 * time.Second
 // a reused HTTP/1.1 connection net/http may resend a replayable request after
 // certain connection failures, even after writing it. Replayable means no body
 // (nil or http.NoBody) or GetBody, and GET, HEAD, OPTIONS, TRACE or the presence
-// of an Idempotency-Key or X-Idempotency-Key header (blank or duplicate values
-// included). The retry layer hands a request it sends once (not eligible for
-// replay, or marked with ContextWithoutRetry) to the driver in a form net/http
-// does not replay: a body without GetBody, a bodyless GET, HEAD or OPTIONS with
-// an empty body net/http drops on the wire, canonical idempotency key names in
-// lower case. A driver must not replay such a request either. A bodyless TRACE
-// stays replayable; for any other request there is no transport option to
-// disable this replay; it occurs below the retry layer, including WithoutRetry.
+// of an Idempotency-Key or X-Idempotency-Key header. The retry layer refuses a
+// non-idempotent request whose key is ambiguous (several values or a blank
+// one) with ErrAmbiguousIdempotencyKey before it reaches the driver, so a
+// non-idempotent request a driver sees carries no key or exactly one valid
+// key. There is no transport option to disable this replay; it occurs below
+// the retry layer, including WithoutRetry and ContextWithoutRetry.
 // An ordinary POST/PATCH without either header is never replayed after it may
 // have been processed. If nothing was written, net/http may retry it with no
 // body or GetBody. Consumed non-rewindable bodies must not be replayed.

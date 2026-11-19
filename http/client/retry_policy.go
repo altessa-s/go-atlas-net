@@ -68,9 +68,10 @@ var defaultRetryableStatuses = DefaultRetryableStatuses()
 // Never replaying a POST on a retryable status (resp.Request is the attempt's
 // request), even one with a single idempotency key. A transport error comes
 // without a response, so a policy cannot see the method there: mark such a
-// request with [ContextWithoutRetry], which makes it one attempt handed once to
-// the transport. [WithoutRetry] only makes one client-layer attempt: net/http
-// may still resend a request it considers replayable (see [TransportDriver]).
+// request with [ContextWithoutRetry], which limits the retry layer to one call
+// to the transport, or send it without a key. [ContextWithoutRetry] and
+// [WithoutRetry] bound the client retry loop only: net/http may still replay a
+// keyed or idempotent request at the connection level (see [TransportDriver]).
 //
 //	noPostReplay := func(ctx context.Context, resp *http.Response, err error) (bool, error) {
 //	    retry, perr := httpclient.DefaultRetryPolicy(ctx, resp, err)
