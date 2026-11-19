@@ -573,13 +573,17 @@ func TestBuilder_CaseVariantKeysAreAmbiguous(t *testing.T) {
 	require.ErrorIs(t, err, httpclient.ErrAmbiguousIdempotencyKey)
 	require.Empty(t, seen())
 
-	rb := httpclient.NewRequestBuilder(fastRetry()).POST(srv.URL).
-		Header("X-Trace", "a").Header("x-trace", "b")
-	t.Cleanup(rb.Release)
+	for range 20 {
+		rb := httpclient.NewRequestBuilder(fastRetry()).POST(srv.URL).
+			JSONBody(map[string]string{"a": "b"}).Header("content-type", "application/merge-patch+json")
 
-	req, err := rb.Build()
-	require.NoError(t, err)
-	require.Equal(t, []string{"a", "b"}, req.Header.Values("X-Trace"), "both entries are kept, in key order")
+		req, err := rb.Build()
+		require.NoError(t, err)
+		require.Equal(t, []string{"application/merge-patch+json"}, req.Header.Values("Content-Type"),
+			"one Content-Type, the later key in sorted order")
+
+		rb.Release()
+	}
 }
 
 // TestRetrySnapshot_RewindableTrailers checks a streaming body with GetBody:

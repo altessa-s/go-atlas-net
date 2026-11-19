@@ -91,9 +91,11 @@ type RequestBuilder interface {
 	// BytesBody sets a byte slice as the request body.
 	BytesBody(body []byte) RequestBuilder
 
-	// Header sets a single header.
-	// Entries whose keys differ only in case are all sent (added under the
-	// canonical name in key order), never collapsed into one.
+	// Header sets a single header. Entries whose keys differ only in case
+	// are applied in key order, the later replacing the earlier (so
+	// "content-type" wins over "Content-Type"), except Idempotency-Key and
+	// X-Idempotency-Key: their case variants are all sent, which the client
+	// refuses with ErrAmbiguousIdempotencyKey.
 	Header(key, value string) RequestBuilder
 	// Headers sets multiple headers from an iterator.
 	Headers(seq iter.Seq2[string, string]) RequestBuilder
@@ -561,11 +563,17 @@ func (rb *requestBuilder) BuildWithContext(ctx context.Context) (*http.Request, 
 		return nil, coreerrs.Wrapf(RedactError(err), "failed to create %s request for %s", rb.method, redactedRawURL(rb.url))
 	}
 
-	// Add every header entry, in key order: entries whose names differ only
-	// in case are all kept (under the canonical name), so none is silently
-	// dropped and the idempotency key guard sees them all.
+	// Apply the entries in key order, so the result does not depend on map
+	// iteration: an entry replaces one whose name differs only in case (the
+	// later key wins), except an idempotency key, whose case variants are all
+	// kept so the client refuses them as ambiguous rather than send one.
 	for _, k := range slices.Sorted(maps.Keys(rb.headers)) {
-		req.Header.Add(k, rb.headers[k])
+		if asciiEqualFold(k, headerIdempotencyKey) || asciiEqualFold(k, headerXIdempotencyKey) {
+			req.Header.Add(k, rb.headers[k])
+			continue
+		}
+
+		req.Header.Set(k, rb.headers[k])
 	}
 
 	rb.applyAuth(req)
