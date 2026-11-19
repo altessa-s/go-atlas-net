@@ -6,6 +6,7 @@ package client_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -808,4 +809,131 @@ func TestErrorHandlerReplyGetsRequestView(t *testing.T) {
 
 	require.NotNil(t, resp.Request)
 	require.Equal(t, srv.URL+"/path", resp.Request.URL.String())
+}
+
+// alwaysFailingReader fails every Read.
+type alwaysFailingReader struct{}
+
+func (alwaysFailingReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+
+// TestErrorHandlerReplyAfterFailureGetsView checks that an ErrorHandler's own
+// reply after a failure with no reply gets a view of the request: of the
+// attempt after a dial failure, of the snapshot after a buffering failure
+// (no attempt), for a 200 and for a malformed redirect (no panic).
+func TestErrorHandlerReplyAfterFailureGetsView(t *testing.T) {
+	t.Parallel()
+
+	const target = "http://127.0.0.1:1/path" // nothing listens: the dial fails
+
+	tests := map[string]struct {
+		redirect bool
+		buffer   bool
+	}{
+		"dial failure, 200":                  {},
+		"dial failure, malformed redirect":   {redirect: true},
+		"buffer failure, 200":                {buffer: true},
+		"buffer failure, malformed redirect": {buffer: true, redirect: true},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			c := httpclient.New(loopback, httpclient.WithRetryMax(1), httpclient.WithRetryWait(time.Millisecond, time.Millisecond),
+				httpclient.WithErrorHandler(func(*http.Response, error, int) (*http.Response, error) {
+					if tc.redirect {
+						return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": {"http://[::1"}}, Body: http.NoBody}, nil
+					}
+
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody}, nil
+				}))
+
+			var (
+				body   io.Reader
+				method = http.MethodGet
+			)
+
+			if tc.buffer {
+				method = http.MethodPost
+				body = io.NopCloser(alwaysFailingReader{})
+			}
+
+			req, err := http.NewRequestWithContext(t.Context(), method, target, body)
+			require.NoError(t, err)
+
+			if tc.buffer {
+				req.Header.Set("Idempotency-Key", "k1")
+			}
+
+			require.NotPanics(t, func() {
+				resp, doErr := c.Do(req)
+				if tc.redirect {
+					require.Error(t, doErr)
+					return
+				}
+
+				require.NoError(t, doErr)
+				t.Cleanup(func() { _ = resp.Body.Close() })
+
+				require.NotNil(t, resp.Request)
+				require.Equal(t, target, resp.Request.URL.String())
+				require.Equal(t, method, resp.Request.Method)
+			})
+		})
+	}
+}
+
+// closeCountingBody counts its Close calls.
+type closeCountingBody struct {
+	io.Reader
+
+	closes *atomic.Int32
+}
+
+func (b closeCountingBody) Close() error {
+	b.closes.Add(1)
+	return nil
+}
+
+// TestSeeOtherClosesBodyLikeNetHTTP checks a 303 redirect of a buffered POST
+// body through the public client: the redirected request is a GET, and the
+// body is closed as by net/http's own client and transport (once by the
+// round tripper, which must close it, and once more by http.Client after the
+// redirect reply).
+func TestSeeOtherClosesBodyLikeNetHTTP(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/from", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		http.Redirect(w, r, "/to", http.StatusSeeOther)
+	})
+	mux.HandleFunc("/to", func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, r.Method) })
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	run := func(c *http.Client) (string, int32) {
+		var closes atomic.Int32
+
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/from",
+			closeCountingBody{Reader: strings.NewReader("order"), closes: &closes})
+		require.NoError(t, err)
+		req.Header.Set("Idempotency-Key", "k1")
+
+		resp, err := c.Do(req)
+		require.NoError(t, err)
+
+		method, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+
+		return string(method), closes.Load()
+	}
+
+	method, closes := run(httpclient.New(loopback))
+	stdMethod, stdCloses := run(&http.Client{})
+
+	require.Equal(t, http.MethodGet, method)
+	require.Equal(t, stdMethod, method)
+	require.Equal(t, stdCloses, closes, "the body is closed as by net/http")
 }

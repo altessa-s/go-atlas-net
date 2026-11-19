@@ -165,7 +165,8 @@ trailers. An end met by the body's first Read waits for the next Read or `Close`
 DELETE, ...) on its own goroutine while it writes the headers that list the trailer keys, and it reads or closes the body again only after. Every such body is tracked for the whole call: before the caller's `GetBody` is asked for the next body, the
 retry waits (bounded by the request context) until each earlier one is closed with no read in flight, so two never write the caller's map
 at once. A buffered body is read to its end by buffering. The caller's request gets no `GetBody`, so `http.Client` does not follow a 307/308
-redirect of a body without one.
+redirect of a body without one. The caller's request body is closed by the round tripper, as `http.RoundTripper` requires: by buffering, which reads it to its end, or by
+the transport that sends it; `http.Client` closes it once more after a redirect reply, exactly as with net/http's own transport.
 
 **Change detection.** Before each retry the request handed to the retry layer is compared with its snapshot on Method, URL, Host, Header,
 `ContentLength` and `TransferEncoding` (the URL field by field, so a Host change of an opaque URL counts); on a difference the loop stops

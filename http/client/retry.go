@@ -254,11 +254,36 @@ func (c *retryCall) cookieNameList() []string {
 // withCookieNames returns a copy of req (a fresh view of the last attempt
 // when nil) whose context records the cookie names of this call's replies.
 func (c *retryCall) withCookieNames(req *http.Request) *http.Request {
-	if req == nil {
-		return c.responseView(c.lastAttemptReq, c.cookieNameList())
+	return req.WithContext(context.WithValue(req.Context(), receivedCookiesKey{}, c.cookieNameList()))
+}
+
+// viewSource is the request the returned reply's view is built from: the
+// last attempt's (recorded before it was sent, so a reply an ErrorHandler
+// makes after a transport error has one too), or the snapshot when no
+// attempt was made (a buffering failure).
+func (c *retryCall) viewSource() *http.Request {
+	if c.lastAttemptReq != nil {
+		return c.lastAttemptReq
 	}
 
-	return req.WithContext(context.WithValue(req.Context(), receivedCookiesKey{}, c.cookieNameList()))
+	return c.base
+}
+
+// settleView gives the reply going back to http.Client a usable request view.
+// The reply received (lastResp) gets a fresh view: whatever a policy or the
+// ErrorHandler did to the one they saw (its URL, its context and the cookie
+// names recorded there), the redirect handling reads the library's own. An
+// ErrorHandler's own reply without a usable request (a redirect among them)
+// gets a fresh view too; one with a request carries, with a cookie jar, the
+// cookie names this hop's replies set, for the redirect filtering.
+func (c *retryCall) settleView(resp, lastResp *http.Response) {
+	switch {
+	case resp == nil:
+	case resp == lastResp, resp.Request == nil, resp.Request.URL == nil:
+		resp.Request = c.responseView(c.viewSource(), c.cookieNameList())
+	case c.rt.jar != nil:
+		resp.Request = c.withCookieNames(resp.Request)
+	}
 }
 
 // maxRedirects is net/http's default redirect limit.
@@ -366,6 +391,7 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 			// buffer.
 			resp, handed, err := rt.finish(nil, nil, bufErr, 0)
 			resp, err = call.settle(resp, err, handed)
+			call.settleView(resp, nil)
 			rt.requestDone(call.base, start, "unknown", 0, true)
 
 			return resp, err
@@ -417,24 +443,7 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	resp, handed, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts)
 	resp, err = call.settle(resp, err, handed)
 
-	switch {
-	case resp == nil || call.lastAttemptReq == nil:
-	case resp == lastResp:
-		// The reply goes back to http.Client with a fresh view: whatever a
-		// policy or the ErrorHandler did to the one they saw (its URL, its
-		// context and the cookie names recorded there), the redirect
-		// handling reads the library's own.
-		resp.Request = call.responseView(call.lastAttemptReq, call.cookieNameList())
-	case resp.Request == nil || resp.Request.URL == nil:
-		// An ErrorHandler's own reply without a usable request (a redirect
-		// among them) gets a fresh view of the attempted request, with the
-		// cookie names this hop's replies set.
-		resp.Request = call.responseView(call.lastAttemptReq, call.cookieNameList())
-	case rt.jar != nil:
-		// An ErrorHandler's own reply may be a redirect too: it carries the
-		// cookie names this hop's replies set, for the redirect filtering.
-		resp.Request = call.withCookieNames(resp.Request)
-	}
+	call.settleView(resp, lastResp)
 	// Retries count the calls actually made to the next round tripper.
 	rt.requestDone(call.base, start, statusClass, max(call.attempts-1, 0), failed)
 
@@ -1183,6 +1192,9 @@ func (c *retryCall) try(ctx context.Context) error {
 	c.firstAttempt = false
 
 	attemptReq := c.rt.attemptRequest(attempt, c.callerCookie)
+	// Recorded before sending: a reply an ErrorHandler makes after a
+	// transport error gets its view from it.
+	c.lastAttemptReq = attemptReq
 	c.attempts++
 	c.bodyHanded = true
 	resp, err := c.rt.next.RoundTrip(attemptReq) //nolint:bodyclose // resp is stored in lastResp and either closed on next retry or returned to caller
@@ -1209,7 +1221,6 @@ func (c *retryCall) try(ctx context.Context) error {
 		// Policies, the ErrorHandler and the caller see a detached view of
 		// the attempt: editing it reaches neither the request the transport
 		// may still be sending (an early reply) nor the next attempt.
-		c.lastAttemptReq = attemptReq
 		if c.rt.jar != nil {
 			// Names set or deleted by every reply of this hop, discarded
 			// attempts included, so a later reply that sets none does not
