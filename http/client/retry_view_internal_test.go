@@ -854,3 +854,198 @@ func TestRetryRoundTripper_ExhaustedFromReceivedReply(t *testing.T) {
 	require.True(t, ok, "last error %v", exhaustedErr.LastError)
 	require.Equal(t, &UnexpectedStatusError{Status: http.StatusServiceUnavailable, Method: http.MethodGet, Host: "example.com", URI: "/path"}, status)
 }
+
+// gatedBody is a caller body whose first Read blocks until release is closed,
+// and whose Close does not unblock it.
+type gatedBody struct {
+	release chan struct{}
+	r       io.Reader
+	trailer http.Header
+	done    *atomic.Bool // set as the Read returns
+}
+
+func (b *gatedBody) Read(p []byte) (int, error) {
+	<-b.release
+
+	n, err := b.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		b.trailer.Set("X-Sum", "abc")
+	}
+
+	b.done.Store(true)
+
+	return n, err
+}
+
+func (b *gatedBody) Close() error { return nil }
+
+// TestRetryRoundTripper_TransportGetBodyAwaitsReads checks that a transport's
+// own rewind waits, like the retry layer's, until an earlier body that may
+// write the caller's trailers has no Read in flight, even once it is closed.
+func TestRetryRoundTripper_TransportGetBodyAwaitsReads(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+
+	var (
+		readDone   atomic.Bool
+		doneAtCall atomic.Bool
+	)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, "http://example.com", nil)
+	require.NoError(t, err)
+
+	req.Trailer = http.Header{"X-Sum": nil}
+	req.Body = &gatedBody{release: release, r: strings.NewReader("payload"), trailer: req.Trailer, done: &readDone}
+	req.GetBody = func() (io.ReadCloser, error) {
+		doneAtCall.Store(readDone.Load())
+		return &trailerBody{r: strings.NewReader("payload"), trailer: req.Trailer}, nil
+	}
+
+	rt := &retryRoundTripper{
+		observer:          NoopObserver{},
+		retryableStatuses: DefaultRetryableStatuses(),
+		next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			body := r.Body
+			readStarted := make(chan struct{})
+
+			go func() {
+				close(readStarted)
+
+				buf := make([]byte, 64)
+				_, _ = body.Read(buf) // held until release
+			}()
+
+			<-readStarted
+			time.Sleep(10 * time.Millisecond) // let the Read begin
+
+			_ = body.Close() // closed while the Read is still in flight
+
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+				close(release)
+			}()
+
+			replacement, gbErr := r.GetBody() // net/http's own rewind
+			require.NoError(t, gbErr)
+
+			_, _ = io.Copy(io.Discard, replacement)
+			_ = replacement.Close()
+
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+		}),
+		retryOpts:   newTestRetryOpts(0),
+		maxAttempts: 0,
+	}
+
+	resp, err := rt.RoundTrip(req)
+	require.NoError(t, err)
+
+	_ = resp.Body.Close()
+
+	require.True(t, doneAtCall.Load(), "the caller's GetBody ran only after the earlier Read returned")
+}
+
+// countingBody is a transport reply body counting its Close calls.
+type countingBody struct {
+	io.Reader
+
+	closes *atomic.Int32
+}
+
+func (b countingBody) Close() error {
+	b.closes.Add(1)
+	return nil
+}
+
+// TestRetryRoundTripper_ReturnedBodyOwnership checks the one ownership rule
+// for the reply handed back: the received body passes to the caller when it
+// is the body returned, and is otherwise released when the returned body is
+// closed (never before, never read), whoever made the returned reply.
+func TestRetryRoundTripper_ReturnedBodyOwnership(t *testing.T) {
+	t.Parallel()
+
+	replaceWithPipe := func(resp *http.Response) *io.PipeWriter {
+		pr, pw := io.Pipe()
+		resp.Body = pr
+
+		return pw
+	}
+
+	type outcome struct {
+		policy  RetryPolicyHandler
+		handler ErrorHandler
+		status  int
+		want    string
+	}
+
+	// keep feeds a replacement pipe.
+	keep := func(pw *io.PipeWriter) {
+		go func() {
+			_, _ = io.WriteString(pw, "replacement")
+			_ = pw.Close()
+		}()
+	}
+
+	tests := map[string]outcome{
+		"reply returned as is": {status: http.StatusOK, want: "received"},
+		"policy replaces the body": {status: http.StatusOK, want: "replacement",
+			policy: func(_ context.Context, resp *http.Response, _ error) (bool, error) {
+				keep(replaceWithPipe(resp))
+				return false, nil
+			}},
+		"handler replaces the body of the same reply": {status: http.StatusServiceUnavailable, want: "replacement",
+			handler: func(resp *http.Response, _ error, _ int) (*http.Response, error) {
+				keep(replaceWithPipe(resp))
+				return resp, nil
+			}},
+		"handler returns its own reply": {status: http.StatusServiceUnavailable, want: "replacement",
+			handler: func(_ *http.Response, _ error, _ int) (*http.Response, error) {
+				own := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}}
+				keep(replaceWithPipe(own))
+
+				return own, nil
+			}},
+		"handler wraps the received body": {status: http.StatusServiceUnavailable, want: "received",
+			handler: func(resp *http.Response, _ error, _ int) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(resp.Body)}, nil
+			}},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var closes atomic.Int32
+
+			rt := &retryRoundTripper{
+				observer:           NoopObserver{},
+				retryableStatuses:  DefaultRetryableStatuses(),
+				retryPolicyHandler: tc.policy,
+				errorHandler:       tc.handler,
+				next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: tc.status,
+						Body:       countingBody{Reader: strings.NewReader("received"), closes: &closes},
+						Request:    r,
+					}, nil
+				}),
+				retryOpts:   newTestRetryOpts(0),
+				maxAttempts: 0,
+			}
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com", nil)
+			require.NoError(t, err)
+
+			resp, err := rt.RoundTrip(req)
+			require.NoError(t, err)
+			require.Zero(t, closes.Load(), "nothing is released before the caller closes the reply")
+
+			got, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, string(got))
+
+			require.NoError(t, resp.Body.Close())
+			require.Equal(t, int32(1), closes.Load(), "the received body is released exactly once")
+		})
+	}
+}
