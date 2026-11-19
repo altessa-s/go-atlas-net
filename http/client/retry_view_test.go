@@ -432,9 +432,10 @@ func (b *pipeTrailerBody) Close() error { return b.r.Close() }
 
 // TestTrailers_ProbedEmptyBody exercises net/http's transferWriter probe: a
 // GET with a body of unknown length that stays empty past the probe's 200ms
-// wait, so the probe's first Read meets the end on its own goroutine while
-// the headers (which list the trailer keys) are written. Run with -race: the
-// attempt's trailer map is not written then; the trailers still arrive.
+// wait, so the headers (which list the trailer keys) go out while the probe's
+// first Read is still pending on its own goroutine. The pipe closes once the
+// server has the headers, ending that probe Read: its publication is
+// deferred to the transport's next Read. Run with -race; the trailers arrive.
 func TestTrailers_ProbedEmptyBody(t *testing.T) {
 	t.Parallel()
 
@@ -443,8 +444,11 @@ func TestTrailers_ProbedEmptyBody(t *testing.T) {
 			t.Parallel()
 
 			got := make(chan string, 1)
+			headers := make(chan struct{})
 
 			srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				close(headers)
+
 				_, _ = io.Copy(io.Discard, r.Body)
 				got <- r.Trailer.Get("X-Sum")
 			}))
@@ -463,7 +467,7 @@ func TestTrailers_ProbedEmptyBody(t *testing.T) {
 			req.Body = &pipeTrailerBody{r: pr, trailer: req.Trailer, dynamic: dynamic}
 
 			go func() {
-				time.Sleep(300 * time.Millisecond)
+				<-headers
 
 				_ = pw.Close()
 			}()

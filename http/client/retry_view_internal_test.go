@@ -20,6 +20,8 @@ import (
 
 	"github.com/altessa-s/go-atlas-net/http/client/limiters"
 	"github.com/altessa-s/go-atlas-net/httpx"
+
+	coreretry "github.com/altessa-s/go-atlas-core/retry"
 )
 
 // countingCloser is a request body that counts its Close calls.
@@ -714,4 +716,141 @@ func TestRetryRoundTripper_ViewIsDeepCopy(t *testing.T) {
 	require.Equal(t, "v", sent.PathValue("p"))
 	require.Equal(t, "user:pw", sent.URL.User.String())
 	require.Equal(t, "user:pw", req.URL.User.String())
+}
+
+// funcBody is a reply body of a type that cannot be compared (it holds a
+// func), counting its Close calls.
+type funcBody struct {
+	io.Reader
+
+	onClose func()
+}
+
+func (b funcBody) Close() error {
+	b.onClose()
+	return nil
+}
+
+// TestRetryRoundTripper_ReplyBodyOwnership checks the disposal of discarded
+// replies: every received body is closed exactly once, whatever a policy did
+// to resp.Body, a body of a non-comparable type never panics, and a
+// cancellation during the backoff does not close it twice.
+func TestRetryRoundTripper_ReplyBodyOwnership(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		policy RetryPolicyHandler
+		cancel bool
+	}{
+		{name: "success on the next attempt"},
+		{name: "policy clears the body", policy: func(_ context.Context, resp *http.Response, _ error) (bool, error) {
+			if resp.StatusCode == http.StatusServiceUnavailable {
+				resp.Body = nil
+				return true, nil
+			}
+
+			return false, nil
+		}},
+		{name: "policy replaces the body", policy: func(_ context.Context, resp *http.Response, _ error) (bool, error) {
+			if resp.StatusCode == http.StatusServiceUnavailable {
+				resp.Body = io.NopCloser(strings.NewReader("replacement"))
+				return true, nil
+			}
+
+			return false, nil
+		}},
+		{name: "canceled during the backoff", cancel: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var (
+				calls  int
+				closes atomic.Int32
+			)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			t.Cleanup(cancel)
+
+			opts := newTestRetryOpts(2)
+			if tc.cancel {
+				opts = []coreretry.Option{
+					coreretry.WithMaxAttempts(2),
+					coreretry.WithNextDelay(func(int, error) time.Duration {
+						cancel()
+						return time.Hour
+					}),
+				}
+			}
+
+			rt := &retryRoundTripper{
+				observer:           NoopObserver{},
+				retryableStatuses:  DefaultRetryableStatuses(),
+				retryPolicyHandler: tc.policy,
+				next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+					calls++
+					if calls == 1 {
+						body := funcBody{Reader: strings.NewReader("busy"), onClose: func() { closes.Add(1) }}
+						return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: body, Request: r}, nil
+					}
+
+					return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+				}),
+				retryOpts:   opts,
+				maxAttempts: 2,
+			}
+
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
+			require.NoError(t, err)
+
+			resp, err := rt.RoundTrip(req)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+
+			if tc.cancel {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			require.Equal(t, int32(1), closes.Load(), "the received body is closed exactly once")
+		})
+	}
+}
+
+// TestRetryRoundTripper_ExhaustedFromReceivedReply checks that the exhausted
+// error describes the reply as received: a policy editing the reply's status
+// and clearing its request view changes nothing in it.
+func TestRetryRoundTripper_ExhaustedFromReceivedReply(t *testing.T) {
+	t.Parallel()
+
+	rt := &retryRoundTripper{
+		observer:          NoopObserver{},
+		retryableStatuses: DefaultRetryableStatuses(),
+		retryPolicyHandler: func(_ context.Context, resp *http.Response, _ error) (bool, error) {
+			resp.StatusCode = http.StatusTeapot
+			resp.Request = nil
+
+			return true, nil
+		},
+		next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Request: r}, nil
+		}),
+		retryOpts:   newTestRetryOpts(1),
+		maxAttempts: 1,
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com/path?q=secret", nil)
+	require.NoError(t, err)
+
+	_, err = rt.RoundTrip(req) //nolint:bodyclose // an exhausted round trip returns no response
+	exhaustedErr, ok := errors.AsType[*RetryExhaustedError](err)
+	require.True(t, ok, "error %v", err)
+
+	status, ok := errors.AsType[*UnexpectedStatusError](exhaustedErr.LastError)
+	require.True(t, ok, "last error %v", exhaustedErr.LastError)
+	require.Equal(t, &UnexpectedStatusError{Status: http.StatusServiceUnavailable, Method: http.MethodGet, Host: "example.com", URI: "/path"}, status)
 }

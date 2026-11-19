@@ -17,7 +17,6 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -363,7 +362,7 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 			// the ErrorHandler sees it with zero attempts, as it does when the
 			// context ended before the first attempt of a body it need not
 			// buffer.
-			resp, err := rt.finish(nil, nil, bufErr, 0, discardPolicy{})
+			resp, err := rt.finish(nil, nil, bufErr, 0, call.dispose, call.owns)
 			rt.requestDone(call.base, start, "unknown", 0, true)
 
 			return resp, err
@@ -405,13 +404,13 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	}
 
 	if retryErr != nil && ctx.Err() == nil && retryable(retryErr) {
-		retryErr = exhausted(call.base, call.lastResp, retryErr, call.attempts)
+		retryErr = exhausted(call.base, call.lastUnexpected, retryErr, call.attempts)
 	}
 	// A pass-through policy (WithoutRetry) clears retryErr but leaves the
 	// attempt's error in lastErr, which finish returns: still a failure.
 	failed := retryErr != nil || call.lastErr != nil
 	lastResp := call.lastResp
-	resp, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts, call.discardPolicy())
+	resp, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts, call.dispose, call.owns)
 
 	switch {
 	case resp == nil || call.lastAttemptReq == nil:
@@ -770,9 +769,13 @@ type retryCall struct {
 	// the reply returned to http.Client gets a fresh view built from them.
 	lastAttemptReq *http.Request
 	cookieNames    map[string]struct{}
-	// lastAttemptBody is the body of the last reply as received: the only
-	// body a discard may drain.
-	lastAttemptBody io.ReadCloser
+	// owned is the body of the last reply, owned by the attempt until it is
+	// disposed of (dispose) or handed back to the caller. lastContentLength,
+	// lastRetryable and lastUnexpected record that reply as received.
+	owned             *ownedBody
+	lastContentLength int64
+	lastRetryable     *retryableStatusError
+	lastUnexpected    *UnexpectedStatusError
 	// liveBodies holds a close signal for every body that may write the
 	// caller's live trailers: each attempt's body and each body the transport
 	// got from the attempt's GetBody (see awaitLiveBodies). Guarded by
@@ -1078,7 +1081,7 @@ func (c *retryCall) onRetry(attempt int, err error, delay time.Duration) {
 	// With an ErrorHandler the response must stay readable in case
 	// the context ends during the sleep and the handler receives it.
 	if c.rt.errorHandler == nil && c.lastResp != nil && c.lastResp.Body != nil {
-		c.discardPolicy().discard(c.lastResp)
+		c.dispose(c.lastResp)
 		c.lastResp.Body = http.NoBody
 	}
 
@@ -1103,7 +1106,7 @@ func (c *retryCall) onRetry(attempt int, err error, delay time.Duration) {
 // coreretry.Do.
 func (c *retryCall) try(ctx context.Context) error {
 	// Close previous response body if present from a prior attempt.
-	c.discardPolicy().discard(c.lastResp)
+	c.dispose(c.lastResp)
 	c.lastResp = nil
 
 	// A retry stops when the caller's request changed after the snapshot:
@@ -1158,7 +1161,13 @@ func (c *retryCall) try(ctx context.Context) error {
 	resp = releaseWithBody(resp, err, cancel) //nolint:bodyclose // same response, closed like resp above
 
 	if resp != nil {
-		c.lastAttemptBody = resp.Body
+		// The attempt owns the body it received, whatever callbacks later do
+		// to resp.Body; its outcome is recorded before any callback runs.
+		resp.Body = c.own(resp)
+		c.lastStatus = resp.StatusCode
+		c.lastContentLength = resp.ContentLength
+		c.lastRetryable = c.rt.retryableStatus(resp)
+		c.lastUnexpected = attemptStatus(attemptReq, c.base, resp.StatusCode)
 	}
 
 	// Every reply's cookies are stored exactly once, on receipt, whatever
@@ -1192,10 +1201,6 @@ func (c *retryCall) try(ctx context.Context) error {
 	c.lastResp = resp
 	c.lastErr = err
 
-	if resp != nil {
-		c.lastStatus = resp.StatusCode
-	}
-
 	// A breaker rejection is reported from the attempt's own outcome, once,
 	// before any classification: a retry policy (WithoutRetry's pass-through
 	// among them) may replace or suppress the error the caller then gets.
@@ -1214,6 +1219,10 @@ func (c *retryCall) try(ctx context.Context) error {
 	}
 
 	classified := c.rt.classifyResponse(resp)
+	if _, ok := errors.AsType[*retryableStatusError](classified); ok {
+		classified = c.lastRetryable
+	}
+
 	c.lastErr = classified
 
 	return classified
@@ -1249,9 +1258,10 @@ func (c *retryCall) applyPolicy(ctx context.Context, resp *http.Response, err er
 	if err != nil {
 		return err
 	}
-	// retry == true && err == nil → retryable status on resp
+	// retry == true && err == nil → retryable status on resp, as received
+	// (the policy may have edited resp)
 	if resp != nil {
-		c.lastErr = c.rt.retryableStatus(resp)
+		c.lastErr = c.lastRetryable
 		return c.lastErr
 	}
 
@@ -1266,10 +1276,10 @@ func (c *retryCall) applyPolicy(ctx context.Context, resp *http.Response, err er
 // exhausted retryable status is reported as an [UnexpectedStatusError] of
 // the last reply, so callers classify it like any other failed status. The
 // URL omits the query string and user info, which may carry credentials.
-func exhausted(req *http.Request, lastResp *http.Response, retryErr error, attempts int) error {
+func exhausted(req *http.Request, lastStatus *UnexpectedStatusError, retryErr error, attempts int) error {
 	last := retryErr
-	if _, ok := errors.AsType[*retryableStatusError](retryErr); ok && lastResp != nil && lastResp.Request != nil {
-		last = unexpectedStatus(lastResp)
+	if _, ok := errors.AsType[*retryableStatusError](retryErr); ok && lastStatus != nil {
+		last = lastStatus
 	}
 
 	return &RetryExhaustedError{
@@ -1278,6 +1288,19 @@ func exhausted(req *http.Request, lastResp *http.Response, retryErr error, attem
 		Method:    req.Method,
 		URL:       redactedURL(req.URL),
 	}
+}
+
+// attemptStatus describes a failed reply of status to attemptReq, from the
+// attempt's private request (base supplies the method), as received: what a
+// callback later does to the reply or its request view does not change it.
+func attemptStatus(attemptReq, base *http.Request, status int) *UnexpectedStatusError {
+	se := &UnexpectedStatusError{Status: status, Method: base.Method}
+	if u := attemptReq.URL; u != nil {
+		se.Host = cmp.Or(attemptReq.Host, u.Host)
+		se.URI = cmp.Or(u.EscapedPath(), "/")
+	}
+
+	return se
 }
 
 // unexpectedStatus describes the failed reply resp. A redirect hop's request
@@ -1297,9 +1320,11 @@ func unexpectedStatus(resp *http.Response) *UnexpectedStatusError {
 }
 
 // finish turns the outcome of the retry loop, after attempts attempts, into
-// the round trip result; d says how a discarded reply is disposed of.
+// the round trip result; dispose disposes of a discarded reply, and owns
+// reports whether a body is the one the last attempt received.
 func (rt *retryRoundTripper) finish(
-	lastResp *http.Response, lastErr, retryErr error, attempts int, d discardPolicy,
+	lastResp *http.Response, lastErr, retryErr error, attempts int,
+	dispose func(*http.Response), owns func(io.ReadCloser) bool,
 ) (*http.Response, error) {
 	// Handle retry exhaustion and terminal errors (possibly with a response,
 	// e.g. a non-retryable or exhausted retryable status).
@@ -1310,69 +1335,27 @@ func (rt *retryRoundTripper) finish(
 			// as a transport error does (it may quote resp.Request.URL).
 			err = redactTransportError(err)
 
-			if resp != lastResp {
-				// The handler did not hand the original response on.
-				d.discard(lastResp)
+			if resp != lastResp && (err != nil || resp == nil || !owns(resp.Body)) {
+				// The handler did not hand the original reply (or its body)
+				// on.
+				dispose(lastResp)
 			}
 
-			return discardOnError(resp, err, d)
+			return discardOnError(resp, err, dispose)
 		}
 
-		return discardOnError(lastResp, retryErr, d)
+		return discardOnError(lastResp, retryErr, dispose)
 	}
 
-	return discardOnError(lastResp, lastErr, d)
-}
-
-// discardPolicy says how a discarded reply is disposed of: only the body the
-// last attempt received (body) may be drained, and only under that
-// attempt's own deadline. A body a callback (a policy, the ErrorHandler)
-// put in its place is closed directly, and the attempt's own body with it.
-type discardPolicy struct {
-	body     io.ReadCloser
-	deadline bool
-}
-
-// sameBody reports whether a and b are the same body. A body of a type that
-// cannot be compared (a struct value holding a func, say) is never the same:
-// comparing it would panic.
-func sameBody(a, b io.ReadCloser) bool {
-	if a == nil || b == nil {
-		return false
-	}
-
-	t := reflect.TypeOf(a)
-	if t != reflect.TypeOf(b) || !t.Comparable() {
-		return false
-	}
-
-	return a == b
-}
-
-// discard closes resp's body, draining it only when the policy allows.
-func (d discardPolicy) discard(resp *http.Response) {
-	if resp == nil || resp.Body == nil {
-		return
-	}
-
-	if sameBody(resp.Body, d.body) {
-		closeBody(resp, d.deadline)
-		return
-	}
-
-	_ = resp.Body.Close()
-
-	if d.body != nil {
-		_ = d.body.Close()
-	}
+	return discardOnError(lastResp, lastErr, dispose)
 }
 
 // discardOnError enforces the [http.RoundTripper] contract that a response
 // accompanies only a nil error: [http.Client] drops a response returned
 // together with an error without closing it, so its body would leak.
-func discardOnError(resp *http.Response, err error, d discardPolicy) (*http.Response, error) {
+func discardOnError(resp *http.Response, err error, dispose func(*http.Response)) (*http.Response, error) {
 	if err != nil {
-		d.discard(resp)
+		dispose(resp)
 		return nil, err
 	}
 
@@ -1384,34 +1367,94 @@ func discardOnError(resp *http.Response, err error, d discardPolicy) (*http.Resp
 // bodies are cheaper to abandon together with their connection.
 const maxDiscardDrain = 64 << 10
 
-// closeBody drains (up to [maxDiscardDrain]) and closes resp's body when
-// there is one. Bodies of a larger known length and protocol upgrades are
-// closed without reading, and so is every body of a request without a
-// deadline: a stalled upstream must not block the caller indefinitely.
+// ownedBody is the body of a reply, owned by the attempt that received it:
+// identified by this pointer, never by comparing arbitrary bodies, and
+// closed once.
+type ownedBody struct {
+	io.ReadCloser
+
+	once sync.Once
+	err  error
+}
+
+// Close closes the body once.
+func (b *ownedBody) Close() error {
+	b.once.Do(func() { b.err = b.ReadCloser.Close() })
+	return b.err
+}
+
+// ownedRWBody is an [ownedBody] that keeps the io.Writer of a writable
+// (101 Switching Protocols) body.
+type ownedRWBody struct {
+	*ownedBody
+	io.Writer
+}
+
+// own makes the attempt the owner of resp's body and returns the body to
+// hand on in its place.
+func (c *retryCall) own(resp *http.Response) io.ReadCloser {
+	if resp.Body == nil {
+		c.owned = nil
+		return nil
+	}
+
+	ob := &ownedBody{ReadCloser: resp.Body}
+	c.owned = ob
+
+	if w, ok := resp.Body.(io.Writer); ok {
+		return &ownedRWBody{ownedBody: ob, Writer: w}
+	}
+
+	return ob
+}
+
+// owns reports whether body is the one the last attempt received and still
+// owns.
+func (c *retryCall) owns(body io.ReadCloser) bool {
+	if c.owned == nil {
+		return false
+	}
+
+	switch b := body.(type) {
+	case *ownedBody:
+		return b == c.owned
+	case *ownedRWBody:
+		return b.ownedBody == c.owned
+	}
+
+	return false
+}
+
+// dispose disposes of a discarded reply exactly once: a body a callback put in
+// place of the received one is closed directly; the received body, whatever
+// resp.Body now holds (nil included), is drained when the attempt ran under
+// its own deadline and the reply as received was small enough, then closed
+// (which also releases the attempt's deadline), and the attempt's ownership
+// ends.
 //
-// The drain stays synchronous although [http.Transport] drains an unread body
-// after Close itself (Go 1.27): that drain runs in the background, so a retry
-// sent right after Close finds the connection still busy and dials another.
-func closeBody(resp *http.Response, deadline bool) {
-	if resp == nil || resp.Body == nil {
+// Bodies of a larger known length and protocol upgrades are closed without
+// reading, and so is every body of an attempt without a deadline: a stalled
+// upstream must not block the caller indefinitely. The drain stays
+// synchronous although [http.Transport] drains an unread body after Close
+// itself (Go 1.27): that drain runs in the background, so a retry sent right
+// after Close finds the connection still busy and dials another.
+func (c *retryCall) dispose(resp *http.Response) {
+	if resp != nil && resp.Body != nil && !c.owns(resp.Body) {
+		_ = resp.Body.Close()
+	}
+
+	ob := c.owned
+	if ob == nil {
 		return
 	}
 
-	if deadline && drainable(resp) {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDiscardDrain))
+	c.owned = nil
+
+	if c.attemptHasDeadline() && c.lastStatus != http.StatusSwitchingProtocols && c.lastContentLength <= maxDiscardDrain {
+		_, _ = io.Copy(io.Discard, io.LimitReader(ob.ReadCloser, maxDiscardDrain))
 	}
 
-	_ = resp.Body.Close()
-}
-
-// drainable reports whether resp's discarded body is worth draining.
-func drainable(resp *http.Response) bool {
-	return resp.StatusCode != http.StatusSwitchingProtocols && resp.ContentLength <= maxDiscardDrain
-}
-
-// discardPolicy returns how the last attempt's reply is disposed of.
-func (c *retryCall) discardPolicy() discardPolicy {
-	return discardPolicy{body: c.lastAttemptBody, deadline: c.attemptHasDeadline()}
+	_ = ob.Close()
 }
 
 // attemptHasDeadline reports whether the last attempt ran under a deadline,
