@@ -330,10 +330,14 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		getBody:      req.GetBody,
 	}
 
-	// A request marked with ContextWithoutRetry is attempted once, whatever
-	// its method, headers or the retry policy.
-	replay := !RetryDisabled(ctx) && replayable(req)
-	if replay {
+	// An eligible request gets a replayable body (buffered when it has no
+	// GetBody) whether or not it is marked with ContextWithoutRetry: the mark
+	// only caps the retry loop at one call to the next round tripper, and the
+	// transport may still rewind the body itself.
+	eligible := replayable(req)
+	replay := eligible && !RetryDisabled(ctx)
+
+	if eligible {
 		getBody, buffered, bufErr := rt.bufferBody(req)
 		if bufErr != nil {
 			// A buffering failure (an ended context, a failing body) ends the
@@ -383,14 +387,14 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	}
 
 	if retryErr != nil && ctx.Err() == nil && retryable(retryErr) {
-		retryErr = exhausted(req, call.lastResp, retryErr, call.attempts)
+		retryErr = exhausted(call.base, call.lastResp, retryErr, call.attempts)
 	}
 	// A pass-through policy (WithoutRetry) clears retryErr but leaves the
 	// attempt's error in lastErr, which finish returns: still a failure.
 	failed := retryErr != nil || call.lastErr != nil
 	resp, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts)
 	// Retries count the calls actually made to the next round tripper.
-	rt.requestDone(req, start, statusClass, max(call.attempts-1, 0), failed)
+	rt.requestDone(call.base, start, statusClass, max(call.attempts-1, 0), failed)
 
 	return resp, err
 }
@@ -669,9 +673,34 @@ var errRequestChanged = errors.New("request changed during the retry loop; not r
 // Host, Header, ContentLength or TransferEncoding. Body, GetBody and Trailer
 // are not compared (a streaming body fills its trailers as it is sent).
 func requestChanged(req, base *http.Request) bool {
-	return req.Method != base.Method || req.Host != base.Host || req.URL.String() != base.URL.String() ||
+	return req.Method != base.Method || req.Host != base.Host || !sameURL(req.URL, base.URL) ||
 		req.ContentLength != base.ContentLength || !slices.Equal(req.TransferEncoding, base.TransferEncoding) ||
 		!maps.EqualFunc(req.Header, base.Header, slices.Equal[[]string])
+}
+
+// sameURL reports whether a and b are equal field by field (Host included
+// when Opaque is set, which URL.String omits); nil equals only nil.
+func sameURL(a, b *url.URL) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	return a.Scheme == b.Scheme && a.Opaque == b.Opaque && a.Host == b.Host && a.Path == b.Path &&
+		a.RawPath == b.RawPath && a.OmitHost == b.OmitHost && a.ForceQuery == b.ForceQuery &&
+		a.RawQuery == b.RawQuery && a.Fragment == b.Fragment && a.RawFragment == b.RawFragment &&
+		sameUserinfo(a.User, b.User)
+}
+
+// sameUserinfo reports whether a and b carry the same user name and password.
+func sameUserinfo(a, b *url.Userinfo) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	ap, aok := a.Password()
+	bp, bok := b.Password()
+
+	return a.Username() == b.Username() && ap == bp && aok == bok
 }
 
 // retryCall is the state of one RoundTrip across its attempts.
@@ -712,6 +741,29 @@ type retryCall struct {
 	// lastStatus is the status of the last reply received, kept whatever
 	// happens to the reply's body.
 	lastStatus int
+}
+
+// captureTrailersAtEOF wraps body so the caller's live trailers are captured
+// as final when it is read to its end.
+func (c *retryCall) captureTrailersAtEOF(body io.ReadCloser) io.ReadCloser {
+	return &eofHookBody{ReadCloser: body, onEOF: func() {
+		c.setFinalTrailers(c.req.Trailer.Clone())
+	}}
+}
+
+// detachedRequest returns a shallow copy of req with its own Header, Trailer
+// and URL, so an edit to it reaches no request that is or will be sent.
+func detachedRequest(req *http.Request) *http.Request {
+	view := req.WithContext(req.Context())
+	view.Header = req.Header.Clone()
+	view.Trailer = req.Trailer.Clone()
+
+	if req.URL != nil {
+		u := *req.URL // Userinfo is immutable: sharing it is safe.
+		view.URL = &u
+	}
+
+	return view
 }
 
 // finalTrailers returns the final trailers and whether they are known.
@@ -761,17 +813,17 @@ func (c *retryCall) onRetry(attempt int, err error, delay time.Duration) {
 		c.lastResp.Body = http.NoBody
 	}
 
-	c.rt.observer.Retry(AttemptEvent{Method: c.req.Method, Host: c.req.URL.Hostname()})
+	c.rt.observer.Retry(AttemptEvent{Method: c.base.Method, Host: c.base.URL.Hostname()})
 
 	if c.rt.logger != nil {
 		c.rt.logger.DebugContext(c.ctx,
 			"http client retrying request",
 			slog.Int("attempt", attempt),
-			slog.String("method", c.req.Method),
+			slog.String("method", c.base.Method),
 			// Omit user info and the query string: outbound URLs may
 			// carry signed-URL credentials or tokens that must not reach
 			// debug logs. err renders trusted text only (transportError).
-			slog.String("url", redactedURL(c.req.URL)),
+			slog.String("url", redactedURL(c.base.URL)),
 			slog.String("error", err.Error()),
 			slog.Duration("delay", delay),
 		)
@@ -824,9 +876,18 @@ func (c *retryCall) try(ctx context.Context) error {
 		// read, and captures its values when the body reaches EOF.
 		attempt.Trailer = c.req.Trailer
 		if c.req.Trailer != nil && attempt.Body != nil && attempt.Body != http.NoBody {
-			attempt.Body = &eofHookBody{ReadCloser: attempt.Body, onEOF: func() {
-				c.setFinalTrailers(c.req.Trailer.Clone())
-			}}
+			attempt.Body = c.captureTrailersAtEOF(attempt.Body)
+			// A body net/http rewinds itself is hooked the same way.
+			if c.getBody != nil {
+				attempt.GetBody = func() (io.ReadCloser, error) {
+					body, err := c.getBody()
+					if err != nil || body == nil || body == http.NoBody {
+						return body, err
+					}
+
+					return c.captureTrailersAtEOF(body), nil
+				}
+			}
 		}
 	}
 
@@ -843,6 +904,14 @@ func (c *retryCall) try(ctx context.Context) error {
 	// Every reply's cookies are stored exactly once, on receipt, whatever
 	// happens to the reply next (retried, returned, discarded).
 	c.rt.storeCookies(c.base, resp)
+
+	if resp != nil {
+		// Policies, the ErrorHandler and the caller see a detached view of
+		// the attempt: editing it reaches neither the request the transport
+		// may still be sending (an early reply) nor the next attempt.
+		resp.Request = detachedRequest(attemptReq)
+	}
+
 	c.lastResp = resp
 	c.lastErr = err
 
@@ -854,7 +923,7 @@ func (c *retryCall) try(ctx context.Context) error {
 	// before any classification: a retry policy (WithoutRetry's pass-through
 	// among them) may replace or suppress the error the caller then gets.
 	if IsCircuitBreakerOpen(err) {
-		c.rt.observer.BreakerRejected(AttemptEvent{Method: c.req.Method, Host: c.req.URL.Hostname()})
+		c.rt.observer.BreakerRejected(AttemptEvent{Method: c.base.Method, Host: c.base.URL.Hostname()})
 	}
 
 	// If user supplied a custom RetryPolicyHandler, delegate to it.

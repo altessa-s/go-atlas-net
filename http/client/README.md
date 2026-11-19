@@ -42,7 +42,7 @@ constructors are available: `New` returns a bare `*http.Client` suitable for any
 | `WithCircuitBreakerSettings` | --            | Per-host circuit breaker configuration                                                                                                               |
 | `WithMaxHostBreakers`        | 1024          | Cap on breakers created lazily for hosts without explicit settings; further hosts share one breaker (0 = all such hosts share it)                   |
 | `WithMaxResponseSize`        | 0             | Maximum response body size in bytes (0 = unlimited)                                                                                                  |
-| `WithLimiter`                | nil           | Pluggable client-side rate limiter                                                                                                                   |
+| `WithLimiter`                | nil           | Pluggable client-side rate limiter; a refused request's body is closed (as by an open breaker), exactly once                                         |
 | `WithLimiterPerAttempt`      | off           | Place the limiter under the retry layer so every retry attempt passes it; a refusal is never retried                                               |
 | `WithSSRFProtection`         | true          | Enable blocking of connections to private/local IP addresses                                                                                         |
 | `WithoutSSRFProtection`      | --            | Disable SSRF protection; required for explicit proxies, custom TLS dialers, and non-`*http.Transport` round trippers                                 |
@@ -148,8 +148,9 @@ req.Header.Set("Idempotency-Key", orderID) // the POST is now retried like a GET
 ```
 
 **Snapshot isolation.** What is sent is a private snapshot of the request — method, URL, Host, header, `ContentLength`, `TransferEncoding`,
-taken before the first transmission — copied afresh for every attempt. A policy or observer that edits the request it sees cannot change
-what is sent next. Transport hooks — a `WithProxyFunc` resolver or one on a caller transport, custom round trippers and dialers — receive the
+taken before the first transmission — copied afresh for every attempt. Policies, the `ErrorHandler` and the caller get the reply with a
+detached view of its request (own header, trailer and URL), early replies included, so editing it changes nothing being or to be sent;
+telemetry and logs report the snapshot. Transport hooks — a `WithProxyFunc` resolver or one on a caller transport, custom round trippers and dialers — receive the
 request being transmitted and must treat it as read-only, as in net/http; go-atlas does not isolate them. Cookies are looked up and stored
 for the snapshot's origin, starting from its `Cookie` header. A body without `GetBody` is buffered privately for replay; the caller's `Body`,
 `GetBody` and `ContentLength` are never assigned, and every attempt keeps the original framing (an unknown length is sent chunked each time).
@@ -159,13 +160,15 @@ its own copy of the captured trailers, so an edit to an attempt's trailers (by a
 follow a 307/308 redirect of a body without one.
 
 **Change detection.** Before each retry the request handed to the retry layer is compared with its snapshot on Method, URL, Host, Header,
-`ContentLength` and `TransferEncoding`; on a difference the loop stops with an error and nothing more is sent. It sees the request
+`ContentLength` and `TransferEncoding` (the URL field by field, so a Host change of an opaque URL counts; a nil URL is a change); on a
+difference the loop stops with an error and nothing more is sent. It sees the request
 `http.Client` hands its transport: with `http.Client.Timeout` set (or on a redirect hop) that is a shallow copy of the caller's request, so a
 change to a field of the original (its `ContentLength`, say) is not detected, while a change to the shared header map is. Either way the
 snapshot is what is sent.
 
 `ContextWithoutRetry` opts a single request out of the retry loop: the retry layer makes at most one call to the next round tripper whatever
-the method, key, the client's retry options or policy (`RetryDisabled` reports the mark). Its scope is the client's retry loop only; the
+the method, key, the client's retry options or policy (`RetryDisabled` reports the mark). An eligible request still gets a replayable body
+(buffered when it has no `GetBody`), so the transport can rewind it. Its scope is the client's retry loop only; the
 transport keeps its own retries, of two kinds:
 
 - after a possible processing: on a reused HTTP/1.1 connection net/http may resend a request it already wrote when it is idempotent by

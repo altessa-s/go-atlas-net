@@ -10,10 +10,8 @@ import (
 	"encoding/json"
 	"io"
 	"iter"
-	"maps"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -563,18 +561,7 @@ func (rb *requestBuilder) BuildWithContext(ctx context.Context) (*http.Request, 
 		return nil, coreerrs.Wrapf(RedactError(err), "failed to create %s request for %s", rb.method, redactedRawURL(rb.url))
 	}
 
-	// Apply the entries in key order, so the result does not depend on map
-	// iteration: an entry replaces one whose name differs only in case (the
-	// later key wins), except an idempotency key, whose case variants are all
-	// kept so the client refuses them as ambiguous rather than send one.
-	for _, k := range slices.Sorted(maps.Keys(rb.headers)) {
-		if asciiEqualFold(k, headerIdempotencyKey) || asciiEqualFold(k, headerXIdempotencyKey) {
-			req.Header.Add(k, rb.headers[k])
-			continue
-		}
-
-		req.Header.Set(k, rb.headers[k])
-	}
+	setHeaders(req.Header, rb.headers)
 
 	rb.applyAuth(req)
 

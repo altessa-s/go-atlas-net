@@ -15,7 +15,8 @@ type retryDisabledKey struct{}
 // idempotency key or the client's retry options and [RetryPolicyHandler]. The
 // outcome is classified as for any request that is not replayed (a retryable
 // status yields a [RetryExhaustedError] after the one attempt; a policy still
-// classifies it).
+// classifies it). An eligible request still gets a replayable body (buffered
+// when it has no GetBody): the mark caps the calls, not the body preparation.
 //
 // The scope is the client retry loop only; the transport below it keeps its
 // own retries, of two kinds (see [TransportDriver]):
