@@ -130,15 +130,21 @@ The built-in classification replays only requests that are safe to repeat: an id
 request carrying exactly one non-blank idempotency key. The values of `Idempotency-Key` and `X-Idempotency-Key` are counted together, under every
 header map key that matches either name case-insensitively; the total must be one and the value non-empty after trimming spaces and tabs. A POST
 or PATCH without a key, with several values, with keys under both names or with a blank key is sent once — a server that processed it before
-failing never sees it twice — and a retryable failure is returned as a `RetryExhaustedError` after that single attempt. A policy set with
-`WithRetryPolicyHandler` decides for every method, so it can replay a POST the server deduplicates otherwise.
+failing never sees it twice — and a retryable failure is returned as a `RetryExhaustedError` after that single attempt. Header names are
+matched ASCII case-insensitively (no Unicode folding). A policy set with `WithRetryPolicyHandler` classifies the outcome of that attempt but cannot
+ask for another: to replay a POST the server deduplicates, give it exactly one key.
 
 ```go
 req.Header.Set("Idempotency-Key", orderID) // the POST is now retried like a GET
 ```
 
 `ContextWithoutRetry` opts a single request out of the retry layer: it is attempted once whatever its method, key, the client's retry options
-or policy (`RetryDisabled` reports the mark). As with `WithoutRetry`, net/http may still replay it below the retry layer (see below).
+or policy (`RetryDisabled` reports the mark).
+
+A request the retry layer sends once (not eligible, or marked with `ContextWithoutRetry`) is handed to the next round tripper exactly once. When it
+has a body, that attempt carries no `GetBody`, so net/http does not resend it on a reused connection even with a (duplicate or blank) idempotency
+key header; the caller's request keeps `GetBody` for redirects. A bodyless request carrying an `Idempotency-Key` or `X-Idempotency-Key` header —
+any value, blank or duplicate included — may still be resent by net/http on a reused HTTP/1.1 connection (see below).
 
 ```go
 req, _ := http.NewRequestWithContext(httpclient.ContextWithoutRetry(ctx), http.MethodPost, url, body)
@@ -399,8 +405,11 @@ exception inherited from `net/http`: after certain connection failures on a
 body (`nil` or `http.NoBody`) or `GetBody`, and uses GET, HEAD, OPTIONS, TRACE
 or carries an `Idempotency-Key` or `X-Idempotency-Key` header. Unlike the client's
 retry classification above, net/http does not classify PUT/DELETE as idempotent
-without such a header. There is no transport option to disable this replay;
-it occurs below the client retry layer and `WithoutRetry` does not prevent it.
+without such a header; it checks only that the header is present, so a blank or
+duplicate key counts. The retry layer hands a request it sends once with a body to
+the transport without `GetBody`, which rules this replay out for it; otherwise there
+is no transport option to disable this replay; it occurs below the client retry
+layer and `WithoutRetry` does not prevent it.
 This applies to the non-driver client, the conformance reference driver, and
 drivers using the standard HTTP/1.1 transport.
 An ordinary POST/PATCH without either header is never replayed after it may have

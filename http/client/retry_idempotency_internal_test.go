@@ -77,6 +77,8 @@ func TestRetryRoundTripper_IdempotencyKeyRule(t *testing.T) {
 		{name: "lowercase put", method: "put", attempts: 1},
 		{name: "lowercase get", method: "get", attempts: 1},
 		{name: "lowercase post with single key", method: "post", header: http.Header{"Idempotency-Key": {"k1"}}, attempts: 3},
+		{name: "Kelvin sign in header name", method: http.MethodPost, header: http.Header{"Idempotency-\u212Aey": {"k1"}}, attempts: 1},
+		{name: "Kelvin sign in X header name", method: http.MethodPost, header: http.Header{"X-Idempotency-\u212Aey": {"k1"}}, attempts: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -162,6 +164,77 @@ func TestRetryRoundTripper_ContextWithoutRetry(t *testing.T) {
 			require.True(t, ok, "error %v", err)
 			require.Equal(t, 1, exhaustedErr.Attempts)
 			require.Equal(t, 1, attempts)
+		})
+	}
+}
+
+// TestRetryRoundTripper_PolicyCannotReplayIneligible checks that a policy
+// asking to retry everything cannot replay a request the rule sends once, and
+// that the attempt it is handed carries no GetBody (so net/http cannot resend
+// it) while the caller's request keeps its own.
+func TestRetryRoundTripper_PolicyCannotReplayIneligible(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		header   http.Header
+		ctx      func(context.Context) context.Context
+		attempts int
+	}{
+		{name: "duplicate key", header: http.Header{"Idempotency-Key": {"k1", "k2"}}, attempts: 1},
+		{name: "no key", header: http.Header{}, attempts: 1},
+		{name: "single key under ContextWithoutRetry", header: http.Header{"Idempotency-Key": {"k1"}}, ctx: ContextWithoutRetry, attempts: 1},
+		{name: "single key", header: http.Header{"Idempotency-Key": {"k1"}}, attempts: 3},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var (
+				calls      int
+				policyRuns int
+				getBodies  []bool
+			)
+
+			rt := &retryRoundTripper{
+				observer:          NoopObserver{},
+				retryableStatuses: DefaultRetryableStatuses(),
+				retryPolicyHandler: func(context.Context, *http.Response, error) (bool, error) {
+					policyRuns++
+					return true, nil
+				},
+				next: httpx.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					calls++
+
+					getBodies = append(getBodies, req.GetBody != nil)
+					_, _ = io.Copy(io.Discard, req.Body)
+					_ = req.Body.Close()
+
+					return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Request: req}, nil
+				}),
+				retryOpts:   newTestRetryOpts(2),
+				maxAttempts: 2,
+			}
+
+			ctx := t.Context()
+			if tc.ctx != nil {
+				ctx = tc.ctx(ctx)
+			}
+
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://example.com", strings.NewReader("payload"))
+			require.NoError(t, err)
+
+			req.Header = tc.header
+
+			_, err = rt.RoundTrip(req) //nolint:bodyclose // an exhausted round trip returns no response
+			require.Error(t, err)
+			require.Equal(t, tc.attempts, calls)
+			require.Equal(t, tc.attempts, policyRuns, "the policy classifies every attempt")
+			require.NotNil(t, req.GetBody, "the caller's request keeps GetBody")
+
+			for _, has := range getBodies {
+				require.Equal(t, tc.attempts > 1, has, "a request sent once reaches the transport without GetBody")
+			}
 		})
 	}
 }

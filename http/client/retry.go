@@ -306,7 +306,7 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 
 	// A request marked with ContextWithoutRetry is attempted once, whatever
 	// its method, headers or the retry policy.
-	replay := !RetryDisabled(req.Context()) && rt.replayable(req)
+	replay := !RetryDisabled(req.Context()) && replayable(req)
 	if replay {
 		if bufErr := rt.bufferBody(req); bufErr != nil {
 			// A buffering failure (an ended context, a failing body) ends the
@@ -332,6 +332,7 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		// on a redirect hop it was already filtered by redirectPolicy.
 		callerCookie: req.Header.Values("Cookie"),
 		firstAttempt: true,
+		singleSend:   !replay,
 	}
 	perRequestOpts := append(make([]coreretry.Option, 0, len(rt.retryOpts)+2), rt.retryOpts...)
 
@@ -382,19 +383,15 @@ func (rt *retryRoundTripper) requestDone(req *http.Request, start time.Time, sta
 	})
 }
 
-// replayable reports whether the retry layer may send req more than once.
-// With a [RetryPolicyHandler] the policy decides. The built-in classification
-// replays only requests that are safe to repeat: an idempotent method of
-// RFC 9110 (GET, HEAD, OPTIONS, TRACE, PUT, DELETE; method names are
-// case-sensitive, an empty method is GET) or a request carrying exactly one
-// non-blank idempotency key (see [singleIdempotencyKey]). Any other request
-// (POST, PATCH, a lowercase "post", ...) is attempted once, so a server that
-// processed it before failing never sees it twice.
-func (rt *retryRoundTripper) replayable(req *http.Request) bool {
-	if rt.retryPolicyHandler != nil {
-		return true
-	}
-
+// replayable reports whether the retry layer may send req more than once:
+// an idempotent method of RFC 9110 (GET, HEAD, OPTIONS, TRACE, PUT, DELETE;
+// method names are case-sensitive, an empty method is GET) or a request
+// carrying exactly one non-blank idempotency key (see [singleIdempotencyKey]).
+// Any other request (POST, PATCH, a lowercase "post", ...) is attempted once,
+// so a server that processed it before failing never sees it twice. The rule
+// holds under a [RetryPolicyHandler] too: the policy classifies the outcome of
+// that one attempt but cannot ask for another.
+func replayable(req *http.Request) bool {
 	switch req.Method {
 	case "", http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace, http.MethodPut, http.MethodDelete:
 		return true
@@ -411,7 +408,8 @@ const (
 
 // singleIdempotencyKey reports whether h carries exactly one effective
 // idempotency key: the values of Idempotency-Key and X-Idempotency-Key under
-// every map key that matches either name case-insensitively total one, and
+// every map key that matches either name ASCII case-insensitively (header
+// names are ASCII tokens; no Unicode folding) total one, and
 // that value is not empty once HTTP whitespace (SP, HTAB) is trimmed. Two
 // values (under one name, both names or differently cased map keys) are
 // ambiguous: the server may dedupe on a different one than intended, so the
@@ -423,7 +421,7 @@ func singleIdempotencyKey(h http.Header) bool {
 	)
 
 	for name, values := range h {
-		if !strings.EqualFold(name, headerIdempotencyKey) && !strings.EqualFold(name, headerXIdempotencyKey) {
+		if !asciiEqualFold(name, headerIdempotencyKey) && !asciiEqualFold(name, headerXIdempotencyKey) {
 			continue
 		}
 
@@ -438,6 +436,51 @@ func singleIdempotencyKey(h http.Header) bool {
 	}
 
 	return count == 1 && strings.Trim(value, " \t") != ""
+}
+
+// asciiEqualFold reports whether s and t are equal under ASCII case folding
+// only, so a non-ASCII rune (the Kelvin sign, for example) never matches a
+// letter of a header name.
+func asciiEqualFold(s, t string) bool {
+	if len(s) != len(t) {
+		return false
+	}
+
+	for i := range len(s) {
+		if lowerASCII(s[i]) != lowerASCII(t[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// lowerASCII lowers an ASCII upper-case letter and returns any other byte as is.
+func lowerASCII(b byte) byte {
+	if 'A' <= b && b <= 'Z' {
+		return b + ('a' - 'A')
+	}
+
+	return b
+}
+
+// singleTransmission makes the outgoing attempt of a request the retry layer
+// sends once not replayable by net/http: a request with a body and no GetBody
+// is never resent by net/http's transport, which otherwise replays a request
+// carrying an Idempotency-Key or X-Idempotency-Key header (any value, any
+// count) after a failure on a reused connection. The caller's request keeps
+// its GetBody (http.Client needs it for 307/308 redirects). A request without
+// a body cannot be made non-replayable this way; net/http may still resend it
+// (see [TransportDriver]).
+func singleTransmission(req *http.Request) *http.Request {
+	if req.GetBody == nil || req.Body == nil || req.Body == http.NoBody {
+		return req
+	}
+
+	out := req.WithContext(req.Context())
+	out.GetBody = nil
+
+	return out
 }
 
 // bufferBody prepares req's body for replay. It prefers the caller-provided
@@ -512,6 +555,9 @@ type retryCall struct {
 	// bodyHanded reports whether an attempt handed the request body to the
 	// next round tripper, which then owns closing it.
 	bodyHanded bool
+	// singleSend reports that the request is sent once: its attempt is
+	// handed on without GetBody (see singleTransmission).
+	singleSend bool
 }
 
 // onRetry runs before each retry's backoff sleep.
@@ -565,6 +611,10 @@ func (c *retryCall) try(ctx context.Context) error {
 	c.firstAttempt = false
 
 	attemptReq, cancel := c.rt.attemptRequest(ctx, c.req, c.callerCookie)
+	if c.singleSend {
+		attemptReq = singleTransmission(attemptReq)
+	}
+
 	c.attempts++
 	c.bodyHanded = true
 	resp, err := c.rt.next.RoundTrip(attemptReq) //nolint:bodyclose // resp is stored in lastResp and either closed on next retry or returned to caller

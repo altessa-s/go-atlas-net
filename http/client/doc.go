@@ -52,10 +52,13 @@
 //     custom policies set with [WithRetryPolicyHandler]. The built-in classification replays only requests that are
 //     safe to repeat: an idempotent method of RFC 9110 (GET, HEAD, OPTIONS, TRACE, PUT, DELETE; case-sensitive, an
 //     empty method is GET) or a request with exactly one non-blank idempotency key — one value in total across
-//     Idempotency-Key and X-Idempotency-Key, header names matched case-insensitively. A POST or PATCH without a key,
-//     with several values, keys under both names or a blank key is sent once. A policy set with
-//     [WithRetryPolicyHandler] decides for every method. [ContextWithoutRetry] makes the retry layer attempt one
-//     request once whatever its method, key or policy ([RetryDisabled] reports the mark).
+//     Idempotency-Key and X-Idempotency-Key, header names matched ASCII case-insensitively. A POST or PATCH without a
+//     key, with several values, keys under both names or a blank key is sent once. A policy set with
+//     [WithRetryPolicyHandler] classifies the outcome but cannot replay a request the rule sends once.
+//     [ContextWithoutRetry] makes the retry layer attempt one request once whatever its method, key or policy
+//     ([RetryDisabled] reports the mark). A request sent once is handed to the next round tripper once, and when it
+//     has a body that attempt carries no GetBody, so net/http does not resend it either; a bodyless one with an
+//     idempotency key header (any value or count) may still be resent by net/http on a reused HTTP/1.1 connection.
 //     [WithClock] sets the time source of the retry layer (a clock.Fake in tests).
 //   - Protection: a circuit breaker per destination host, so one failing endpoint never rejects requests to
 //     another; tune hosts with [WithCircuitBreakerSettings] and bound lazily created breakers with [WithMaxHostBreakers].

@@ -16,8 +16,11 @@ type retryDisabledKey struct{}
 // yields a [RetryExhaustedError] after the one attempt; a policy still
 // classifies it). Use it for a request that must never be resent by the
 // client, such as a non-idempotent call whose key the caller cannot vouch for.
-// Like the client-wide [WithoutRetry], it does not disable the replays
-// net/http performs below the retry layer (see [TransportDriver]).
+// The request is handed to the next round tripper once; when it has a body,
+// that attempt carries no GetBody, so net/http does not resend it either. A
+// bodyless request carrying an Idempotency-Key or X-Idempotency-Key header
+// may still be resent by net/http on a reused HTTP/1.1 connection (see
+// [TransportDriver]).
 func ContextWithoutRetry(ctx context.Context) context.Context {
 	return context.WithValue(ctx, retryDisabledKey{}, true)
 }
