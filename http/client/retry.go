@@ -389,8 +389,8 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 			// the ErrorHandler sees it with zero attempts, as it does when the
 			// context ended before the first attempt of a body it need not
 			// buffer.
-			resp, handed, err := rt.finish(nil, nil, bufErr, 0)
-			resp, err = call.settle(resp, err, handed)
+			resp, handles, err := rt.finish(nil, nil, bufErr, 0)
+			resp, err = call.settle(resp, err, handles)
 			call.settleView(resp, nil)
 			rt.requestDone(call.base, start, "unknown", 0, true)
 
@@ -440,8 +440,8 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	failed := retryErr != nil || call.lastErr != nil
 	lastResp := call.lastResp
 
-	resp, handed, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts)
-	resp, err = call.settle(resp, err, handed)
+	resp, handles, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts)
+	resp, err = call.settle(resp, err, handles)
 
 	call.settleView(resp, lastResp)
 	// Retries count the calls actually made to the next round tripper.
@@ -963,15 +963,15 @@ type eofHookBody struct {
 	// Transfer-Encoding. Its probe is a first Read of one byte.
 	probeable bool
 
-	mu        sync.Mutex
-	eofNext   bool // the next Read reports the end
-	calls     int  // Reads begun
-	reads     int  // Reads in flight
-	ended     bool // the end was met
-	pending   bool // publish deferred
-	isClosed  bool // Close was called
-	closed    chan struct{}
-	closeOnce sync.Once
+	mu           sync.Mutex
+	eofNext      bool // the next Read reports the end
+	calls        int  // Reads begun
+	reads        int  // Reads in flight
+	ended        bool // the end was met
+	pending      bool // publish deferred
+	isClosedFlag bool // Close was called
+	closed       chan struct{}
+	closeOnce    sync.Once
 }
 
 // Close closes the body, makes a deferred publication, and signals closed once
@@ -981,7 +981,7 @@ func (b *eofHookBody) Close() error {
 
 	b.mu.Lock()
 	b.publishPending()
-	b.isClosed = true
+	b.isClosedFlag = true
 	b.signalIdle()
 	b.mu.Unlock()
 
@@ -1037,6 +1037,14 @@ func (b *eofHookBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// isClosed reports whether Close was called.
+func (b *eofHookBody) isClosed() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.isClosedFlag
+}
+
 // publishPending makes a deferred publication. b.mu is held.
 func (b *eofHookBody) publishPending() {
 	if b.pending {
@@ -1048,7 +1056,7 @@ func (b *eofHookBody) publishPending() {
 // signalIdle closes closed once the body is closed and no Read is in flight.
 // b.mu is held.
 func (b *eofHookBody) signalIdle() {
-	if b.isClosed && b.reads == 0 {
+	if b.isClosedFlag && b.reads == 0 {
 		b.closeOnce.Do(func() { close(b.closed) })
 	}
 }
@@ -1087,15 +1095,25 @@ func (c *retryCall) prepareTrailers(attempt *http.Request) {
 
 	own := attempt.Trailer
 	probeable := probeableRequest(attempt)
-	attempt.Body = c.captureTrailersAtEOF(attempt.Body, own, probeable)
+	original := c.captureTrailersAtEOF(attempt.Body, own, probeable)
+	attempt.Body = original
 
 	if c.getBody != nil {
 		ctx := attempt.Context()
 		attempt.GetBody = func() (io.ReadCloser, error) {
-			// As before the retry layer's own rewind: no earlier body may
-			// still write the caller's trailers when the caller's GetBody
-			// is asked for another.
-			if err := cmp.Or(c.awaitLiveBodies(ctx), ctx.Err()); err != nil {
+			// A transport may ask for a copy while the attempt's body is
+			// still open (and read the copy first): no wait then. Once it
+			// closed that body to rewind, the copy waits, bounded by the
+			// attempt, until no Read of it is in flight. Earlier attempts'
+			// bodies were waited for before this attempt began.
+			if original.isClosed() {
+				select {
+				case <-original.closed:
+				case <-ctx.Done():
+				}
+			}
+
+			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
 
@@ -1364,10 +1382,11 @@ func unexpectedStatus(resp *http.Response) *UnexpectedStatusError {
 // finish turns the outcome of the retry loop, after attempts attempts, into
 // the round trip result, before its bodies are settled (see settle). The
 // ErrorHandler receives the reply with its body behind a close-once handle of
-// its own (handed), returned for the settlement.
+// its own (handed); that handle, and one on any body the handler then put on
+// that reply, are returned for the settlement.
 func (rt *retryRoundTripper) finish(
 	lastResp *http.Response, lastErr, retryErr error, attempts int,
-) (*http.Response, *bodyHandle, error) {
+) (*http.Response, []*bodyHandle, error) {
 	// Handle retry exhaustion and terminal errors (possibly with a response,
 	// e.g. a non-retryable or exhausted retryable status).
 	if retryErr != nil {
@@ -1379,9 +1398,19 @@ func (rt *retryRoundTripper) finish(
 			}
 
 			resp, err := rt.errorHandler(lastResp, retryErr, attempts)
+
+			handles := []*bodyHandle{handed}
+			if lastResp != nil && lastResp.Body != nil && handleOf(lastResp.Body) != handed {
+				// The handler put a body of its own on the reply it was given:
+				// it is settled too, behind a close-once handle of its own.
+				leftover := &bodyHandle{ReadCloser: lastResp.Body}
+				lastResp.Body = withWriteSide(leftover, lastResp.Body)
+				handles = append(handles, leftover)
+			}
+
 			// The handler's error is returned: it renders trusted text only,
 			// as a transport error does (it may quote resp.Request.URL).
-			return resp, handed, redactTransportError(err)
+			return resp, handles, redactTransportError(err)
 		}
 
 		return lastResp, nil, retryErr
@@ -1400,14 +1429,16 @@ func (rt *retryRoundTripper) finish(
 // handle once. Without, the returned body passes to the caller, and the
 // handles it is not are released when it is closed (it may wrap them), or at
 // once when no body is returned.
-func (c *retryCall) settle(resp *http.Response, err error, handed *bodyHandle) (*http.Response, error) {
+func (c *retryCall) settle(resp *http.Response, err error, handles []*bodyHandle) (*http.Response, error) {
 	if err != nil {
 		if resp != nil {
 			c.discardBody(resp.Body)
 		}
 
-		if handed != nil {
-			_ = handed.Close()
+		for _, h := range handles {
+			if h != nil {
+				_ = h.Close()
+			}
 		}
 
 		c.releaseOwned()
@@ -1415,7 +1446,7 @@ func (c *retryCall) settle(resp *http.Response, err error, handed *bodyHandle) (
 		return nil, err
 	}
 
-	c.handOver(resp, handed)
+	c.handOver(resp, handles)
 
 	return resp, nil
 }
@@ -1478,7 +1509,7 @@ func (c *retryCall) owns(body io.ReadCloser) bool {
 // ErrorHandler's), passes to the caller; the owned and handed handles it is
 // not are released when it is closed, or at once when there is none (nil or
 // http.NoBody). The returned stream is never read or closed here.
-func (c *retryCall) handOver(resp *http.Response, handed *bodyHandle) {
+func (c *retryCall) handOver(resp *http.Response, handles []*bodyHandle) {
 	var returned io.ReadCloser
 	if resp != nil {
 		returned = resp.Body
@@ -1496,8 +1527,10 @@ func (c *retryCall) handOver(resp *http.Response, handed *bodyHandle) {
 		c.owned = nil
 	}
 
-	if handed != nil && h != handed {
-		releases = append(releases, handed)
+	for _, handed := range handles {
+		if handed != nil && h != handed {
+			releases = append(releases, handed)
+		}
 	}
 
 	if len(releases) == 0 {
