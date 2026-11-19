@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -297,32 +298,43 @@ func (c *cancelOnClose) Close() error {
 // [http.Client.CloseIdleConnections] releases pooled connections.
 func (rt *retryRoundTripper) CloseIdleConnections() { closeIdleConnections(rt.next) }
 
-// RoundTrip implements [http.RoundTripper]. On the first call it buffers the
-// request body (if any) so it can be replayed on retries, then delegates retry
-// orchestration to [coreretry.Do]. Every call reports exactly one RequestDone
-// to the observer, timed from the start of the call (buffering included).
+// RoundTrip implements [http.RoundTripper]. It takes a private snapshot of
+// the request (method, URL, header, framing) before the first transmission
+// and builds every attempt from it, buffering the body privately when it must
+// be replayed and has no GetBody; the caller's request is never modified.
+// Retry orchestration is delegated to [coreretry.Do]. Every call reports
+// exactly one RequestDone to the observer, timed from the start of the call
+// (buffering included).
 func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	start := rt.now()
 
-	if ambiguousIdempotencyKey(req) {
-		// Refused before any transmission: net/http's transport replays a
-		// request carrying an idempotency key header whatever its values,
-		// and the server may dedupe on another value than intended.
-		if req.Body != nil {
-			_ = req.Body.Close()
-		}
-
-		resp, err := rt.finish(nil, nil, ErrAmbiguousIdempotencyKey, 0)
+	if refused := refuseAmbiguousIdempotencyKey(req); refused != nil {
 		rt.requestDone(req, start, "unknown", 0, true)
+		return nil, refused
+	}
 
-		return resp, err
+	ctx := req.Context()
+
+	call := &retryCall{
+		rt:   rt,
+		req:  req,
+		ctx:  ctx,
+		base: snapshotRequest(req),
+		// The caller's Cookie header as received: with a jar the retry layer
+		// owns cookie handling (http.Client.Jar is nil), so nothing was injected;
+		// on a redirect hop it was already filtered by redirectPolicy.
+		callerCookie: req.Header.Values("Cookie"),
+		firstAttempt: true,
+		firstBody:    req.Body,
+		getBody:      req.GetBody,
 	}
 
 	// A request marked with ContextWithoutRetry is attempted once, whatever
 	// its method, headers or the retry policy.
-	replay := !RetryDisabled(req.Context()) && replayable(req)
+	replay := !RetryDisabled(ctx) && replayable(req)
 	if replay {
-		if bufErr := rt.bufferBody(req); bufErr != nil {
+		getBody, buffered, bufErr := rt.bufferBody(req)
+		if bufErr != nil {
 			// A buffering failure (an ended context, a failing body) ends the
 			// call before any attempt: it takes the common terminal path, so
 			// the ErrorHandler sees it with zero attempts, as it does when the
@@ -333,20 +345,16 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 
 			return resp, err
 		}
+
+		if buffered {
+			// The caller's body was read and closed by buffering; every
+			// attempt reads a private copy.
+			call.getBody = getBody
+			call.firstBody, _ = getBody()
+			call.callerBodyClosed = true
+		}
 	}
 
-	ctx := req.Context()
-
-	call := &retryCall{
-		rt:  rt,
-		req: req,
-		ctx: ctx,
-		// The caller's Cookie header as received: with a jar the retry layer
-		// owns cookie handling (http.Client.Jar is nil), so nothing was injected;
-		// on a redirect hop it was already filtered by redirectPolicy.
-		callerCookie: req.Header.Values("Cookie"),
-		firstAttempt: true,
-	}
 	perRequestOpts := append(make([]coreretry.Option, 0, len(rt.retryOpts)+2), rt.retryOpts...)
 
 	perRequestOpts = append(perRequestOpts,
@@ -358,11 +366,10 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	}
 
 	retryErr := coreretry.Do(ctx, call.try, perRequestOpts...)
-	if !call.bodyHanded && req.Body != nil {
+	if !call.bodyHanded && !call.callerBodyClosed && req.Body != nil {
 		// No attempt reached the next round tripper (the context ended before
-		// the first one): the request body — the caller's or the replay copy
-		// installed by bufferBody — is still ours to close, as
-		// http.RoundTripper requires.
+		// the first one): the caller's request body is still ours to close,
+		// as http.RoundTripper requires.
 		_ = req.Body.Close()
 	}
 
@@ -445,6 +452,45 @@ const (
 	headerXIdempotencyKey = "X-Idempotency-Key"
 )
 
+// refuseAmbiguousIdempotencyKey returns [ErrAmbiguousIdempotencyKey] for a
+// request [ambiguousIdempotencyKey] reports, after closing its body as
+// [http.RoundTripper] requires, and nil for any other request. The refusal is
+// terminal: no attempt is made and no [ErrorHandler] is consulted.
+func refuseAmbiguousIdempotencyKey(req *http.Request) error {
+	if !ambiguousIdempotencyKey(req) {
+		return nil
+	}
+
+	if req.Body != nil {
+		_ = req.Body.Close()
+	}
+
+	return ErrAmbiguousIdempotencyKey
+}
+
+// idempotencyKeyGuard is the outermost round tripper of the client: it
+// refuses a request with an ambiguous idempotency key before the limiter and
+// the retry layer see it, reporting it to the observer as a failed request of
+// zero attempts.
+type idempotencyKeyGuard struct {
+	next http.RoundTripper
+	rt   *retryRoundTripper
+}
+
+// RoundTrip implements [http.RoundTripper].
+func (g idempotencyKeyGuard) RoundTrip(req *http.Request) (*http.Response, error) {
+	start := g.rt.now()
+	if refused := refuseAmbiguousIdempotencyKey(req); refused != nil {
+		g.rt.requestDone(req, start, "unknown", 0, true)
+		return nil, refused
+	}
+
+	return g.next.RoundTrip(req)
+}
+
+// CloseIdleConnections forwards to the wrapped transport.
+func (g idempotencyKeyGuard) CloseIdleConnections() { closeIdleConnections(g.next) }
+
 // idempotencyKey inspects the idempotency key of h: the values of
 // Idempotency-Key and X-Idempotency-Key under every map key that matches
 // either name ASCII case-insensitively (header names are ASCII tokens; no
@@ -508,22 +554,25 @@ func lowerASCII(b byte) byte {
 // and fails with the context's error without reading; one ending while the
 // read is blocked (a pipe whose writer stays open) closes the body, which
 // unblocks the read, and fails the same way. The body is closed exactly once.
-func (rt *retryRoundTripper) bufferBody(req *http.Request) error {
-	if req.Body == nil || req.GetBody != nil || rt.maxAttempts == 0 {
-		return nil
+//
+// It returns buffered false, leaving the body unread, when no buffering is
+// needed; otherwise getBody returns a fresh reader over the private copy.
+func (rt *retryRoundTripper) bufferBody(req *http.Request) (getBody func() (io.ReadCloser, error), buffered bool, err error) {
+	if req.Body == nil || req.Body == http.NoBody || req.GetBody != nil || rt.maxAttempts == 0 {
+		return nil, false, nil
 	}
 
 	ctx := req.Context()
 
 	closeBody := sync.OnceValue(req.Body.Close)
-	if err := ctx.Err(); err != nil {
+	if ctxErr := ctx.Err(); ctxErr != nil {
 		_ = closeBody()
-		return err
+		return nil, false, ctxErr
 	}
 
 	stop := context.AfterFunc(ctx, func() { _ = closeBody() })
 	buf := coreio.GetBuffer()
-	_, err := buf.ReadFrom(req.Body)
+	_, err = buf.ReadFrom(req.Body)
 
 	stop()
 
@@ -534,24 +583,45 @@ func (rt *retryRoundTripper) bufferBody(req *http.Request) error {
 
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			// The read failed because the context ended and closed the body.
-			return ctxErr
+			return nil, false, ctxErr
 		}
 		// The body's error text is the caller's: render a trusted one.
-		return coreerrs.Wrapf(redactTransportError(err), "failed to read request body for retry buffering")
+		return nil, false, coreerrs.Wrapf(redactTransportError(err), "failed to read request body for retry buffering")
 	}
 
 	bodyBytes := bytes.Clone(buf.Bytes())
 	coreio.PutBuffer(buf)
 
-	req.ContentLength = int64(len(bodyBytes))
-	req.GetBody = func() (io.ReadCloser, error) {
+	// The copy stays private to the retry call: the caller's request keeps
+	// its fields, and every attempt keeps the original framing (its
+	// ContentLength, so an unknown length is still sent chunked).
+	return func() (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(bodyBytes)), nil
-	}
-	// The original body was consumed by buffering; install the replay
-	// copy for the first attempt.
-	req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	}, true, nil
+}
 
-	return nil
+// snapshotRequest returns the private template every attempt of req is built
+// from: a deep copy of its method, URL, header, trailer and framing, taken
+// before the first transmission, without its body.
+func snapshotRequest(req *http.Request) *http.Request {
+	base := req.Clone(req.Context())
+	base.Body = nil
+	base.GetBody = nil
+
+	return base
+}
+
+// errRequestChanged stops a retry when the caller's request changed after the
+// snapshot its attempts are built from (a policy, an observer or a callback
+// edited it): the retry layer neither resends the old request nor sends the
+// new one.
+var errRequestChanged = errors.New("request changed during the retry loop; not replayed")
+
+// requestChanged reports whether the caller's request differs from base in
+// what an attempt sends: method, URL, Host or header.
+func requestChanged(req, base *http.Request) bool {
+	return req.Method != base.Method || req.Host != base.Host || req.URL.String() != base.URL.String() ||
+		!maps.EqualFunc(req.Header, base.Header, slices.Equal[[]string])
 }
 
 // retryCall is the state of one RoundTrip across its attempts.
@@ -571,6 +641,16 @@ type retryCall struct {
 	// bodyHanded reports whether an attempt handed the request body to the
 	// next round tripper, which then owns closing it.
 	bodyHanded bool
+	// base is the private snapshot every attempt is built from.
+	base *http.Request
+	// firstBody is the body of the first attempt (the caller's, or a private
+	// copy when the body was buffered); getBody rewinds it for a retry (the
+	// caller's GetBody or the private buffer), nil when it cannot.
+	firstBody io.ReadCloser
+	getBody   func() (io.ReadCloser, error)
+	// callerBodyClosed reports that buffering already read and closed the
+	// caller's body.
+	callerBodyClosed bool
 }
 
 // onRetry runs before each retry's backoff sleep.
@@ -609,21 +689,39 @@ func (c *retryCall) try(ctx context.Context) error {
 	closeBody(c.lastResp)
 	c.lastResp = nil
 
-	// Rewind the body for retry attempts; the first attempt uses the
-	// body installed by bufferBody (or the caller's original one).
-	if !c.firstAttempt && c.req.GetBody != nil {
-		body, gbErr := c.req.GetBody()
+	// A retry stops when the caller's request changed after the snapshot:
+	// neither the old request nor the edited one is sent.
+	if !c.firstAttempt && requestChanged(c.req, c.base) {
+		c.lastErr = errRequestChanged
+		return &NonRetryableError{Err: c.lastErr}
+	}
+
+	// Every attempt is a fresh copy of the private snapshot: what a policy
+	// or the next round tripper does to an attempt never reaches the next.
+	attempt := c.base.Clone(ctx)
+	attempt.Body = c.firstBody
+
+	hasBody := c.firstBody != nil && c.firstBody != http.NoBody
+	if !c.firstAttempt && hasBody {
+		if c.getBody == nil {
+			// Unreachable: a replayed body is buffered when it has no GetBody.
+			c.lastErr = errors.New("request body cannot be rewound for retry")
+			return &NonRetryableError{Err: c.lastErr}
+		}
+
+		body, gbErr := c.getBody()
 		if gbErr != nil {
 			c.lastErr = coreerrs.Wrapf(redactTransportError(gbErr), "failed to rewind request body for retry")
 			return &NonRetryableError{Err: c.lastErr}
 		}
 
-		c.req.Body = body
+		attempt.Body = body
 	}
 
+	attempt.GetBody = c.getBody
 	c.firstAttempt = false
 
-	attemptReq, cancel := c.rt.attemptRequest(ctx, c.req, c.callerCookie)
+	attemptReq, cancel := c.rt.attemptRequest(ctx, attempt, c.callerCookie)
 	c.attempts++
 	c.bodyHanded = true
 	resp, err := c.rt.next.RoundTrip(attemptReq) //nolint:bodyclose // resp is stored in lastResp and either closed on next retry or returned to caller

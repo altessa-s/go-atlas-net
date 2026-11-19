@@ -47,8 +47,8 @@ const DefaultDialTimeout = 30 * time.Second
 // key. There is no transport option to disable this replay; it occurs below
 // the retry layer, including WithoutRetry and ContextWithoutRetry.
 // An ordinary POST/PATCH without either header is never replayed after it may
-// have been processed. If nothing was written, net/http may retry it with no
-// body or GetBody. Consumed non-rewindable bodies must not be replayed.
+// have been processed. If nothing was written, net/http may retry any request,
+// unkeyed ones included, with no body or GetBody: the server never saw it. Consumed non-rewindable bodies must not be replayed.
 // On HTTP/2, only proven unprocessed requests (HTTP/2 REFUSED_STREAM or GOAWAY below
 // their stream ID) with rewindable bodies may be retried, including with
 // WithoutRetry. These retries are bounded by the request, not a transmission

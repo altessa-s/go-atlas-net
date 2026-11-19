@@ -142,9 +142,9 @@ type options struct {
 	// ErrAmbiguousIdempotencyKey before it is sent). WithoutRetry and
 	// ContextWithoutRetry bound the client retry loop only, not that replay,
 	// which is safe for the idempotent or validly keyed requests it applies
-	// to. An ordinary POST/PATCH without either
-	// header is not replayed after it may have been processed; net/http may
-	// retry it if nothing was written and it has no body or GetBody.
+	// to. An ordinary POST/PATCH without either header is not replayed after
+	// it may have been processed; net/http may retry any request, unkeyed
+	// ones included, if nothing was written and it has no body or GetBody.
 	// On HTTP/2, only proven unprocessed requests with replayable bodies may
 	// be resent. See TransportDriver for the transport replay contract.
 	withoutRetry bool `opt:"Retry" optval:"invert"`

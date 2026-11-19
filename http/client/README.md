@@ -143,12 +143,21 @@ be sent neither once reliably nor safely twice. Idempotent methods are not check
 req.Header.Set("Idempotency-Key", orderID) // the POST is now retried like a GET
 ```
 
-`ContextWithoutRetry` opts a single request out of the retry loop: the retry layer makes exactly one call to the next round tripper whatever
-the method, key, the client's retry options or policy (`RetryDisabled` reports the mark). The request is passed on unmodified. Its scope is the
-client's retry loop only: net/http's own connection-level replay (an HTTP/1.1 request resent after certain failures on a reused connection, an
-HTTP/2 request retried after REFUSED_STREAM or a GOAWAY below its stream ID) is not affected. That replay applies only to requests that are
-idempotent or carry an idempotency key — an unkeyed POST or PATCH is never resent after it may have been processed, and an ambiguous key is
-refused above — so it is safe by the request's own semantics.
+Every attempt is built from a private snapshot of the request (method, URL, header, framing) taken before the first transmission: a policy,
+observer or callback that edits the request it sees cannot change what is resent, and a change to the caller's request during the loop stops
+it before the next attempt. A body without `GetBody` is buffered privately for replay; the caller's `Body`, `GetBody` and `ContentLength` are
+never assigned, and every attempt keeps the original framing (an unknown length is sent chunked each time). The caller's request therefore
+gets no `GetBody`, so `http.Client` does not follow a 307/308 redirect of such a body.
+
+`ContextWithoutRetry` opts a single request out of the retry loop: the retry layer makes at most one call to the next round tripper whatever
+the method, key, the client's retry options or policy (`RetryDisabled` reports the mark). Its scope is the client's retry loop only; the
+transport keeps its own retries, of two kinds:
+
+- after a possible processing: on a reused HTTP/1.1 connection net/http may resend a request it already wrote when it is idempotent by
+  method or carries an idempotency key (and has no body or a `GetBody`). The method or the single key makes that repeat safe; an unkeyed
+  POST or PATCH is never resent once it may have been processed, and an ambiguous key is refused above.
+- when no processing occurred: net/http may retry any request, unkeyed ones included, when nothing was written on a reused HTTP/1.1
+  connection, or when HTTP/2 proves the stream unprocessed (REFUSED_STREAM, a GOAWAY below its stream ID).
 
 ```go
 req, _ := http.NewRequestWithContext(httpclient.ContextWithoutRetry(ctx), http.MethodPost, url, body)
@@ -411,14 +420,14 @@ or carries an `Idempotency-Key` or `X-Idempotency-Key` header. Unlike the client
 retry classification above, net/http does not classify PUT/DELETE as idempotent
 without such a header; it checks only that the header is present, so a blank or
 duplicate key would count — the client refuses such a non-idempotent request with
-`ErrAmbiguousIdempotencyKey` before it reaches the transport. There is no transport
-option to disable this replay; it occurs below the client retry layer and neither
-`WithoutRetry` nor `ContextWithoutRetry` prevents it.
+`ErrAmbiguousIdempotencyKey` before the limiter and the transport. There is no
+transport option to disable this replay; it occurs below the client retry layer and
+neither `WithoutRetry` nor `ContextWithoutRetry` prevents it.
 This applies to the non-driver client, the conformance reference driver, and
 drivers using the standard HTTP/1.1 transport.
 An ordinary POST/PATCH without either header is never replayed after it may have
-been processed. If nothing was written, net/http may retry it with no body or
-`GetBody`. Consumed non-rewindable bodies must not be replayed.
+been processed. If nothing was written, net/http may retry it (any request) with no
+body or `GetBody`: the server never saw the earlier transmission. Consumed non-rewindable bodies must not be replayed.
 On HTTP/2, only requests proven unprocessed by HTTP/2 REFUSED_STREAM or GOAWAY below their stream ID may
 be retried with a rewindable body, including when the client uses `WithoutRetry`.
 These retries are bounded by the request, not a transmission count: persistent

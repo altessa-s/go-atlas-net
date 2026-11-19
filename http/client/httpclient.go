@@ -172,6 +172,10 @@ func (c *Client) retractableClient() *http.Client {
 		stdClient.Transport = limiters.NewRoundTripper(stdClient.Transport, c.options.limiter)
 	}
 
+	// An ambiguous idempotency key is refused before the limiter and any
+	// attempt (see ErrAmbiguousIdempotencyKey).
+	stdClient.Transport = idempotencyKeyGuard{next: stdClient.Transport, rt: rt}
+
 	return stdClient
 }
 
