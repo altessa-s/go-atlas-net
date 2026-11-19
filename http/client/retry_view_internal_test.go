@@ -310,3 +310,46 @@ type hostRecorder struct {
 }
 
 func (h hostRecorder) RequestDone(e RequestEvent) { *h.hosts = append(*h.hosts, e.Host) }
+
+// TestRetryRoundTripper_ZeroRetriesLeaveBodyAsIs checks the exception to body
+// preparation: with no retries configured (WithRetryMax(0), WithoutRetry)
+// an eligible body without GetBody is not buffered but handed on as is.
+func TestRetryRoundTripper_ZeroRetriesLeaveBodyAsIs(t *testing.T) {
+	t.Parallel()
+
+	var (
+		calls      int
+		hasGetBody bool
+		sameBody   bool
+	)
+
+	body := &countingCloser{Reader: strings.NewReader("payload")}
+
+	rt := &retryRoundTripper{
+		observer:          NoopObserver{},
+		retryableStatuses: DefaultRetryableStatuses(),
+		next: httpx.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			hasGetBody = req.GetBody != nil
+			sameBody = req.Body == io.ReadCloser(body)
+
+			_ = req.Body.Close()
+
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Request: req}, nil
+		}),
+		retryOpts:   newTestRetryOpts(0),
+		maxAttempts: 0,
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://example.com", body)
+	require.NoError(t, err)
+
+	req.Header.Set("Idempotency-Key", "k1")
+
+	_, err = rt.RoundTrip(req) //nolint:bodyclose // an exhausted round trip returns no response
+	require.Error(t, err)
+	require.Equal(t, 1, calls)
+	require.False(t, hasGetBody)
+	require.True(t, sameBody, "the caller's body is handed on unbuffered")
+	require.Equal(t, int32(1), body.closes.Load())
+}

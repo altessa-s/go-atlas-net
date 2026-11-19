@@ -751,12 +751,25 @@ func (c *retryCall) captureTrailersAtEOF(body io.ReadCloser) io.ReadCloser {
 	}}
 }
 
-// detachedRequest returns a shallow copy of req with its own Header, Trailer
-// and URL, so an edit to it reaches no request that is or will be sent.
-func detachedRequest(req *http.Request) *http.Request {
+// responseView returns the request a reply carries to policies, the
+// ErrorHandler and the caller: a metadata-only copy of req with no Body or
+// GetBody and its own Header, URL and TransferEncoding. Its Trailer is a copy
+// of the final trailers when known, or else of the declaration captured
+// before the first transmission: the live map may still be written by an
+// upload in progress (an early or full-duplex reply), so it is never read
+// here. Inspecting or editing the view touches no request being or to be sent.
+func (c *retryCall) responseView(req *http.Request) *http.Request {
 	view := req.WithContext(req.Context())
+	view.Body = nil
+	view.GetBody = nil
 	view.Header = req.Header.Clone()
-	view.Trailer = req.Trailer.Clone()
+	view.TransferEncoding = slices.Clone(req.TransferEncoding)
+
+	if final, ok := c.finalTrailers(); ok {
+		view.Trailer = final.Clone()
+	} else {
+		view.Trailer = c.base.Trailer.Clone()
+	}
 
 	if req.URL != nil {
 		u := *req.URL // Userinfo is immutable: sharing it is safe.
@@ -794,7 +807,7 @@ type eofHookBody struct {
 // Read reads from the body and calls onEOF on its end.
 func (b *eofHookBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
-	if errors.Is(err, io.EOF) && !b.done {
+	if err == io.EOF && !b.done { //nolint:errorlint // io.Reader returns io.EOF itself, never wrapped
 		b.done = true
 		b.onEOF()
 	}
@@ -909,7 +922,7 @@ func (c *retryCall) try(ctx context.Context) error {
 		// Policies, the ErrorHandler and the caller see a detached view of
 		// the attempt: editing it reaches neither the request the transport
 		// may still be sending (an early reply) nor the next attempt.
-		resp.Request = detachedRequest(attemptReq)
+		resp.Request = c.responseView(attemptReq)
 	}
 
 	c.lastResp = resp

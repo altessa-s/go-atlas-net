@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"io"
 	"iter"
-	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -595,15 +594,15 @@ func WithHeader(key, value string) RequestOption {
 	}
 }
 
-// WithHeaders adds multiple headers from an iterator of key-value pairs.
-// A later entry overwrites an earlier one with the same key. Entries whose
-// keys differ only in case are applied in key order, the later replacing the
-// earlier (so "content-type" wins over "Content-Type") whatever the iteration
-// order, except Idempotency-Key and X-Idempotency-Key: their case variants are
-// all sent, which the client refuses with [ErrAmbiguousIdempotencyKey].
+// WithHeaders adds multiple headers from an iterator of key-value pairs, in
+// iteration order: a later entry replaces an earlier one of the same header,
+// whatever the case of its key. Idempotency-Key and X-Idempotency-Key are the
+// exception: their case variants (one value per exact key, the later winning)
+// are all kept, replacing any earlier value of the header, so the client
+// refuses them with [ErrAmbiguousIdempotencyKey] instead of sending one.
 func WithHeaders(seq iter.Seq2[string, string]) RequestOption {
 	return func(req *http.Request) {
-		setHeaders(req.Header, maps.Collect(seq))
+		setHeaderSeq(req.Header, seq)
 	}
 }
 

@@ -5,6 +5,7 @@
 package client
 
 import (
+	"iter"
 	"maps"
 	"net/http"
 	"slices"
@@ -33,6 +34,39 @@ func setHeaders(h http.Header, entries map[string]string) {
 		}
 
 		h.Set(k, entries[k])
+	}
+}
+
+// setHeaderSeq applies seq to h in iteration order: an ordinary entry replaces
+// the header's values (Set), so the later of two case variants wins. The
+// Idempotency-Key and X-Idempotency-Key entries (one value per exact key, the
+// later winning) replace any earlier value of their header and are all kept
+// (Add), so the client refuses case variants as ambiguous.
+func setHeaderSeq(h http.Header, seq iter.Seq2[string, string]) {
+	var (
+		keys  []string
+		value = make(map[string]string)
+	)
+
+	for k, v := range seq {
+		if !isIdempotencyKeyName(k) {
+			h.Set(k, v)
+			continue
+		}
+
+		if _, seen := value[k]; !seen {
+			keys = append(keys, k)
+		}
+
+		value[k] = v
+	}
+
+	for _, k := range keys {
+		h.Del(k)
+	}
+
+	for _, k := range keys {
+		h.Add(k, value[k])
 	}
 }
 

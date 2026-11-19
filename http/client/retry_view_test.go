@@ -6,6 +6,8 @@ package client_test
 
 import (
 	"context"
+	"errors"
+	"io"
 	"iter"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -31,8 +34,8 @@ func pairs(kv ...[2]string) iter.Seq2[string, string] {
 }
 
 // TestWithHeaders_CaseVariants checks WithHeaders through PostWithOptions in
-// both iteration orders: an ordinary header ends with one value, the same in
-// both orders; idempotency key variants are all kept and refused.
+// both iteration orders: an ordinary header ends with one value, the later
+// entry's; idempotency key variants are all kept and refused.
 func TestWithHeaders_CaseVariants(t *testing.T) {
 	t.Parallel()
 
@@ -71,8 +74,8 @@ func TestWithHeaders_CaseVariants(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	require.Equal(t, [][]string{{"application/b"}, {"application/b"}}, contentTypes,
-		"one Content-Type, the same in both orders; the refused requests never arrive")
+	require.Equal(t, [][]string{{"application/b"}, {"application/a"}}, contentTypes,
+		"one Content-Type, the later entry of the iteration; the refused requests never arrive")
 }
 
 // TestRetrySnapshot_URLChangeDetection checks that the snapshot is what
@@ -126,4 +129,136 @@ func TestRetrySnapshot_URLChangeDetection(t *testing.T) {
 			require.Equal(t, host, obs.done[0].Host, "telemetry reports the snapshot")
 		})
 	}
+}
+
+// eofTrailerBody streams a pipe, sets its trailer's X-Sum at the end and
+// then closes eof.
+type eofTrailerBody struct {
+	r       *io.PipeReader
+	trailer http.Header
+	eof     chan struct{}
+	once    sync.Once
+}
+
+func (b *eofTrailerBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		b.once.Do(func() {
+			b.trailer.Set("X-Sum", "abc")
+			close(b.eof)
+		})
+	}
+
+	return n, err
+}
+
+func (b *eofTrailerBody) Close() error { return b.r.Close() }
+
+// TestResponseView_FullDuplexHTTP2 sends a streaming upload over HTTP/2 to a
+// server that replies before reading it, so the reply's view is built while
+// the upload may still be writing its trailers (run with -race: the view never
+// reads the live map). The policy then waits for the upload's end: the view is
+// metadata-only (no body), carries the declaration made before sending or the
+// final snapshot, and editing it reaches neither the trailers sent nor the
+// caller's map.
+func TestResponseView_FullDuplexHTTP2(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu          sync.Mutex
+		gotTrailer  string
+		uploadBytes int
+	)
+
+	replied := make(chan struct{})
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A non-2xx reply would make net/http stop the upload: reply 202.
+		w.WriteHeader(http.StatusAccepted)
+		http.NewResponseController(w).Flush() //nolint:errcheck // a flush failure only delays the reply
+		close(replied)
+
+		b, _ := io.ReadAll(r.Body)
+
+		mu.Lock()
+		uploadBytes, gotTrailer = len(b), r.Trailer.Get("X-Sum")
+		mu.Unlock()
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	type seenView struct {
+		proto      int
+		bodyNil    bool
+		getBodyNil bool
+		declared   bool
+		value      string
+	}
+
+	views := make(chan seenView, 1)
+	eof := make(chan struct{})
+
+	c := httpclient.New(httpclient.WithoutSSRFProtection(), httpclient.WithClient(srv.Client()),
+		httpclient.WithRetryPolicyHandler(func(_ context.Context, resp *http.Response, _ error) (bool, error) {
+			if resp != nil {
+				<-eof // the upload has written its trailers
+
+				_, declared := resp.Request.Trailer["X-Sum"]
+				views <- seenView{
+					proto:      resp.ProtoMajor,
+					bodyNil:    resp.Request.Body == nil,
+					getBodyNil: resp.Request.GetBody == nil,
+					declared:   declared,
+					value:      resp.Request.Trailer.Get("X-Sum"),
+				}
+				// Editing the view cannot reach the upload.
+				resp.Request.Trailer.Set("X-Sum", "evil")
+			}
+
+			return false, nil
+		}))
+
+	pr, pw := io.Pipe()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, nil)
+	require.NoError(t, err)
+
+	req.Trailer = http.Header{"X-Sum": nil}
+	req.Body = &eofTrailerBody{r: pr, trailer: req.Trailer, eof: eof}
+
+	go func() {
+		_, _ = io.WriteString(pw, "first ")
+
+		// The upload ends, writing its trailers, after the reply is on its
+		// way and (most likely) after the client built the view, with no
+		// synchronization between the two: the race detector would report
+		// a view that reads the live map.
+		<-replied
+		time.Sleep(50 * time.Millisecond)
+
+		_, _ = io.WriteString(pw, "second")
+		_ = pw.Close()
+	}()
+
+	resp, err := c.Do(req)
+	require.NoError(t, err)
+
+	v := <-views
+	require.Equal(t, 2, v.proto)
+	require.True(t, v.bodyNil)
+	require.True(t, v.getBodyNil)
+	require.True(t, v.declared, "the declared trailer key is visible")
+	require.Contains(t, []string{"", "abc"}, v.value,
+		"the view holds the pre-send declaration or the synchronized final snapshot")
+
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	require.Equal(t, len("first second"), uploadBytes)
+	require.Equal(t, "abc", gotTrailer, "the upload's trailer is not the view's edit")
+	require.Equal(t, "abc", req.Trailer.Get("X-Sum"), "the view's edit never reaches the caller's map")
 }

@@ -149,8 +149,9 @@ req.Header.Set("Idempotency-Key", orderID) // the POST is now retried like a GET
 
 **Snapshot isolation.** What is sent is a private snapshot of the request — method, URL, Host, header, `ContentLength`, `TransferEncoding`,
 taken before the first transmission — copied afresh for every attempt. Policies, the `ErrorHandler` and the caller get the reply with a
-detached view of its request (own header, trailer and URL), early replies included, so editing it changes nothing being or to be sent;
-telemetry and logs report the snapshot. Transport hooks — a `WithProxyFunc` resolver or one on a caller transport, custom round trippers and dialers — receive the
+metadata-only view of its request: no `Body` or `GetBody`, its own header, URL and `TransferEncoding`, and trailers copied from the final
+snapshot or, while the upload may still be writing them (an early or full-duplex reply), from the declaration made before sending — never
+from the live map. Editing the view changes nothing being or to be sent; telemetry and logs report the snapshot. Transport hooks — a `WithProxyFunc` resolver or one on a caller transport, custom round trippers and dialers — receive the
 request being transmitted and must treat it as read-only, as in net/http; go-atlas does not isolate them. Cookies are looked up and stored
 for the snapshot's origin, starting from its `Cookie` header. A body without `GetBody` is buffered privately for replay; the caller's `Body`,
 `GetBody` and `ContentLength` are never assigned, and every attempt keeps the original framing (an unknown length is sent chunked each time).
@@ -160,15 +161,17 @@ its own copy of the captured trailers, so an edit to an attempt's trailers (by a
 follow a 307/308 redirect of a body without one.
 
 **Change detection.** Before each retry the request handed to the retry layer is compared with its snapshot on Method, URL, Host, Header,
-`ContentLength` and `TransferEncoding` (the URL field by field, so a Host change of an opaque URL counts; a nil URL is a change); on a
-difference the loop stops with an error and nothing more is sent. It sees the request
+`ContentLength` and `TransferEncoding` (the URL field by field, so a Host change of an opaque URL counts); on a difference the loop stops
+with an error and nothing more is sent. The request belongs to net/http while it is in flight: its URL must stay set (`http.Client` itself
+fails on a nil one). It sees the request
 `http.Client` hands its transport: with `http.Client.Timeout` set (or on a redirect hop) that is a shallow copy of the caller's request, so a
 change to a field of the original (its `ContentLength`, say) is not detected, while a change to the shared header map is. Either way the
 snapshot is what is sent.
 
 `ContextWithoutRetry` opts a single request out of the retry loop: the retry layer makes at most one call to the next round tripper whatever
 the method, key, the client's retry options or policy (`RetryDisabled` reports the mark). An eligible request still gets a replayable body
-(buffered when it has no `GetBody`), so the transport can rewind it. Its scope is the client's retry loop only; the
+(buffered when it has no `GetBody`), so the transport can rewind it — except with no retries configured (`WithRetryMax(0)`,
+`WithoutRetry`), where no body is ever buffered and the caller's is handed on as is. Its scope is the client's retry loop only; the
 transport keeps its own retries, of two kinds:
 
 - after a possible processing: on a reused HTTP/1.1 connection net/http may resend a request it already wrote when it is idempotent by

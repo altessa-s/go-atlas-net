@@ -17,6 +17,8 @@ type retryDisabledKey struct{}
 // status yields a [RetryExhaustedError] after the one attempt; a policy still
 // classifies it). An eligible request still gets a replayable body (buffered
 // when it has no GetBody): the mark caps the calls, not the body preparation.
+// The exception is a client with no retries configured (WithRetryMax(0),
+// WithoutRetry), which never buffers and hands the caller's body on as is.
 //
 // The scope is the client retry loop only; the transport below it keeps its
 // own retries, of two kinds (see [TransportDriver]):
