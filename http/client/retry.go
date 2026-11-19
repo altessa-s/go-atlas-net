@@ -304,7 +304,9 @@ func (rt *retryRoundTripper) CloseIdleConnections() { closeIdleConnections(rt.ne
 func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	start := rt.now()
 
-	replay := rt.replayable(req)
+	// A request marked with ContextWithoutRetry is attempted once, whatever
+	// its method, headers or the retry policy.
+	replay := !RetryDisabled(req.Context()) && rt.replayable(req)
 	if replay {
 		if bufErr := rt.bufferBody(req); bufErr != nil {
 			// A buffering failure (an ended context, a failing body) ends the
@@ -382,10 +384,11 @@ func (rt *retryRoundTripper) requestDone(req *http.Request, start time.Time, sta
 
 // replayable reports whether the retry layer may send req more than once.
 // With a [RetryPolicyHandler] the policy decides. The built-in classification
-// replays only requests that are safe to repeat, as [net/http.Transport] does
-// for its own retries: an idempotent method (GET, HEAD, OPTIONS, TRACE, PUT,
-// DELETE) or a request carrying an Idempotency-Key or X-Idempotency-Key header.
-// Any other request (POST, PATCH, ...) is attempted once, so a server that
+// replays only requests that are safe to repeat: an idempotent method of
+// RFC 9110 (GET, HEAD, OPTIONS, TRACE, PUT, DELETE; method names are
+// case-sensitive, an empty method is GET) or a request carrying exactly one
+// non-blank idempotency key (see [singleIdempotencyKey]). Any other request
+// (POST, PATCH, a lowercase "post", ...) is attempted once, so a server that
 // processed it before failing never sees it twice.
 func (rt *retryRoundTripper) replayable(req *http.Request) bool {
 	if rt.retryPolicyHandler != nil {
@@ -397,7 +400,44 @@ func (rt *retryRoundTripper) replayable(req *http.Request) bool {
 		return true
 	}
 
-	return req.Header.Get("Idempotency-Key") != "" || req.Header.Get("X-Idempotency-Key") != ""
+	return singleIdempotencyKey(req.Header)
+}
+
+// Idempotency key header names, in their canonical form.
+const (
+	headerIdempotencyKey  = "Idempotency-Key"
+	headerXIdempotencyKey = "X-Idempotency-Key"
+)
+
+// singleIdempotencyKey reports whether h carries exactly one effective
+// idempotency key: the values of Idempotency-Key and X-Idempotency-Key under
+// every map key that matches either name case-insensitively total one, and
+// that value is not empty once HTTP whitespace (SP, HTAB) is trimmed. Two
+// values (under one name, both names or differently cased map keys) are
+// ambiguous: the server may dedupe on a different one than intended, so the
+// request is not replayed. The caller's slices are only read.
+func singleIdempotencyKey(h http.Header) bool {
+	var (
+		count int
+		value string
+	)
+
+	for name, values := range h {
+		if !strings.EqualFold(name, headerIdempotencyKey) && !strings.EqualFold(name, headerXIdempotencyKey) {
+			continue
+		}
+
+		count += len(values)
+		if count > 1 {
+			return false
+		}
+
+		if len(values) == 1 {
+			value = values[0]
+		}
+	}
+
+	return count == 1 && strings.Trim(value, " \t") != ""
 }
 
 // bufferBody prepares req's body for replay. It prefers the caller-provided

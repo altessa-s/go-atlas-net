@@ -125,13 +125,23 @@ of 400 and above fails with `UnexpectedStatusError`, and the rest is returned. `
 c := httpclient.New(httpclient.WithRetryableStatuses(408, 429, 500, 502, 503, 504))
 ```
 
-The built-in classification replays only requests that are safe to repeat: an idempotent method
-(GET, HEAD, OPTIONS, TRACE, PUT, DELETE) or a request carrying an `Idempotency-Key` or `X-Idempotency-Key` header. A POST or PATCH without one is sent
-once — a server that processed it before failing never sees it twice — and a retryable failure is returned as a `RetryExhaustedError` after that
-single attempt. A policy set with `WithRetryPolicyHandler` decides for every method, so it can replay a POST the server deduplicates otherwise.
+The built-in classification replays only requests that are safe to repeat: an idempotent method of RFC 9110
+(GET, HEAD, OPTIONS, TRACE, PUT, DELETE; method names are case-sensitive, so `post` or `put` is not idempotent, and an empty method is GET) or a
+request carrying exactly one non-blank idempotency key. The values of `Idempotency-Key` and `X-Idempotency-Key` are counted together, under every
+header map key that matches either name case-insensitively; the total must be one and the value non-empty after trimming spaces and tabs. A POST
+or PATCH without a key, with several values, with keys under both names or with a blank key is sent once — a server that processed it before
+failing never sees it twice — and a retryable failure is returned as a `RetryExhaustedError` after that single attempt. A policy set with
+`WithRetryPolicyHandler` decides for every method, so it can replay a POST the server deduplicates otherwise.
 
 ```go
 req.Header.Set("Idempotency-Key", orderID) // the POST is now retried like a GET
+```
+
+`ContextWithoutRetry` opts a single request out of the retry layer: it is attempted once whatever its method, key, the client's retry options
+or policy (`RetryDisabled` reports the mark). As with `WithoutRetry`, net/http may still replay it below the retry layer (see below).
+
+```go
+req, _ := http.NewRequestWithContext(httpclient.ContextWithoutRetry(ctx), http.MethodPost, url, body)
 ```
 
 The Content-Length precheck of `WithMaxResponseSize` closes an oversized reply unread and fails with a `ResponseSizeError` that keeps its `Status` and
