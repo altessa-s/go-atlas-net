@@ -243,16 +243,20 @@ func addCookieNames(set map[string]struct{}, resp *http.Response) {
 // set as received, carried by the reply's request view.
 type receivedCookiesKey struct{}
 
-// receivedCookieNames returns the names of the cookies resp sets.
-func receivedCookieNames(resp *http.Response) []string {
-	cookies := resp.Cookies()
-	names := make([]string, 0, len(cookies))
+// cookieNameList returns the cookie names recorded for the redirect
+// filtering, sorted.
+func (c *retryCall) cookieNameList() []string {
+	return slices.Sorted(maps.Keys(c.cookieNames))
+}
 
-	for _, c := range cookies {
-		names = append(names, c.Name)
+// withCookieNames returns a copy of req (a fresh view of the last attempt
+// when nil) whose context records the cookie names of this call's replies.
+func (c *retryCall) withCookieNames(req *http.Request) *http.Request {
+	if req == nil {
+		return c.responseView(c.lastAttemptReq, c.cookieNameList())
 	}
 
-	return names
+	return req.WithContext(context.WithValue(req.Context(), receivedCookiesKey{}, c.cookieNameList()))
 }
 
 // maxRedirects is net/http's default redirect limit.
@@ -408,12 +412,18 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	lastResp := call.lastResp
 	resp, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts, call.attemptHasDeadline())
 
-	if resp != nil && resp == lastResp && call.lastAttemptReq != nil {
+	switch {
+	case resp == nil || call.lastAttemptReq == nil:
+	case resp == lastResp:
 		// The reply goes back to http.Client with a fresh view: whatever a
 		// policy or the ErrorHandler did to the one they saw (its URL, its
 		// context and the cookie names recorded there), the redirect
 		// handling reads the library's own.
-		resp.Request = call.responseView(call.lastAttemptReq, call.lastCookieNames)
+		resp.Request = call.responseView(call.lastAttemptReq, call.cookieNameList())
+	case rt.jar != nil:
+		// An ErrorHandler's own reply may be a redirect too: it carries the
+		// cookie names this hop's replies set, for the redirect filtering.
+		resp.Request = call.withCookieNames(resp.Request)
 	}
 	// Retries count the calls actually made to the next round tripper.
 	rt.requestDone(call.base, start, statusClass, max(call.attempts-1, 0), failed)
@@ -754,11 +764,11 @@ type retryCall struct {
 	// the transport's writing goroutine.
 	trailerMu sync.Mutex
 	// lastAttemptReq is the request of the last reply received and
-	// lastCookieNames the names of the cookies the replies of this call set
-	// (or deleted) as received:
+	// cookieNames the names of the cookies the replies of this call set (or
+	// deleted) as received, with a cookie jar:
 	// the reply returned to http.Client gets a fresh view built from them.
-	lastAttemptReq  *http.Request
-	lastCookieNames []string
+	lastAttemptReq *http.Request
+	cookieNames    map[string]struct{}
 	// liveBodies holds a close signal for every body that may write the
 	// caller's live trailers: each attempt's body and each body the transport
 	// got from the attempt's GetBody (see awaitLiveBodies). Guarded by
@@ -779,19 +789,22 @@ type retryCall struct {
 // captureTrailersAtEOF wraps body so the caller's live trailers are captured
 // as final when it is read to its end.
 func (c *retryCall) captureTrailersAtEOF(body io.ReadCloser, attemptTrailer http.Header) *eofHookBody {
-	onEOF := func() {
-		// The caller's body filled the caller's map as it was read (on this
-		// goroutine): record it as final and copy its values into the
-		// attempt's own map before the transport, seeing EOF, writes it.
-		c.captureLiveTrailers()
-
-		clear(attemptTrailer)
-
-		for k, v := range c.req.Trailer {
-			attemptTrailer[k] = slices.Clone(v)
+	// capture runs on the goroutine that read the body to its end, which
+	// also filled the caller's map: it records that map as final. It never
+	// touches the attempt's map.
+	capture := c.captureLiveTrailers
+	// publish brings the attempt's map up to date with the caller's: only
+	// the values of keys declared before sending (the key set is fixed; Go
+	// sends only predeclared trailers), only where they differ. Static
+	// trailers are left untouched. See eofHookBody for when it may run.
+	publish := func() {
+		for k, v := range attemptTrailer {
+			if live := c.req.Trailer[k]; !slices.Equal(v, live) {
+				attemptTrailer[k] = slices.Clone(live)
+			}
 		}
 	}
-	hooked := &eofHookBody{ReadCloser: body, onEOF: onEOF, closed: make(chan struct{})}
+	hooked := &eofHookBody{ReadCloser: body, capture: capture, publish: publish, closed: make(chan struct{})}
 
 	c.trailerMu.Lock()
 	c.liveBodies = append(c.liveBodies, hooked.closed)
@@ -890,23 +903,40 @@ func (c *retryCall) setFinalTrailers(t http.Header) {
 
 // eofHookBody calls onEOF once, when its body is read to its end, and closes
 // closed once the body is closed.
+//
+// At the body's end it captures the caller's trailers (capture) and brings the
+// attempt's trailer map up to date (publish) before EOF reaches the
+// transport, which writes the trailers only after reading EOF. One case is
+// deferred: an end met by the body's first Read. net/http's transferWriter
+// may probe a body of unknown length for a GET, HEAD, DELETE, OPTIONS,
+// PROPFIND or SEARCH with a first Read on its own goroutine while the request
+// headers, which enumerate the trailer keys, are written; a write to the map
+// then would race with that enumeration. The publication waits for the next
+// Read or for Close, both of which net/http makes after the headers (the
+// transport reads the probed body again before writing a chunked body's
+// trailers, and closes it before writing them).
 type eofHookBody struct {
 	io.ReadCloser
-	onEOF func()
-	done  bool // touched by the reading goroutine only
+	capture func()
+	publish func()
 
 	mu        sync.Mutex
+	calls     int  // Reads begun
 	reads     int  // Reads in flight
+	ended     bool // the end was met
+	pending   bool // publish deferred
 	isClosed  bool // Close was called
 	closed    chan struct{}
 	closeOnce sync.Once
 }
 
-// Close closes the body; closed is signaled once no Read is in flight.
+// Close closes the body, makes a deferred publication, and signals closed once
+// no Read is in flight.
 func (b *eofHookBody) Close() error {
 	err := b.ReadCloser.Close()
 
 	b.mu.Lock()
+	b.publishPending()
 	b.isClosed = true
 	b.signalIdle()
 	b.mu.Unlock()
@@ -914,24 +944,43 @@ func (b *eofHookBody) Close() error {
 	return err
 }
 
-// Read reads from the body and calls onEOF on its end.
+// Read reads from the body; at its end it captures and publishes the
+// trailers (see eofHookBody).
 func (b *eofHookBody) Read(p []byte) (int, error) {
 	b.mu.Lock()
+	b.publishPending()
+	b.calls++
+	first := b.calls == 1
 	b.reads++
 	b.mu.Unlock()
 
 	n, err := b.ReadCloser.Read(p)
-	if err == io.EOF && !b.done { //nolint:errorlint // io.Reader returns io.EOF itself, never wrapped
-		b.done = true
-		b.onEOF()
-	}
 
 	b.mu.Lock()
+	if err == io.EOF && !b.ended { //nolint:errorlint // io.Reader returns io.EOF itself, never wrapped
+		b.ended = true
+		b.capture()
+
+		if first {
+			b.pending = true
+		} else {
+			b.publish()
+		}
+	}
+
 	b.reads--
 	b.signalIdle()
 	b.mu.Unlock()
 
 	return n, err
+}
+
+// publishPending makes a deferred publication. b.mu is held.
+func (b *eofHookBody) publishPending() {
+	if b.pending {
+		b.pending = false
+		b.publish()
+	}
 }
 
 // signalIdle closes closed once the body is closed and no Read is in flight.
@@ -1073,15 +1122,20 @@ func (c *retryCall) try(ctx context.Context) error {
 		if c.rt.jar != nil {
 			// Names set or deleted by every reply of this hop, discarded
 			// attempts included, so a later reply that sets none does not
-			// hide them.
-			for _, name := range receivedCookieNames(resp) {
-				if !slices.Contains(c.lastCookieNames, name) {
-					c.lastCookieNames = append(c.lastCookieNames, name)
-				}
+			// hide them. They are kept even when this hop carries no Cookie
+			// header: a cross-domain hop's request has its cookies stripped,
+			// yet the names its replies set still count for a later hop
+			// back on the initial domain (see filterRedirectCookies).
+			if c.cookieNames == nil {
+				c.cookieNames = make(map[string]struct{})
+			}
+
+			for _, cookie := range resp.Cookies() {
+				c.cookieNames[cookie.Name] = struct{}{}
 			}
 		}
 
-		resp.Request = c.responseView(attemptReq, c.lastCookieNames)
+		resp.Request = c.responseView(attemptReq, c.cookieNameList())
 	}
 
 	c.lastResp = resp

@@ -54,9 +54,9 @@ constructors are available: `New` returns a bare `*http.Client` suitable for any
 | `WithTransport`              | --            | Custom `*http.Transport` override; start from `DefaultPooledTransport()` (a fresh clone of the default) to keep the pool tuning                      |
 | `WithProxy`                  | none          | Route requests through `http://host:port` with optional `*url.Userinfo`                                                                              |
 | `WithProxyURL`               | none          | Route requests through any proxy URL (http, https, socks5, socks5h)                                                                                  |
-| `WithProxyFunc`              | none          | Custom resolver matching `http.Transport.Proxy` signature; it receives the request being sent and must treat it as read-only                            |
+| `WithProxyFunc`              | none          | Custom resolver matching `http.Transport.Proxy` signature; it receives the request being sent and must treat it as read-only. With `WithProxyTLSConfig` it runs at dial time, once per new connection, on a synthesized `https://host:port` request (no method, header, path or context values) |
 | `WithoutProxy`               | none          | Disable proxy resolution, including `HTTP_PROXY`/`HTTPS_PROXY` defaults                                                                              |
-| `WithProxyTLSConfig`         | system        | Custom `*tls.Config` for the handshake to an `https://` proxy (self-signed CA, mTLS); isolates proxy TLS from destination TLS via custom DialContext |
+| `WithProxyTLSConfig`         | system        | Custom `*tls.Config` for the handshake to an `https://` proxy (self-signed CA, mTLS); isolates proxy TLS from destination TLS via custom DialContext, which consults the `WithProxyFunc` resolver per dial |
 | `WithErrorHandler`           | nil           | Custom error handler                                                                                                                                 |
 | `WithRetryPolicyHandler`     | nil           | Custom retry policy handler; delegate to `DefaultRetryPolicy` for the cases it does not decide                                                      |
 | `WithoutRetry`               | --            | One client-layer attempt per request (transport retries remain possible); the response for any status (body unread) or the transport error (redacted text, causes intact) is returned; overrides `WithRetryMax` and `WithRetryPolicyHandler` |
@@ -159,8 +159,10 @@ for the snapshot's origin, starting from its `Cookie` header. A body without `Ge
 `GetBody` and `ContentLength` are never assigned, and every attempt keeps the original framing (an unknown length is sent chunked each time).
 Trailers: every attempt hands the transport its own trailer map — a copy of the final trailers once known, else of the declaration made
 before the first transmission — never the caller's. A caller body (the original or a `GetBody` result, the transport's rewinds included)
-fills the caller's map as it is read; at its end a hook records those values as final and copies them into the attempt's map before the
-transport writes the trailers. Every such body is tracked for the whole call: before the caller's `GetBody` is asked for the next body, the
+fills the caller's map as it is read; at its end a hook records those values as final and updates the attempt's map in place — only the
+values of the keys declared before sending, only where they differ (static trailers are never written) — before the transport writes the
+trailers. An end met by the body's first Read waits for the next Read or `Close`: net/http may probe a body of unknown length (GET, HEAD,
+DELETE, ...) on its own goroutine while it writes the headers that list the trailer keys, and it reads or closes the body again only after. Every such body is tracked for the whole call: before the caller's `GetBody` is asked for the next body, the
 retry waits (bounded by the request context) until each earlier one is closed with no read in flight, so two never write the caller's map
 at once. A buffered body is read to its end by buffering. The caller's request gets no `GetBody`, so `http.Client` does not follow a 307/308
 redirect of a body without one.

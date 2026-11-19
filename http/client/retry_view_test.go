@@ -411,3 +411,74 @@ func TestRetry_StalledBodyPolicyReplacesViewContext(t *testing.T) {
 
 	require.Equal(t, int32(2), calls.Load())
 }
+
+// pipeTrailerBody reads a pipe and, when dynamic, sets X-Sum on its end.
+type pipeTrailerBody struct {
+	r       *io.PipeReader
+	trailer http.Header
+	dynamic bool
+}
+
+func (b *pipeTrailerBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if b.dynamic && errors.Is(err, io.EOF) {
+		b.trailer.Set("X-Sum", "abc")
+	}
+
+	return n, err
+}
+
+func (b *pipeTrailerBody) Close() error { return b.r.Close() }
+
+// TestTrailers_ProbedEmptyBody exercises net/http's transferWriter probe: a
+// GET with a body of unknown length that stays empty past the probe's 200ms
+// wait, so the probe's first Read meets the end on its own goroutine while
+// the headers (which list the trailer keys) are written. Run with -race: the
+// attempt's trailer map is not written then; the trailers still arrive.
+func TestTrailers_ProbedEmptyBody(t *testing.T) {
+	t.Parallel()
+
+	for name, dynamic := range map[string]bool{"static": false, "dynamic": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got := make(chan string, 1)
+
+			srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				got <- r.Trailer.Get("X-Sum")
+			}))
+			t.Cleanup(srv.Close)
+
+			pr, pw := io.Pipe()
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+			require.NoError(t, err)
+
+			req.Trailer = http.Header{"X-Sum": {"static"}}
+			if dynamic {
+				req.Trailer = http.Header{"X-Sum": nil}
+			}
+
+			req.Body = &pipeTrailerBody{r: pr, trailer: req.Trailer, dynamic: dynamic}
+
+			go func() {
+				time.Sleep(300 * time.Millisecond)
+
+				_ = pw.Close()
+			}()
+
+			resp, err := httpclient.New(loopback, httpclient.WithoutRetry()).Do(req)
+			require.NoError(t, err)
+
+			_ = resp.Body.Close()
+
+			want := "static"
+			if dynamic {
+				want = "abc"
+			}
+
+			require.Equal(t, want, <-got)
+		})
+	}
+}

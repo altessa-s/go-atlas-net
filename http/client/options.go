@@ -184,7 +184,11 @@ type options struct {
 	observer Observer `optgen:"default=defaultObserver(),notnil"`
 	// proxy resolves the proxy URL for outgoing requests. As with
 	// http.Transport.Proxy, it receives the request being transmitted and
-	// must treat it as read-only: the client does not give it a copy. The
+	// must treat it as read-only: the client does not give it a copy. With
+	// proxyTLSConfig (and no transport driver) it is called at dial time
+	// instead, once per new connection, with a synthesized request that
+	// carries only the destination as an https URL (host:port): no method,
+	// header, body, context values or path. The
 	// auto-generated setter is named WithProxyFunc to free the WithProxy name
 	// for the more common host/port/auth convenience setter declared below.
 	proxy ProxyFunc `opt:"ProxyFunc"`
@@ -193,7 +197,8 @@ type options struct {
 	// the client routes outbound requests through a custom DialContext
 	// that performs TCP+TLS+CONNECT manually, isolating proxy TLS from
 	// the destination's TLSClientConfig. Has no effect for plain http://
-	// or socks5:// proxies.
+	// or socks5:// proxies. The proxy resolver (proxy) is then consulted per
+	// dial with a synthesized https://host:port request, not per request.
 	proxyTLSConfig *tls.Config
 	// retryAfterStatuses are the reply statuses whose Retry-After the retry
 	// layer honors (see retryAfterMax). Defaults to 429 and 503.

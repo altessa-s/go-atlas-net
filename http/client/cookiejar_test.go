@@ -675,3 +675,58 @@ func TestRedirectDropsCookieDeletedByDiscardedAttempt(t *testing.T) {
 	require.Equal(t, int32(2), froms.Load())
 	require.Equal(t, []string{"user=1"}, seen)
 }
+
+// TestRedirectFromErrorHandlerReplyCarriesCookieNames checks that a redirect
+// reply made by an ErrorHandler carries the cookie names this hop's replies
+// set: the discarded 503 deleted the session, so the destination hop does not
+// get the initial one.
+func TestRedirectFromErrorHandlerReplyCarriesCookieNames(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu   sync.Mutex
+		seen []string
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/from", func(w http.ResponseWriter, _ *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "session", Path: "/", MaxAge: -1})
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	mux.HandleFunc("/to", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+
+		seen = append(seen, strings.Join(r.Header.Values("Cookie"), "|"))
+		mu.Unlock()
+
+		_, _ = io.WriteString(w, "ok")
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := httpclient.New(loopback, httpclient.WithCookieJar(newCountingJar(t)), httpclient.WithRetryMax(0),
+		httpclient.WithErrorHandler(func(resp *http.Response, _ error, _ int) (*http.Response, error) {
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": {"/to"}},
+				Body:       http.NoBody,
+			}, nil
+		}))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/from", nil)
+	require.NoError(t, err)
+	req.Header.Set("Cookie", "session=old; user=1")
+
+	resp, err := c.Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	require.Equal(t, []string{"user=1"}, seen)
+}
