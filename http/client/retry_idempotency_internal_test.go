@@ -277,3 +277,70 @@ func TestRetryRoundTripper_PolicyCannotReplayIneligible(t *testing.T) {
 		})
 	}
 }
+
+// trailerBody sets its trailer map's X-Sum once read to its end.
+type trailerBody struct {
+	r       io.Reader
+	trailer http.Header
+}
+
+func (b *trailerBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		b.trailer.Set("X-Sum", "abc")
+	}
+
+	return n, err
+}
+
+func (b *trailerBody) Close() error { return nil }
+
+// TestRetryRoundTripper_TrailersAfterUnreadAttempt checks that when the first
+// attempt fails before reading the body, the retry sends the trailer map the
+// rewound body fills.
+func TestRetryRoundTripper_TrailersAfterUnreadAttempt(t *testing.T) {
+	t.Parallel()
+
+	var (
+		calls    int
+		trailers []string
+	)
+
+	rt := &retryRoundTripper{
+		observer:          NoopObserver{},
+		retryableStatuses: DefaultRetryableStatuses(),
+		next: httpx.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 {
+				_ = req.Body.Close()
+				return nil, errors.New("transient")
+			}
+
+			_, _ = io.Copy(io.Discard, req.Body)
+			_ = req.Body.Close()
+
+			trailers = append(trailers, req.Trailer.Get("X-Sum"))
+
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+		}),
+		retryOpts:   newTestRetryOpts(2),
+		maxAttempts: 2,
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, "http://example.com", nil)
+	require.NoError(t, err)
+
+	req.Trailer = http.Header{"X-Sum": nil}
+	req.Body = &trailerBody{r: strings.NewReader("payload"), trailer: req.Trailer}
+	req.GetBody = func() (io.ReadCloser, error) {
+		return &trailerBody{r: strings.NewReader("payload"), trailer: req.Trailer}, nil
+	}
+
+	resp, err := rt.RoundTrip(req)
+	require.NoError(t, err)
+
+	_ = resp.Body.Close()
+
+	require.Equal(t, 2, calls)
+	require.Equal(t, []string{"abc"}, trailers)
+}

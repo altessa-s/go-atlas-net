@@ -355,8 +355,7 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 			call.callerBodyClosed = true
 			// Buffering read the body to its end, so the trailers are final:
 			// every attempt sends its own copy of them.
-			call.finalTrailer = req.Trailer.Clone()
-			call.trailerFinal = true
+			call.setFinalTrailers(req.Trailer.Clone())
 		}
 	}
 
@@ -700,16 +699,55 @@ type retryCall struct {
 	// callerBodyClosed reports that buffering already read and closed the
 	// caller's body.
 	callerBodyClosed bool
+	// trailerMu guards finalTrailer and trailerFinal: a body reaches EOF on
+	// the transport's writing goroutine.
+	trailerMu sync.Mutex
 	// finalTrailer holds the request's trailers once final (trailerFinal):
-	// after buffering, or after the first transmission of a streaming body,
-	// which sends the caller's live map as the body fills it. Every attempt
-	// from then on sends its own copy, so an edit to one attempt's trailers
-	// never reaches the next.
+	// after buffering, or when a transmission of a streaming body read it to
+	// its end (the caller's live map, filled by the body, is cloned then).
+	// Every attempt from then on sends its own copy, so an edit to one
+	// attempt's trailers never reaches the next.
 	finalTrailer http.Header
 	trailerFinal bool
 	// lastStatus is the status of the last reply received, kept whatever
 	// happens to the reply's body.
 	lastStatus int
+}
+
+// finalTrailers returns the final trailers and whether they are known.
+func (c *retryCall) finalTrailers() (http.Header, bool) {
+	c.trailerMu.Lock()
+	defer c.trailerMu.Unlock()
+
+	return c.finalTrailer, c.trailerFinal
+}
+
+// setFinalTrailers records t as the final trailers, unless already known.
+func (c *retryCall) setFinalTrailers(t http.Header) {
+	c.trailerMu.Lock()
+	defer c.trailerMu.Unlock()
+
+	if !c.trailerFinal {
+		c.finalTrailer, c.trailerFinal = t, true
+	}
+}
+
+// eofHookBody calls onEOF once, when its body is read to its end.
+type eofHookBody struct {
+	io.ReadCloser
+	onEOF func()
+	done  bool
+}
+
+// Read reads from the body and calls onEOF on its end.
+func (b *eofHookBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if errors.Is(err, io.EOF) && !b.done {
+		b.done = true
+		b.onEOF()
+	}
+
+	return n, err
 }
 
 // onRetry runs before each retry's backoff sleep.
@@ -778,15 +816,18 @@ func (c *retryCall) try(ctx context.Context) error {
 
 	attempt.GetBody = c.getBody
 
-	if c.firstAttempt && !c.trailerFinal {
-		// A streaming body fills the caller's trailers as it is sent.
-		attempt.Trailer = c.req.Trailer
+	if final, ok := c.finalTrailers(); ok {
+		attempt.Trailer = final.Clone()
 	} else {
-		if !c.trailerFinal {
-			c.finalTrailer, c.trailerFinal = c.req.Trailer.Clone(), true
+		// No transmission has read the body to its end yet: this one sends
+		// the caller's live map, which the (rewound) body fills as it is
+		// read, and captures its values when the body reaches EOF.
+		attempt.Trailer = c.req.Trailer
+		if c.req.Trailer != nil && attempt.Body != nil && attempt.Body != http.NoBody {
+			attempt.Body = &eofHookBody{ReadCloser: attempt.Body, onEOF: func() {
+				c.setFinalTrailers(c.req.Trailer.Clone())
+			}}
 		}
-
-		attempt.Trailer = c.finalTrailer.Clone()
 	}
 
 	c.firstAttempt = false

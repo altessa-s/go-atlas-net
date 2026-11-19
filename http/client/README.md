@@ -153,8 +153,9 @@ what is sent next. Transport hooks — a `WithProxyFunc` resolver or one on a ca
 request being transmitted and must treat it as read-only, as in net/http; go-atlas does not isolate them. Cookies are looked up and stored
 for the snapshot's origin, starting from its `Cookie` header. A body without `GetBody` is buffered privately for replay; the caller's `Body`,
 `GetBody` and `ContentLength` are never assigned, and every attempt keeps the original framing (an unknown length is sent chunked each time).
-Trailers: the first transmission of a streaming body uses the caller's live `Trailer` map, which the body fills as it is read; a buffered
-body, and every later attempt, sends its own copy of the final trailers (as they stood once the body was read to the end). The caller's request gets no `GetBody`, so `http.Client` does not
+Trailers: until a transmission has read the body to its end, an attempt sends the caller's live `Trailer` map, which the (rewound) body
+fills as it is read, and the values are captured at that end; a buffered body is read to its end by buffering. Every later attempt sends
+its own copy of the captured trailers, so an edit to an attempt's trailers (by a policy, say) never reaches the next one. The caller's request gets no `GetBody`, so `http.Client` does not
 follow a 307/308 redirect of a body without one.
 
 **Change detection.** Before each retry the request handed to the retry layer is compared with its snapshot on Method, URL, Host, Header,

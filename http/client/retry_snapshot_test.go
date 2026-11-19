@@ -555,3 +555,66 @@ func TestRetrySnapshot_Trailers(t *testing.T) {
 		})
 	}
 }
+
+// TestBuilder_CaseVariantKeysAreAmbiguous checks that the builder keeps header
+// entries whose names differ only in case, so two keys are refused.
+func TestBuilder_CaseVariantKeysAreAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	srv, seen := recordingServer(t)
+
+	resp, err := httpclient.NewRequestBuilder(fastRetry()).POST(srv.URL).
+		Header("Idempotency-Key", "A").Header("idempotency-key", "B").
+		Body(strings.NewReader("order")).Send(t.Context())
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+
+	require.ErrorIs(t, err, httpclient.ErrAmbiguousIdempotencyKey)
+	require.Empty(t, seen())
+
+	rb := httpclient.NewRequestBuilder(fastRetry()).POST(srv.URL).
+		Header("X-Trace", "a").Header("x-trace", "b")
+	t.Cleanup(rb.Release)
+
+	req, err := rb.Build()
+	require.NoError(t, err)
+	require.Equal(t, []string{"a", "b"}, req.Header.Values("X-Trace"), "both entries are kept, in key order")
+}
+
+// TestRetrySnapshot_RewindableTrailers checks a streaming body with GetBody:
+// the trailers are captured when a transmission reads the body to its end, so
+// a policy editing them after a completed upload changes nothing resent.
+func TestRetrySnapshot_RewindableTrailers(t *testing.T) {
+	t.Parallel()
+
+	srv, seen := recordingServer(t)
+	c := fastRetry(httpclient.WithRetryPolicyHandler(func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		if resp != nil && resp.Request != nil && resp.Request.Trailer != nil {
+			resp.Request.Trailer.Set("X-Sum", "evil")
+		}
+
+		return httpclient.DefaultRetryPolicy(ctx, resp, err)
+	}))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, nil)
+	require.NoError(t, err)
+
+	req.Header.Set("Idempotency-Key", "A")
+	req.Trailer = http.Header{"X-Sum": nil}
+	req.Body = &trailerFillingBody{r: strings.NewReader("order"), trailer: req.Trailer}
+	req.GetBody = func() (io.ReadCloser, error) {
+		return &trailerFillingBody{r: strings.NewReader("order"), trailer: req.Trailer}, nil
+	}
+
+	_, err = c.Do(req) //nolint:bodyclose // an exhausted request returns no response
+	require.ErrorIs(t, err, httpclient.ErrMaxRetriesExceeded)
+
+	got := seen()
+	require.Len(t, got, 3)
+
+	for _, r := range got {
+		require.Equal(t, "order", r.body)
+		require.Equal(t, "abc", r.trailer)
+	}
+}

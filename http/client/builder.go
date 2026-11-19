@@ -10,8 +10,10 @@ import (
 	"encoding/json"
 	"io"
 	"iter"
+	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -90,6 +92,8 @@ type RequestBuilder interface {
 	BytesBody(body []byte) RequestBuilder
 
 	// Header sets a single header.
+	// Entries whose keys differ only in case are all sent (added under the
+	// canonical name in key order), never collapsed into one.
 	Header(key, value string) RequestBuilder
 	// Headers sets multiple headers from an iterator.
 	Headers(seq iter.Seq2[string, string]) RequestBuilder
@@ -557,9 +561,11 @@ func (rb *requestBuilder) BuildWithContext(ctx context.Context) (*http.Request, 
 		return nil, coreerrs.Wrapf(RedactError(err), "failed to create %s request for %s", rb.method, redactedRawURL(rb.url))
 	}
 
-	// Set headers
-	for k, v := range rb.headers {
-		req.Header.Set(k, v)
+	// Add every header entry, in key order: entries whose names differ only
+	// in case are all kept (under the canonical name), so none is silently
+	// dropped and the idempotency key guard sees them all.
+	for _, k := range slices.Sorted(maps.Keys(rb.headers)) {
+		req.Header.Add(k, rb.headers[k])
 	}
 
 	rb.applyAuth(req)
