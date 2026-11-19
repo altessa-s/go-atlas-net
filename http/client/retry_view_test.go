@@ -295,3 +295,39 @@ func TestWithHeaders_ReplacesEarlierKeyVariants(t *testing.T) {
 
 	require.Equal(t, [][]string{{"A"}}, keys)
 }
+
+// TestBuilder_RefusesAmbiguousKeyForAnyDoer checks that the builder refuses an
+// ambiguous idempotency key itself before handing it to a plain http.Client,
+// and leaves the refusal, with its telemetry, to a client of this package.
+func TestBuilder_RefusesAmbiguousKeyForAnyDoer(t *testing.T) {
+	t.Parallel()
+
+	srv, seen := recordingServer(t)
+
+	resp, err := httpclient.NewRequestBuilder(&http.Client{}).POST(srv.URL).
+		Header("Idempotency-Key", "A").Header("idempotency-key", "B").
+		Body(strings.NewReader("order")).Send(t.Context())
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+
+	require.ErrorIs(t, err, httpclient.ErrAmbiguousIdempotencyKey)
+	require.Empty(t, seen())
+
+	obs := &recordingObserver{}
+
+	resp, err = httpclient.NewRequestBuilder(fastRetry(httpclient.WithObserver(obs))).POST(srv.URL).
+		Header("Idempotency-Key", "A").Header("X-Idempotency-Key", "B").Send(t.Context())
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+
+	require.ErrorIs(t, err, httpclient.ErrAmbiguousIdempotencyKey)
+	require.Empty(t, seen())
+
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+
+	require.Len(t, obs.done, 1, "the guarded client reports the refusal once")
+	require.True(t, obs.done[0].Failed)
+}

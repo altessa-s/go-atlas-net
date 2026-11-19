@@ -448,3 +448,74 @@ func TestRetryRoundTripper_BufferFailureReportsSnapshot(t *testing.T) {
 type readerFunc func([]byte) (int, error)
 
 func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
+
+// TestRetryRoundTripper_AwaitsRewoundBody checks that every body that can
+// write the live trailers is waited for: the transport rewinds the body
+// itself, replies early and closes the replacement late; the caller's GetBody
+// is asked for the retry's body only after that replacement is closed.
+func TestRetryRoundTripper_AwaitsRewoundBody(t *testing.T) {
+	t.Parallel()
+
+	var (
+		calls          int
+		getBodies      atomic.Int32
+		replacementOff atomic.Bool
+		closedAtAsk    atomic.Bool
+	)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, "http://example.com", nil)
+	require.NoError(t, err)
+
+	req.Trailer = http.Header{"X-Sum": nil}
+	req.Body = &trailerBody{r: strings.NewReader("payload"), trailer: req.Trailer}
+	req.GetBody = func() (io.ReadCloser, error) {
+		if getBodies.Add(1) == 2 { // the retry layer's own rewind
+			closedAtAsk.Store(replacementOff.Load())
+		}
+
+		return &trailerBody{r: strings.NewReader("payload"), trailer: req.Trailer}, nil
+	}
+
+	rt := &retryRoundTripper{
+		observer:          NoopObserver{},
+		retryableStatuses: DefaultRetryableStatuses(),
+		next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 {
+				_ = r.Body.Close()
+
+				replacement, gbErr := r.GetBody() // as net/http rewinds on a reused connection
+				require.NoError(t, gbErr)
+
+				go func() {
+					time.Sleep(50 * time.Millisecond)
+
+					buf := make([]byte, 2)
+					_, _ = replacement.Read(buf)
+
+					replacementOff.Store(true)
+
+					_ = replacement.Close()
+				}()
+
+				return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Request: r}, nil
+			}
+
+			_, _ = io.Copy(io.Discard, r.Body)
+			_ = r.Body.Close()
+
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+		}),
+		retryOpts:   newTestRetryOpts(2),
+		maxAttempts: 2,
+	}
+
+	resp, err := rt.RoundTrip(req)
+	require.NoError(t, err)
+
+	_ = resp.Body.Close()
+
+	require.Equal(t, 2, calls)
+	require.Equal(t, int32(2), getBodies.Load())
+	require.True(t, closedAtAsk.Load(), "GetBody was asked only after the replacement was closed")
+}

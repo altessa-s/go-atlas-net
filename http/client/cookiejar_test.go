@@ -309,15 +309,19 @@ func TestRedirectDropsInitialCookiesTheChainSet(t *testing.T) {
 	})
 
 	for _, tc := range []struct {
-		name string
-		set  *http.Cookie
-		want string
-		opts []httpclient.Option
+		name    string
+		set     *http.Cookie
+		want    string
+		opts    []httpclient.Option
+		timeout bool
 	}{
-		{"replaced", &http.Cookie{Name: "session", Value: "new", Path: "/"}, "user=1; session=new", nil},
-		{"deleted", &http.Cookie{Name: "session", Path: "/", MaxAge: -1}, "user=1", nil},
-		{"replaced, policy strips", &http.Cookie{Name: "session", Value: "new", Path: "/"}, "user=1; session=new", []httpclient.Option{strip}},
-		{"deleted, policy strips", &http.Cookie{Name: "session", Path: "/", MaxAge: -1}, "user=1", []httpclient.Option{strip}},
+		{"replaced", &http.Cookie{Name: "session", Value: "new", Path: "/"}, "user=1; session=new", nil, false},
+		{"deleted", &http.Cookie{Name: "session", Path: "/", MaxAge: -1}, "user=1", nil, false},
+		{"replaced, policy strips", &http.Cookie{Name: "session", Value: "new", Path: "/"}, "user=1; session=new", []httpclient.Option{strip}, false},
+		{"deleted, policy strips", &http.Cookie{Name: "session", Path: "/", MaxAge: -1}, "user=1", []httpclient.Option{strip}, false},
+		// http.Client.Timeout wraps every reply body (cancelTimerBody): the
+		// names received travel with the reply's request view instead.
+		{"deleted, policy strips, client timeout", &http.Cookie{Name: "session", Path: "/", MaxAge: -1}, "user=1", []httpclient.Option{strip}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -351,6 +355,10 @@ func TestRedirectDropsInitialCookiesTheChainSet(t *testing.T) {
 			t.Cleanup(srv.Close)
 
 			c := httpclient.New(append([]httpclient.Option{loopback, httpclient.WithCookieJar(newCountingJar(t))}, tc.opts...)...)
+			if tc.timeout {
+				c.Timeout = time.Minute
+			}
+
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/from", nil)
 			require.NoError(t, err)
 			req.Header.Set("Cookie", "session=old; user=1")
@@ -495,4 +503,59 @@ func TestDefaultRedirectLimitWithJar(t *testing.T) {
 	// is the only way to recognize it.
 	require.ErrorContains(t, err, "stopped after 10 redirects")
 	require.Equal(t, int32(10), hits.Load(), "the 10th redirect reply is the last request sent")
+}
+
+// TestUpgradeWithJarKeepsBodyWritable checks that a 101 Switching Protocols
+// reply through a client with a cookie jar keeps its writable body (the
+// connection) and stores its cookies.
+func TestUpgradeWithJarKeepsBodyWritable(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, brw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: echo\r\n" +
+			"Set-Cookie: up=1; Path=/\r\n\r\n")
+		_ = brw.Flush()
+
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(brw, buf); err == nil {
+			_, _ = conn.Write(buf)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	jar := newCountingJar(t)
+	c := httpclient.New(loopback, httpclient.WithCookieJar(jar))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "echo")
+
+	resp, err := c.Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
+
+	rw, ok := resp.Body.(io.ReadWriteCloser)
+	require.True(t, ok, "the 101 body stays writable, got %T", resp.Body)
+
+	_, err = rw.Write([]byte("ping"))
+	require.NoError(t, err)
+
+	echo := make([]byte, 4)
+	_, err = io.ReadFull(rw, echo)
+	require.NoError(t, err)
+	require.Equal(t, "ping", string(echo))
+
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+	require.Len(t, jar.Cookies(u), 1)
 }

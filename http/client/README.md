@@ -150,7 +150,8 @@ req.Header.Set("Idempotency-Key", orderID) // the POST is now retried like a GET
 **Snapshot isolation.** What is sent is a private snapshot of the request — method, URL, Host, header, `ContentLength`, `TransferEncoding`,
 taken before the first transmission — copied afresh for every attempt. Policies, the `ErrorHandler` and the caller get the reply with a
 metadata-only view of its request: no `Body`, `GetBody` or `Response` (the redirect history stays with `http.Client`; redirect cookie
-filtering uses the cookie names each reply set as received), its own header, URL and `TransferEncoding`, and trailers copied from the final
+filtering uses the cookie names each reply set as received, recorded on that view's context, so `http.Client.Timeout` body wrapping and
+writable 101 bodies are untouched), its own header, URL and `TransferEncoding`, and trailers copied from the final
 snapshot or, while the upload may still be writing them (an early or full-duplex reply), from the declaration made before sending — never
 from the live map. Editing the view changes nothing being or to be sent; telemetry and logs report the snapshot. Transport hooks — a `WithProxyFunc` resolver or one on a caller transport, custom round trippers and dialers — receive the
 request being transmitted and must treat it as read-only, as in net/http; go-atlas does not isolate them. Cookies are looked up and stored
@@ -158,7 +159,8 @@ for the snapshot's origin, starting from its `Cookie` header. A body without `Ge
 `GetBody` and `ContentLength` are never assigned, and every attempt keeps the original framing (an unknown length is sent chunked each time).
 Trailers: until a transmission has read the body to its end, an attempt sends the caller's live `Trailer` map, which the (rewound) body
 fills as it is read, and the values are captured at that end; a retry that would share the live map first waits (bounded by the request
-context) until the previous attempt's body is closed; a buffered body is read to its end by buffering. Every later attempt sends
+context) until every body that could write it — each attempt's body and each body the transport got from `GetBody` — is closed, before
+the caller's `GetBody` is asked for the next one; a buffered body is read to its end by buffering. Every later attempt sends
 its own copy of the captured trailers, so an edit to an attempt's trailers (by a policy, say) never reaches the next one. The caller's request gets no `GetBody`, so `http.Client` does not
 follow a 307/308 redirect of a body without one.
 

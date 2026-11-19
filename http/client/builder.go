@@ -93,7 +93,8 @@ type RequestBuilder interface {
 	// are applied in key order, the later replacing the earlier (so
 	// "content-type" wins over "Content-Type"), except Idempotency-Key and
 	// X-Idempotency-Key: their case variants are all sent, which the client
-	// refuses with ErrAmbiguousIdempotencyKey.
+	// refuses with ErrAmbiguousIdempotencyKey. Send refuses them itself when
+	// the doer is not a client of this package.
 	Header(key, value string) RequestBuilder
 	// Headers sets multiple headers from an iterator.
 	Headers(seq iter.Seq2[string, string]) RequestBuilder
@@ -492,6 +493,21 @@ func (rb *requestBuilder) Send(ctx context.Context) (*http.Response, error) {
 	}
 
 	cancel := cancelFromContext(req.Context()) //nolint:contextcheck // context attached by builder
+
+	// A client of this package refuses an ambiguous idempotency key itself
+	// (and reports it); any other doer gets the request only if it is not.
+	if !guardsIdempotencyKey(rb.client) {
+		if refused := refuseAmbiguousIdempotencyKey(req); refused != nil {
+			rb.Release()
+
+			if cancel != nil {
+				cancel()
+			}
+
+			return nil, refused
+		}
+	}
+
 	resp, err := rb.client.Do(req)
 	rb.Release()
 

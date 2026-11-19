@@ -83,3 +83,26 @@ func setHeaderSeq(h http.Header, seq iter.Seq2[string, string]) {
 func isIdempotencyKeyName(name string) bool {
 	return asciiEqualFold(name, headerIdempotencyKey) || asciiEqualFold(name, headerXIdempotencyKey)
 }
+
+// guardsIdempotencyKey reports whether d is a client of this package, whose
+// transport chain refuses an ambiguous idempotency key itself.
+func guardsIdempotencyKey(d any) bool {
+	var c *http.Client
+
+	switch v := d.(type) {
+	case *httpClient:
+		c = v.Client
+	case *http.Client:
+		c = v
+	default:
+		return false
+	}
+
+	if c == nil {
+		return false
+	}
+
+	_, ok := c.Transport.(idempotencyKeyGuard)
+
+	return ok
+}

@@ -217,19 +217,21 @@ func filterRedirectCookies(req *http.Request, via []*http.Request) {
 }
 
 // addCookieNames adds the names of the cookies resp sets to set: those
-// captured when the reply was received (withReceivedCookieNames), or else
-// those its header sets now.
+// recorded on its request view when the reply was received (see
+// responseView), or else those its header sets now.
 func addCookieNames(set map[string]struct{}, resp *http.Response) {
 	if resp == nil {
 		return
 	}
 
-	if rb, ok := resp.Body.(*receivedCookiesBody); ok {
-		for _, name := range rb.names {
-			set[name] = struct{}{}
-		}
+	if resp.Request != nil {
+		if names, ok := resp.Request.Context().Value(receivedCookiesKey{}).([]string); ok {
+			for _, name := range names {
+				set[name] = struct{}{}
+			}
 
-		return
+			return
+		}
 	}
 
 	for _, c := range resp.Cookies() {
@@ -237,21 +239,12 @@ func addCookieNames(set map[string]struct{}, resp *http.Response) {
 	}
 }
 
-// receivedCookiesBody is a reply body that carries the names of the cookies
-// the reply set when it was received.
-type receivedCookiesBody struct {
-	io.ReadCloser
+// receivedCookiesKey is the context key of the names of the cookies a reply
+// set as received, carried by the reply's request view.
+type receivedCookiesKey struct{}
 
-	names []string
-}
-
-// withReceivedCookieNames attaches to resp, when the round tripper owns a
-// cookie jar, the names of the cookies it sets as received.
-func (rt *retryRoundTripper) withReceivedCookieNames(resp *http.Response) *http.Response {
-	if rt.jar == nil || resp == nil || resp.Body == nil {
-		return resp
-	}
-
+// receivedCookieNames returns the names of the cookies resp sets.
+func receivedCookieNames(resp *http.Response) []string {
 	cookies := resp.Cookies()
 	names := make([]string, 0, len(cookies))
 
@@ -259,9 +252,7 @@ func (rt *retryRoundTripper) withReceivedCookieNames(resp *http.Response) *http.
 		names = append(names, c.Name)
 	}
 
-	resp.Body = &receivedCookiesBody{ReadCloser: resp.Body, names: names}
-
-	return resp
+	return names
 }
 
 // maxRedirects is net/http's default redirect limit.
@@ -768,9 +759,11 @@ type retryCall struct {
 	// trailerMu guards finalTrailer and trailerFinal: a body reaches EOF on
 	// the transport's writing goroutine.
 	trailerMu sync.Mutex
-	// liveBodyClosed is closed when the body of the last attempt that sent
-	// the caller's live trailers is closed (see awaitPreviousBody).
-	liveBodyClosed chan struct{}
+	// liveBodies holds a close signal for every body that may write the
+	// caller's live trailers: each attempt's body and each body the transport
+	// got from the attempt's GetBody (see awaitLiveBodies). Guarded by
+	// trailerMu: the transport calls GetBody on its own goroutines.
+	liveBodies []chan struct{}
 	// finalTrailer holds the request's trailers once final (trailerFinal):
 	// after buffering, or when a transmission of a streaming body read it to
 	// its end (the caller's live map, filled by the body, is cloned then).
@@ -786,7 +779,13 @@ type retryCall struct {
 // captureTrailersAtEOF wraps body so the caller's live trailers are captured
 // as final when it is read to its end.
 func (c *retryCall) captureTrailersAtEOF(body io.ReadCloser) *eofHookBody {
-	return &eofHookBody{ReadCloser: body, onEOF: c.captureLiveTrailers, closed: make(chan struct{})}
+	hooked := &eofHookBody{ReadCloser: body, onEOF: c.captureLiveTrailers, closed: make(chan struct{})}
+
+	c.trailerMu.Lock()
+	c.liveBodies = append(c.liveBodies, hooked.closed)
+	c.trailerMu.Unlock()
+
+	return hooked
 }
 
 // captureLiveTrailers records a copy of the caller's live trailers as final,
@@ -800,21 +799,24 @@ func (c *retryCall) captureLiveTrailers() {
 	}
 }
 
-// awaitPreviousBody waits, bounded by ctx, until the body of the previous
-// attempt that used the caller's live trailers is closed: until then the
-// transport may still read it and write those trailers, which the next
-// attempt must not share.
-func (c *retryCall) awaitPreviousBody(ctx context.Context) error {
-	if c.liveBodyClosed == nil {
-		return nil
+// awaitLiveBodies waits, bounded by ctx, until every body that may write the
+// caller's live trailers is closed: until then the transport may still read
+// one and fill those trailers, which the next attempt must not share, and the
+// caller's GetBody must not be asked for another body.
+func (c *retryCall) awaitLiveBodies(ctx context.Context) error {
+	c.trailerMu.Lock()
+	bodies := slices.Clone(c.liveBodies)
+	c.trailerMu.Unlock()
+
+	for _, closed := range bodies {
+		select {
+		case <-closed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
-	select {
-	case <-c.liveBodyClosed:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return nil
 }
 
 // responseView returns the request a reply carries to policies, the
@@ -824,8 +826,17 @@ func (c *retryCall) awaitPreviousBody(ctx context.Context) error {
 // before the first transmission: the live map may still be written by an
 // upload in progress (an early or full-duplex reply), so it is never read
 // here. Inspecting or editing the view touches no request being or to be sent.
-func (c *retryCall) responseView(req *http.Request) *http.Request {
-	view := req.WithContext(req.Context())
+//
+// With a cookie jar the view's context also records the names of the cookies
+// resp set as received, for the redirect cookie filtering
+// (filterRedirectCookies): editing the reply's header cannot change them.
+func (c *retryCall) responseView(req *http.Request, resp *http.Response) *http.Request {
+	ctx := req.Context()
+	if c.rt.jar != nil {
+		ctx = context.WithValue(ctx, receivedCookiesKey{}, receivedCookieNames(resp))
+	}
+
+	view := req.WithContext(ctx)
 	view.Body = nil
 	view.GetBody = nil
 	view.Header = req.Header.Clone()
@@ -896,14 +907,9 @@ func (b *eofHookBody) Read(p []byte) (int, error) {
 }
 
 // prepareTrailers sets the trailers of attempt: a copy of the final ones when
-// known; otherwise, once the previous body that shared them is closed, the
-// caller's live map, with the attempt's body (and any body the transport
-// rewinds) hooked to capture them at its end.
-func (c *retryCall) prepareTrailers(ctx context.Context, attempt *http.Request) error {
-	if err := c.awaitPreviousBody(ctx); err != nil {
-		return err
-	}
-
+// known; otherwise the caller's live map, with the attempt's body (and any
+// body the transport rewinds) hooked to capture them at its end.
+func (c *retryCall) prepareTrailers(attempt *http.Request) {
 	if final, ok := c.finalTrailers(); ok {
 		attempt.Trailer = final.Clone()
 	} else {
@@ -912,9 +918,7 @@ func (c *retryCall) prepareTrailers(ctx context.Context, attempt *http.Request) 
 		// read, and captures its values when the body reaches EOF.
 		attempt.Trailer = c.req.Trailer
 		if c.req.Trailer != nil && attempt.Body != nil && attempt.Body != http.NoBody {
-			hooked := c.captureTrailersAtEOF(attempt.Body)
-			attempt.Body = hooked
-			c.liveBodyClosed = hooked.closed
+			attempt.Body = c.captureTrailersAtEOF(attempt.Body)
 			// A body net/http rewinds itself is hooked the same way.
 			if c.getBody != nil {
 				attempt.GetBody = func() (io.ReadCloser, error) {
@@ -928,8 +932,6 @@ func (c *retryCall) prepareTrailers(ctx context.Context, attempt *http.Request) 
 			}
 		}
 	}
-
-	return nil
 }
 
 // onRetry runs before each retry's backoff sleep.
@@ -981,6 +983,13 @@ func (c *retryCall) try(ctx context.Context) error {
 
 	hasBody := c.firstBody != nil && c.firstBody != http.NoBody
 	if !c.firstAttempt && hasBody {
+		// No body may still write the live trailers when the caller's
+		// GetBody is asked for the next one.
+		if err := c.awaitLiveBodies(ctx); err != nil {
+			c.lastErr = err
+			return &NonRetryableError{Err: err}
+		}
+
 		if c.getBody == nil {
 			// Unreachable: a replayed body is buffered when it has no GetBody.
 			c.lastErr = errors.New("request body cannot be rewound for retry")
@@ -998,15 +1007,7 @@ func (c *retryCall) try(ctx context.Context) error {
 
 	attempt.GetBody = c.getBody
 
-	if err := c.prepareTrailers(ctx, attempt); err != nil {
-		if attempt.Body != nil {
-			_ = attempt.Body.Close()
-		}
-
-		c.lastErr = err
-
-		return &NonRetryableError{Err: err}
-	}
+	c.prepareTrailers(attempt)
 
 	c.firstAttempt = false
 
@@ -1021,16 +1022,12 @@ func (c *retryCall) try(ctx context.Context) error {
 	// Every reply's cookies are stored exactly once, on receipt, whatever
 	// happens to the reply next (retried, returned, discarded).
 	c.rt.storeCookies(c.base, resp)
-	// The names of the cookies the reply sets are kept with it, as received,
-	// for the redirect cookie filtering (filterRedirectCookies): a policy
-	// editing the reply's header cannot change them.
-	resp = c.rt.withReceivedCookieNames(resp) //nolint:bodyclose // same response, closed like resp above
 
 	if resp != nil {
 		// Policies, the ErrorHandler and the caller see a detached view of
 		// the attempt: editing it reaches neither the request the transport
 		// may still be sending (an early reply) nor the next attempt.
-		resp.Request = c.responseView(attemptReq)
+		resp.Request = c.responseView(attemptReq, resp)
 	}
 
 	c.lastResp = resp
