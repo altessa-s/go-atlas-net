@@ -358,7 +358,7 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 			// the ErrorHandler sees it with zero attempts, as it does when the
 			// context ended before the first attempt of a body it need not
 			// buffer.
-			resp, err := rt.finish(nil, nil, bufErr, 0)
+			resp, err := rt.finish(nil, nil, bufErr, 0, false)
 			rt.requestDone(call.base, start, "unknown", 0, true)
 
 			return resp, err
@@ -406,7 +406,7 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	// attempt's error in lastErr, which finish returns: still a failure.
 	failed := retryErr != nil || call.lastErr != nil
 	lastResp := call.lastResp
-	resp, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts)
+	resp, err := rt.finish(call.lastResp, call.lastErr, retryErr, call.attempts, call.attemptHasDeadline())
 
 	if resp != nil && resp == lastResp && call.lastAttemptReq != nil {
 		// The reply goes back to http.Client with a fresh view: whatever a
@@ -754,7 +754,8 @@ type retryCall struct {
 	// the transport's writing goroutine.
 	trailerMu sync.Mutex
 	// lastAttemptReq is the request of the last reply received and
-	// lastCookieNames the names of the cookies that reply set as received:
+	// lastCookieNames the names of the cookies the replies of this call set
+	// (or deleted) as received:
 	// the reply returned to http.Client gets a fresh view built from them.
 	lastAttemptReq  *http.Request
 	lastCookieNames []string
@@ -777,8 +778,20 @@ type retryCall struct {
 
 // captureTrailersAtEOF wraps body so the caller's live trailers are captured
 // as final when it is read to its end.
-func (c *retryCall) captureTrailersAtEOF(body io.ReadCloser) *eofHookBody {
-	hooked := &eofHookBody{ReadCloser: body, onEOF: c.captureLiveTrailers, closed: make(chan struct{})}
+func (c *retryCall) captureTrailersAtEOF(body io.ReadCloser, attemptTrailer http.Header) *eofHookBody {
+	onEOF := func() {
+		// The caller's body filled the caller's map as it was read (on this
+		// goroutine): record it as final and copy its values into the
+		// attempt's own map before the transport, seeing EOF, writes it.
+		c.captureLiveTrailers()
+
+		clear(attemptTrailer)
+
+		for k, v := range c.req.Trailer {
+			attemptTrailer[k] = slices.Clone(v)
+		}
+	}
+	hooked := &eofHookBody{ReadCloser: body, onEOF: onEOF, closed: make(chan struct{})}
 
 	c.trailerMu.Lock()
 	c.liveBodies = append(c.liveBodies, hooked.closed)
@@ -833,27 +846,25 @@ func (c *retryCall) awaitLiveBodies(ctx context.Context) error {
 func (c *retryCall) responseView(req *http.Request, cookieNames []string) *http.Request {
 	ctx := req.Context()
 	if c.rt.jar != nil {
-		ctx = context.WithValue(ctx, receivedCookiesKey{}, cookieNames)
+		ctx = context.WithValue(ctx, receivedCookiesKey{}, slices.Clone(cookieNames))
 	}
 
-	view := req.WithContext(ctx)
-	view.Body = nil
-	view.GetBody = nil
-	view.Header = req.Header.Clone()
-	view.TransferEncoding = slices.Clone(req.TransferEncoding)
-	// The redirect history belongs to http.Client, whose redirect handling
-	// reads it: the view does not expose it.
-	view.Response = nil
+	// A shallow staging copy drops what the view must not share or expose
+	// (the live trailer map, the body, the redirect history, which belongs to
+	// http.Client) before Request.Clone deep-copies the rest: header, URL
+	// with its user info, TransferEncoding, forms and path values.
+	staging := req.WithContext(ctx)
+	staging.Trailer = nil
+	staging.Body = nil
+	staging.GetBody = nil
+	staging.Response = nil
+
+	view := staging.Clone(ctx)
 
 	if final, ok := c.finalTrailers(); ok {
 		view.Trailer = final.Clone()
 	} else {
 		view.Trailer = c.base.Trailer.Clone()
-	}
-
-	if req.URL != nil {
-		u := *req.URL // Userinfo is immutable: sharing it is safe.
-		view.URL = &u
 	}
 
 	return view
@@ -931,24 +942,27 @@ func (b *eofHookBody) signalIdle() {
 	}
 }
 
-// prepareTrailers sets the trailers of attempt: a copy of the final ones when
-// known; otherwise the caller's live map, which the (rewound) body fills as
-// it is read, captured at the body's end. Every body of the caller (its
-// original and every GetBody result, the transport's rewinds included) may
-// write the caller's trailer map for the whole call, so each is tracked
-// (see awaitLiveBodies) whether or not the trailers are final.
+// prepareTrailers gives attempt its own trailer map: a copy of the final
+// trailers when known, else of the declaration made before the first
+// transmission. The transport never sees the caller's map. A caller body
+// (its original or a GetBody result, the transport's rewinds included) fills
+// the caller's map as it is read; a hook copies those values into the
+// attempt's map at the body's end, before the transport writes the trailers.
+// Every such body is tracked (see awaitLiveBodies): two of them must not
+// write the caller's map at once.
 func (c *retryCall) prepareTrailers(attempt *http.Request) {
 	if final, ok := c.finalTrailers(); ok {
 		attempt.Trailer = final.Clone()
 	} else {
-		attempt.Trailer = c.req.Trailer
+		attempt.Trailer = c.base.Trailer.Clone()
 	}
 
 	if c.req.Trailer == nil || c.callerBodyClosed || attempt.Body == nil || attempt.Body == http.NoBody {
 		return // no trailers, or a private buffered copy that writes none
 	}
 
-	attempt.Body = c.captureTrailersAtEOF(attempt.Body)
+	own := attempt.Trailer
+	attempt.Body = c.captureTrailersAtEOF(attempt.Body, own)
 
 	if c.getBody != nil {
 		attempt.GetBody = func() (io.ReadCloser, error) {
@@ -957,7 +971,7 @@ func (c *retryCall) prepareTrailers(attempt *http.Request) {
 				return body, err
 			}
 
-			return c.captureTrailersAtEOF(body), nil
+			return c.captureTrailersAtEOF(body, own), nil
 		}
 	}
 }
@@ -969,7 +983,7 @@ func (c *retryCall) onRetry(attempt int, err error, delay time.Duration) {
 	// With an ErrorHandler the response must stay readable in case
 	// the context ends during the sleep and the handler receives it.
 	if c.rt.errorHandler == nil && c.lastResp != nil && c.lastResp.Body != nil {
-		closeBody(c.lastResp)
+		closeBody(c.lastResp, c.attemptHasDeadline())
 		c.lastResp.Body = http.NoBody
 	}
 
@@ -994,7 +1008,7 @@ func (c *retryCall) onRetry(attempt int, err error, delay time.Duration) {
 // coreretry.Do.
 func (c *retryCall) try(ctx context.Context) error {
 	// Close previous response body if present from a prior attempt.
-	closeBody(c.lastResp)
+	closeBody(c.lastResp, c.attemptHasDeadline())
 	c.lastResp = nil
 
 	// A retry stops when the caller's request changed after the snapshot:
@@ -1057,7 +1071,14 @@ func (c *retryCall) try(ctx context.Context) error {
 		// may still be sending (an early reply) nor the next attempt.
 		c.lastAttemptReq = attemptReq
 		if c.rt.jar != nil {
-			c.lastCookieNames = receivedCookieNames(resp)
+			// Names set or deleted by every reply of this hop, discarded
+			// attempts included, so a later reply that sets none does not
+			// hide them.
+			for _, name := range receivedCookieNames(resp) {
+				if !slices.Contains(c.lastCookieNames, name) {
+					c.lastCookieNames = append(c.lastCookieNames, name)
+				}
+			}
 		}
 
 		resp.Request = c.responseView(attemptReq, c.lastCookieNames)
@@ -1171,8 +1192,11 @@ func unexpectedStatus(resp *http.Response) *UnexpectedStatusError {
 }
 
 // finish turns the outcome of the retry loop, after attempts attempts, into
-// the round trip result.
-func (rt *retryRoundTripper) finish(lastResp *http.Response, lastErr, retryErr error, attempts int) (*http.Response, error) {
+// the round trip result. drain reports whether the last attempt ran under a
+// deadline, so a discarded reply body may be drained (see closeBody).
+func (rt *retryRoundTripper) finish(
+	lastResp *http.Response, lastErr, retryErr error, attempts int, drain bool,
+) (*http.Response, error) {
 	// Handle retry exhaustion and terminal errors (possibly with a response,
 	// e.g. a non-retryable or exhausted retryable status).
 	if retryErr != nil {
@@ -1184,24 +1208,26 @@ func (rt *retryRoundTripper) finish(lastResp *http.Response, lastErr, retryErr e
 
 			if resp != lastResp {
 				// The handler did not hand the original response on.
-				closeBody(lastResp)
+				closeBody(lastResp, drain)
+				// Its own reply carries no private deadline: never drained.
+				return discardOnError(resp, err, false)
 			}
 
-			return discardOnError(resp, err)
+			return discardOnError(resp, err, drain)
 		}
 
-		return discardOnError(lastResp, retryErr)
+		return discardOnError(lastResp, retryErr, drain)
 	}
 
-	return discardOnError(lastResp, lastErr)
+	return discardOnError(lastResp, lastErr, drain)
 }
 
 // discardOnError enforces the [http.RoundTripper] contract that a response
 // accompanies only a nil error: [http.Client] drops a response returned
 // together with an error without closing it, so its body would leak.
-func discardOnError(resp *http.Response, err error) (*http.Response, error) {
+func discardOnError(resp *http.Response, err error, drain bool) (*http.Response, error) {
 	if err != nil {
-		closeBody(resp)
+		closeBody(resp, drain)
 		return nil, err
 	}
 
@@ -1221,12 +1247,12 @@ const maxDiscardDrain = 64 << 10
 // The drain stays synchronous although [http.Transport] drains an unread body
 // after Close itself (Go 1.27): that drain runs in the background, so a retry
 // sent right after Close finds the connection still busy and dials another.
-func closeBody(resp *http.Response) {
+func closeBody(resp *http.Response, deadline bool) {
 	if resp == nil || resp.Body == nil {
 		return
 	}
 
-	if drainable(resp) {
+	if deadline && drainable(resp) {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDiscardDrain))
 	}
 
@@ -1235,11 +1261,17 @@ func closeBody(resp *http.Response) {
 
 // drainable reports whether resp's discarded body is worth draining.
 func drainable(resp *http.Response) bool {
-	if resp.StatusCode == http.StatusSwitchingProtocols || resp.ContentLength > maxDiscardDrain || resp.Request == nil {
+	return resp.StatusCode != http.StatusSwitchingProtocols && resp.ContentLength <= maxDiscardDrain
+}
+
+// attemptHasDeadline reports whether the last attempt ran under a deadline,
+// read from its private request, never from the view a policy may replace.
+func (c *retryCall) attemptHasDeadline() bool {
+	if c.lastAttemptReq == nil {
 		return false
 	}
 
-	_, ok := resp.Request.Context().Deadline()
+	_, ok := c.lastAttemptReq.Context().Deadline()
 
 	return ok
 }

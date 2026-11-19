@@ -622,3 +622,56 @@ func TestMalformedRedirectPolicyClearsViewURL(t *testing.T) {
 		require.Error(t, doErr, "the malformed Location fails the redirect")
 	})
 }
+
+// TestRedirectDropsCookieDeletedByDiscardedAttempt checks that the cookie
+// names a hop's discarded attempts set count for the redirect filtering: the
+// first reply (503, retried) deletes the session, the retry's 302 sets no
+// cookie, and the next hop still does not get the initial session.
+func TestRedirectDropsCookieDeletedByDiscardedAttempt(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu    sync.Mutex
+		seen  []string
+		froms atomic.Int32
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/from", func(w http.ResponseWriter, r *http.Request) {
+		if froms.Add(1) == 1 {
+			http.SetCookie(w, &http.Cookie{Name: "session", Path: "/", MaxAge: -1})
+			w.WriteHeader(http.StatusServiceUnavailable)
+
+			return
+		}
+
+		http.Redirect(w, r, "/to", http.StatusFound)
+	})
+	mux.HandleFunc("/to", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+
+		seen = append(seen, strings.Join(r.Header.Values("Cookie"), "|"))
+		mu.Unlock()
+
+		_, _ = io.WriteString(w, "ok")
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := httpclient.New(loopback, httpclient.WithCookieJar(newCountingJar(t)),
+		httpclient.WithRetryWait(time.Millisecond, time.Millisecond))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/from", nil)
+	require.NoError(t, err)
+	req.Header.Set("Cookie", "session=old; user=1")
+
+	resp, err := c.Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	require.Equal(t, int32(2), froms.Load())
+	require.Equal(t, []string{"user=1"}, seen)
+}

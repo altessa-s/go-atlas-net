@@ -100,7 +100,12 @@ type VerbClient interface {
 	Get(ctx context.Context, url string) (*http.Response, error)
 
 	// Post performs an HTTP POST request with the specified content type and body.
-	// The request will be retried automatically for transient failures.
+	// POST is not idempotent: without an idempotency key the request is
+	// attempted once, and a retryable failure is returned as a
+	// [RetryExhaustedError] after that attempt. Use PostWithOptions with
+	// exactly one Idempotency-Key (or X-Idempotency-Key) to have transient
+	// failures retried; an ambiguous key is refused with
+	// [ErrAmbiguousIdempotencyKey] before it is sent.
 	//
 	// Parameters:
 	//   - ctx: Context for request cancellation and timeout

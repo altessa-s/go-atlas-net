@@ -625,3 +625,93 @@ func TestRetryRoundTripper_TracksBodiesAfterFinalTrailers(t *testing.T) {
 	require.Equal(t, 3, calls)
 	require.True(t, closedAtAsk.Load(), "GetBody was asked only after the second body was closed")
 }
+
+// TestRetryRoundTripper_AttemptOwnsTrailers checks that the transport never
+// sees the caller's trailer map: with an early reply, the transport reads the
+// body to its end, closes it and only then writes the trailers, from the
+// attempt's own map, which the hook filled at the body's end.
+func TestRetryRoundTripper_AttemptOwnsTrailers(t *testing.T) {
+	t.Parallel()
+
+	var (
+		done       = make(chan struct{})
+		sameAsLive bool
+		written    string
+	)
+
+	req := newTrailerRequest(t)
+	req.Method = http.MethodPost // not eligible: one attempt
+
+	rt := &retryRoundTripper{
+		observer:          NoopObserver{},
+		retryableStatuses: DefaultRetryableStatuses(),
+		next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			go func() {
+				defer close(done)
+
+				_, _ = io.Copy(io.Discard, r.Body)
+				_ = r.Body.Close()
+
+				sameAsLive = reflect.ValueOf(r.Trailer).Pointer() == reflect.ValueOf(req.Trailer).Pointer()
+				written = r.Trailer.Get("X-Sum")
+			}()
+
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+		}),
+		retryOpts:   newTestRetryOpts(2),
+		maxAttempts: 2,
+	}
+
+	resp, err := rt.RoundTrip(req)
+	require.NoError(t, err)
+
+	_ = resp.Body.Close()
+
+	<-done
+
+	require.False(t, sameAsLive, "the attempt has its own trailer map")
+	require.Equal(t, "abc", written, "the hook copied the final values before EOF")
+	require.Equal(t, "abc", req.Trailer.Get("X-Sum"), "the caller's body filled the caller's map")
+}
+
+// TestRetryRoundTripper_ViewIsDeepCopy checks that editing the view's form,
+// path values and URL user info reaches no attempt request.
+func TestRetryRoundTripper_ViewIsDeepCopy(t *testing.T) {
+	t.Parallel()
+
+	var sent *http.Request
+
+	rt := &retryRoundTripper{
+		observer:          NoopObserver{},
+		retryableStatuses: DefaultRetryableStatuses(),
+		retryPolicyHandler: func(_ context.Context, resp *http.Response, _ error) (bool, error) {
+			resp.Request.Form.Set("f", "evil")
+			resp.Request.SetPathValue("p", "evil")
+			*resp.Request.URL.User = *url.UserPassword("evil", "evil")
+
+			return false, nil
+		},
+		next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			sent = r
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+		}),
+		retryOpts:   newTestRetryOpts(2),
+		maxAttempts: 2,
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://user:pw@example.com/", nil)
+	require.NoError(t, err)
+
+	req.Form = url.Values{"f": {"v"}}
+	req.SetPathValue("p", "v")
+
+	resp, err := rt.RoundTrip(req)
+	require.NoError(t, err)
+
+	_ = resp.Body.Close()
+
+	require.Equal(t, "v", sent.Form.Get("f"))
+	require.Equal(t, "v", sent.PathValue("p"))
+	require.Equal(t, "user:pw", sent.URL.User.String())
+	require.Equal(t, "user:pw", req.URL.User.String())
+}

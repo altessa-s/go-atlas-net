@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -342,4 +343,71 @@ func TestAmbiguousIdempotencyKey_ErrorText(t *testing.T) {
 	require.ErrorIs(t, err, httpclient.ErrAmbiguousIdempotencyKey)
 	require.Contains(t, err.Error(), "ambiguous idempotency key")
 	require.NotContains(t, err.Error(), "secret")
+}
+
+// TestRetry_StalledBodyPolicyReplacesViewContext checks that the drain of a
+// discarded reply is decided from the attempt's own context: a policy giving
+// the view a context with a deadline cannot make the retry layer drain a
+// stalled body with no real deadline.
+func TestRetry_StalledBodyPolicyReplacesViewContext(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+
+	var calls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, "x")
+			http.NewResponseController(w).Flush() //nolint:errcheck // a flush failure only delays the reply
+			<-release                             // the body stalls
+
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+
+	far, cancel := context.WithTimeout(context.Background(), time.Hour)
+	t.Cleanup(cancel)
+
+	c := fastRetry(httpclient.WithRetryPolicyHandler(func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		if resp != nil && resp.Request != nil {
+			resp.Request = resp.Request.WithContext(far)
+		}
+
+		return httpclient.DefaultRetryPolicy(ctx, resp, err)
+	}))
+
+	done := make(chan error, 1)
+
+	go func() {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
+		if err != nil {
+			done <- err
+			return
+		}
+
+		resp, err := c.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the retry layer drained a stalled body under the view's deadline")
+	}
+
+	require.Equal(t, int32(2), calls.Load())
 }

@@ -157,12 +157,13 @@ from the live map. Editing the view changes nothing being or to be sent; telemet
 request being transmitted and must treat it as read-only, as in net/http; go-atlas does not isolate them. Cookies are looked up and stored
 for the snapshot's origin, starting from its `Cookie` header. A body without `GetBody` is buffered privately for replay; the caller's `Body`,
 `GetBody` and `ContentLength` are never assigned, and every attempt keeps the original framing (an unknown length is sent chunked each time).
-Trailers: until a transmission has read the body to its end, an attempt sends the caller's live `Trailer` map, which the (rewound) body
-fills as it is read, and the values are captured at that end; a retry that would share the live map first waits (bounded by the request
-context) until every body that could write the caller's trailer map — each body of the caller and each one the transport got from
-`GetBody`, tracked for the whole call — is closed with no read in flight, before the caller's `GetBody` is asked for the next one; a buffered body is read to its end by buffering. Every later attempt sends
-its own copy of the captured trailers, so an edit to an attempt's trailers (by a policy, say) never reaches the next one. The caller's request gets no `GetBody`, so `http.Client` does not
-follow a 307/308 redirect of a body without one.
+Trailers: every attempt hands the transport its own trailer map — a copy of the final trailers once known, else of the declaration made
+before the first transmission — never the caller's. A caller body (the original or a `GetBody` result, the transport's rewinds included)
+fills the caller's map as it is read; at its end a hook records those values as final and copies them into the attempt's map before the
+transport writes the trailers. Every such body is tracked for the whole call: before the caller's `GetBody` is asked for the next body, the
+retry waits (bounded by the request context) until each earlier one is closed with no read in flight, so two never write the caller's map
+at once. A buffered body is read to its end by buffering. The caller's request gets no `GetBody`, so `http.Client` does not follow a 307/308
+redirect of a body without one.
 
 **Change detection.** Before each retry the request handed to the retry layer is compared with its snapshot on Method, URL, Host, Header,
 `ContentLength` and `TransferEncoding` (the URL field by field, so a Host change of an opaque URL counts); on a difference the loop stops
