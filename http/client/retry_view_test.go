@@ -651,3 +651,73 @@ func TestUpgrade_CloseWriteSurvivesWrappers(t *testing.T) {
 		})
 	}
 }
+
+// slowTrailerBody streams its payload in small, slow reads and sets its
+// trailer's X-Sum at the end.
+type slowTrailerBody struct {
+	r       *strings.Reader
+	trailer http.Header
+}
+
+func (b *slowTrailerBody) Read(p []byte) (int, error) {
+	time.Sleep(2 * time.Millisecond)
+
+	n, err := b.r.Read(p[:min(len(p), 4)])
+	if errors.Is(err, io.EOF) {
+		b.trailer.Set("X-Sum", "abc")
+	}
+
+	return n, err
+}
+
+func (b *slowTrailerBody) Close() error { return nil }
+
+// TestTrailers_HTTP2EarlyReplyThenRetry runs a slow upload with dynamic
+// trailers against an HTTP/2 server that first replies 503 before reading
+// it (net/http closes the body asynchronously while its writer may still be
+// reading), then succeeds on the retry. Run with -race: the first attempt's
+// body touches no trailers after its close; the retry sends the final ones.
+func TestTrailers_HTTP2EarlyReplyThenRetry(t *testing.T) {
+	t.Parallel()
+
+	var (
+		calls atomic.Int32
+		got   = make(chan string, 1)
+	)
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+
+		_, _ = io.ReadAll(r.Body)
+		got <- r.Trailer.Get("X-Sum")
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	payload := strings.Repeat("x", 64)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, srv.URL, nil)
+	require.NoError(t, err)
+
+	req.Trailer = http.Header{"X-Sum": nil}
+	req.Body = &slowTrailerBody{r: strings.NewReader(payload), trailer: req.Trailer}
+	req.GetBody = func() (io.ReadCloser, error) {
+		return &slowTrailerBody{r: strings.NewReader(payload), trailer: req.Trailer}, nil
+	}
+
+	c := httpclient.New(httpclient.WithoutSSRFProtection(), httpclient.WithClient(srv.Client()),
+		httpclient.WithRetryMax(1), httpclient.WithRetryWait(time.Millisecond, time.Millisecond))
+
+	resp, err := c.Do(req)
+	require.NoError(t, err)
+
+	_ = resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, 2, resp.ProtoMajor)
+	require.Equal(t, "abc", <-got)
+}

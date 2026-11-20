@@ -1572,3 +1572,76 @@ func TestRetryRoundTripper_HandlerCopyCarriesLeftover(t *testing.T) {
 		})
 	}
 }
+
+// TestRetryRoundTripper_HandlerNoBodyReleasesAtOnce checks that a handler
+// putting http.NoBody on the reply it returns gets it back as is, and the
+// received body is released before the call returns.
+func TestRetryRoundTripper_HandlerNoBodyReleasesAtOnce(t *testing.T) {
+	t.Parallel()
+
+	var transportCloses atomic.Int32
+
+	rt := &retryRoundTripper{
+		observer:          NoopObserver{},
+		retryableStatuses: DefaultRetryableStatuses(),
+		errorHandler: func(resp *http.Response, _ error, _ int) (*http.Response, error) {
+			resp.Body = http.NoBody
+			return resp, nil
+		},
+		next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Body:       countingBody{Reader: strings.NewReader("busy"), closes: &transportCloses},
+				Request:    r,
+			}, nil
+		}),
+		retryOpts:   newTestRetryOpts(0),
+		maxAttempts: 0,
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com", nil)
+	require.NoError(t, err)
+
+	resp, err := rt.RoundTrip(req)
+	require.NoError(t, err)
+	require.True(t, isNoBody(resp.Body), "the body is http.NoBody, got %T", resp.Body)
+	require.Equal(t, int32(1), transportCloses.Load(), "the received body is released at once")
+}
+
+// TestRetryRoundTripper_ReadAfterCloseTouchesNothing checks that a transport
+// reading a body after closing it (HTTP/2 closes it asynchronously on an
+// early reply) reads nothing from the caller's body and fills no trailers.
+func TestRetryRoundTripper_ReadAfterCloseTouchesNothing(t *testing.T) {
+	t.Parallel()
+
+	req := newTrailerRequest(t)
+
+	var (
+		readErr error
+		readN   int
+	)
+
+	rt := &retryRoundTripper{
+		observer:          NoopObserver{},
+		retryableStatuses: DefaultRetryableStatuses(),
+		next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			_ = r.Body.Close()
+
+			buf := make([]byte, 64)
+			readN, readErr = r.Body.Read(buf)
+
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+		}),
+		retryOpts:   newTestRetryOpts(0),
+		maxAttempts: 0,
+	}
+
+	resp, err := rt.RoundTrip(req)
+	require.NoError(t, err)
+
+	_ = resp.Body.Close()
+
+	require.Zero(t, readN)
+	require.ErrorIs(t, readErr, http.ErrBodyReadAfterClose)
+	require.Empty(t, req.Trailer.Get("X-Sum"), "the caller's body was not read after the close")
+}

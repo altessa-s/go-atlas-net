@@ -1003,8 +1003,11 @@ func (b *eofHookBody) Close() error {
 	err := b.ReadCloser.Close()
 
 	b.mu.Lock()
-	b.publishPending()
-	b.isClosedFlag = true
+	if !b.isClosedFlag {
+		b.publishPending()
+		b.isClosedFlag = true
+	}
+
 	b.signalIdle()
 	b.mu.Unlock()
 
@@ -1012,9 +1015,17 @@ func (b *eofHookBody) Close() error {
 }
 
 // Read reads from the body; at its end it captures and publishes the
-// trailers (see eofHookBody).
+// trailers (see eofHookBody). Once the body is closed it reads nothing and
+// touches no trailers: a transport may keep reading a body closed under it
+// (HTTP/2 closes it asynchronously on an early reply) while a rewound copy is
+// already being read.
 func (b *eofHookBody) Read(p []byte) (int, error) {
 	b.mu.Lock()
+	if b.isClosedFlag {
+		b.mu.Unlock()
+		return 0, http.ErrBodyReadAfterClose
+	}
+
 	b.publishPending()
 
 	if b.eofNext {
@@ -1039,6 +1050,10 @@ func (b *eofHookBody) Read(p []byte) (int, error) {
 		b.capture()
 
 		switch {
+		case b.isClosedFlag:
+			// Closed during this Read: nothing is deferred past the idle
+			// signal below; the transport no longer sends these trailers.
+			b.publish()
 		case n > 0:
 			// Data with the end: the data goes now, the end on the next Read,
 			// which publishes first. A transport writes the trailers only
@@ -1438,7 +1453,7 @@ func (rt *retryRoundTripper) finish(
 // another kind, which cannot be told apart, is left to resp when resp carries
 // a body of the same type, and settled otherwise.
 func settleLeftover(lastResp, resp *http.Response, handed *bodyHandle) *bodyHandle {
-	if lastResp == nil || lastResp.Body == nil || handleOf(lastResp.Body) == handed {
+	if lastResp == nil || lastResp.Body == nil || isNoBody(lastResp.Body) || handleOf(lastResp.Body) == handed {
 		return nil
 	}
 
