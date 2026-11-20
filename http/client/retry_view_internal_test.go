@@ -1410,3 +1410,165 @@ func TestRetryRoundTripper_HandlerLeftoverBody(t *testing.T) {
 		})
 	}
 }
+
+// TestRetryRoundTripper_TwoRewindsInOneAttempt checks that every body the
+// transport closed is waited for before the caller's GetBody runs again: the
+// transport rewinds twice in one attempt, closing the original and then the
+// first copy while a Read of each is still in flight.
+func TestRetryRoundTripper_TwoRewindsInOneAttempt(t *testing.T) {
+	t.Parallel()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, "http://example.com", nil)
+	require.NoError(t, err)
+
+	req.Trailer = http.Header{"X-Sum": nil}
+
+	type gate struct {
+		release chan struct{}
+		started chan struct{}
+		done    atomic.Bool
+	}
+
+	gates := []*gate{
+		{release: make(chan struct{}), started: make(chan struct{})},
+		{release: make(chan struct{}), started: make(chan struct{})},
+	}
+	newBody := func(g *gate) io.ReadCloser {
+		return &gatedBody{release: g.release, r: strings.NewReader("payload"), trailer: req.Trailer, done: &g.done, started: g.started}
+	}
+
+	var (
+		asks       atomic.Int32
+		doneAtAsk1 atomic.Bool
+		doneAtAsk2 atomic.Bool
+	)
+
+	req.Body = newBody(gates[0])
+	req.GetBody = func() (io.ReadCloser, error) {
+		switch asks.Add(1) {
+		case 1:
+			doneAtAsk1.Store(gates[0].done.Load())
+			return newBody(gates[1]), nil
+		default:
+			doneAtAsk2.Store(gates[1].done.Load())
+			return &trailerBody{r: strings.NewReader("payload"), trailer: req.Trailer}, nil
+		}
+	}
+
+	// rewind closes body with a Read held in flight, releases that Read a
+	// little later, and asks for the next body meanwhile.
+	rewind := func(r *http.Request, body io.ReadCloser, g *gate) io.ReadCloser {
+		go func() {
+			buf := make([]byte, 64)
+			_, _ = body.Read(buf)
+		}()
+
+		<-g.started
+
+		_ = body.Close()
+
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			close(g.release)
+		}()
+
+		next, gbErr := r.GetBody()
+		require.NoError(t, gbErr)
+
+		return next
+	}
+
+	rt := &retryRoundTripper{
+		observer:          NoopObserver{},
+		retryableStatuses: DefaultRetryableStatuses(),
+		next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			first := rewind(r, r.Body, gates[0])
+			second := rewind(r, first, gates[1])
+
+			_, _ = io.Copy(io.Discard, second)
+			_ = second.Close()
+
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+		}),
+		retryOpts:   newTestRetryOpts(0),
+		maxAttempts: 0,
+	}
+
+	resp, err := rt.RoundTrip(req)
+	require.NoError(t, err)
+
+	_ = resp.Body.Close()
+
+	require.True(t, doneAtAsk1.Load(), "the first rewind waited for the original's Read")
+	require.True(t, doneAtAsk2.Load(), "the second rewind waited for the first copy's Read")
+}
+
+// ptrCountingBody is a pointer-typed body counting its Close calls.
+type ptrCountingBody struct {
+	io.Reader
+
+	closes atomic.Int32
+}
+
+func (b *ptrCountingBody) Close() error {
+	b.closes.Add(1)
+	return nil
+}
+
+// TestRetryRoundTripper_HandlerCopyCarriesLeftover checks a handler that puts
+// a body on the reply it was given and returns a shallow copy carrying it:
+// the body is closed exactly once, with and without an error.
+func TestRetryRoundTripper_HandlerCopyCarriesLeftover(t *testing.T) {
+	t.Parallel()
+
+	for name, fail := range map[string]bool{"copy with error": true, "copy without error": false} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var transportCloses atomic.Int32
+
+			leftover := &ptrCountingBody{Reader: strings.NewReader("leftover")}
+
+			rt := &retryRoundTripper{
+				observer:          NoopObserver{},
+				retryableStatuses: DefaultRetryableStatuses(),
+				errorHandler: func(resp *http.Response, _ error, _ int) (*http.Response, error) {
+					resp.Body = leftover
+					cp := *resp
+
+					if fail {
+						return &cp, errors.New("handled")
+					}
+
+					return &cp, nil
+				},
+				next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusServiceUnavailable,
+						Body:       countingBody{Reader: strings.NewReader("busy"), closes: &transportCloses},
+						Request:    r,
+					}, nil
+				}),
+				retryOpts:   newTestRetryOpts(0),
+				maxAttempts: 0,
+			}
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com", nil)
+			require.NoError(t, err)
+
+			resp, err := rt.RoundTrip(req)
+			if fail {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+
+				got, _ := io.ReadAll(resp.Body)
+				require.Equal(t, "leftover", string(got))
+				require.NoError(t, resp.Body.Close())
+			}
+
+			require.Equal(t, int32(1), leftover.closes.Load(), "the handler's body is closed exactly once")
+			require.Equal(t, int32(1), transportCloses.Load(), "the received body is released once")
+		})
+	}
+}

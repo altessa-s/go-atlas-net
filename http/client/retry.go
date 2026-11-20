@@ -801,7 +801,7 @@ type retryCall struct {
 	// caller's live trailers: each attempt's body and each body the transport
 	// got from the attempt's GetBody (see awaitLiveBodies). Guarded by
 	// trailerMu: the transport calls GetBody on its own goroutines.
-	liveBodies []chan struct{}
+	liveBodies []*eofHookBody
 	// finalTrailer holds the request's trailers once final (trailerFinal):
 	// after buffering, or when a transmission of a streaming body read it to
 	// its end (the caller's live map, filled by the body, is cloned then).
@@ -843,7 +843,7 @@ func (c *retryCall) captureTrailersAtEOF(body io.ReadCloser, attemptTrailer http
 	}
 
 	c.trailerMu.Lock()
-	c.liveBodies = append(c.liveBodies, hooked.closed)
+	c.liveBodies = append(c.liveBodies, hooked)
 	c.trailerMu.Unlock()
 
 	return hooked
@@ -870,9 +870,32 @@ func (c *retryCall) awaitLiveBodies(ctx context.Context) error {
 	bodies := slices.Clone(c.liveBodies)
 	c.trailerMu.Unlock()
 
-	for _, closed := range bodies {
+	for _, b := range bodies {
 		select {
-		case <-closed:
+		case <-b.closed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return nil
+}
+
+// awaitClosedBodies waits, bounded by ctx, for every body the transport has
+// closed while a Read of it may still be in flight; bodies still open are
+// not waited for (a transport may read a copy while the original is open).
+func (c *retryCall) awaitClosedBodies(ctx context.Context) error {
+	c.trailerMu.Lock()
+	bodies := slices.Clone(c.liveBodies)
+	c.trailerMu.Unlock()
+
+	for _, b := range bodies {
+		if !b.isClosed() {
+			continue
+		}
+
+		select {
+		case <-b.closed:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -1095,25 +1118,16 @@ func (c *retryCall) prepareTrailers(attempt *http.Request) {
 
 	own := attempt.Trailer
 	probeable := probeableRequest(attempt)
-	original := c.captureTrailersAtEOF(attempt.Body, own, probeable)
-	attempt.Body = original
+	attempt.Body = c.captureTrailersAtEOF(attempt.Body, own, probeable)
 
 	if c.getBody != nil {
 		ctx := attempt.Context()
 		attempt.GetBody = func() (io.ReadCloser, error) {
-			// A transport may ask for a copy while the attempt's body is
-			// still open (and read the copy first): no wait then. Once it
-			// closed that body to rewind, the copy waits, bounded by the
-			// attempt, until no Read of it is in flight. Earlier attempts'
-			// bodies were waited for before this attempt began.
-			if original.isClosed() {
-				select {
-				case <-original.closed:
-				case <-ctx.Done():
-				}
-			}
-
-			if err := ctx.Err(); err != nil {
+			// A transport may ask for a copy while bodies are still open
+			// (and read the copy first): those are not waited for. Every
+			// body it has closed (the original, an earlier copy) is waited
+			// for, bounded by the attempt, until no Read of it is in flight.
+			if err := cmp.Or(c.awaitClosedBodies(ctx), ctx.Err()); err != nil {
 				return nil, err
 			}
 
@@ -1400,11 +1414,7 @@ func (rt *retryRoundTripper) finish(
 			resp, err := rt.errorHandler(lastResp, retryErr, attempts)
 
 			handles := []*bodyHandle{handed}
-			if lastResp != nil && lastResp.Body != nil && handleOf(lastResp.Body) != handed {
-				// The handler put a body of its own on the reply it was given:
-				// it is settled too, behind a close-once handle of its own.
-				leftover := &bodyHandle{ReadCloser: lastResp.Body}
-				lastResp.Body = withWriteSide(leftover, lastResp.Body)
+			if leftover := settleLeftover(lastResp, resp, handed); leftover != nil {
 				handles = append(handles, leftover)
 			}
 
@@ -1417,6 +1427,69 @@ func (rt *retryRoundTripper) finish(
 	}
 
 	return lastResp, nil, lastErr
+}
+
+// settleLeftover handles a body the ErrorHandler put on the reply it was
+// given (lastResp) in place of its handed handle: it goes behind a close-once
+// handle of its own (returned for the settlement), installed on lastResp and,
+// when the handler's reply (resp, a copy of lastResp, say) carries that very
+// body, on resp too, so it is owned once. "That very body" is decided by
+// identity only: the same pointer (bodies of a pointer type); a body of
+// another kind, which cannot be told apart, is left to resp when resp carries
+// a body of the same type, and settled otherwise.
+func settleLeftover(lastResp, resp *http.Response, handed *bodyHandle) *bodyHandle {
+	if lastResp == nil || lastResp.Body == nil || handleOf(lastResp.Body) == handed {
+		return nil
+	}
+
+	b := lastResp.Body
+	leftover := &bodyHandle{ReadCloser: b}
+	wrapped := withWriteSide(leftover, b)
+	lastResp.Body = wrapped
+
+	if resp == nil || resp == lastResp || resp.Body == nil {
+		return leftover
+	}
+
+	switch samePointer(resp.Body, b) {
+	case identical:
+		resp.Body = wrapped
+	case undecidable:
+		return nil // resp may carry it: never closed twice
+	case distinct:
+	}
+
+	return leftover
+}
+
+// identity is the outcome of samePointer.
+type identity int
+
+const (
+	distinct identity = iota
+	identical
+	undecidable
+)
+
+// samePointer tells whether a and b are the same body by pointer identity:
+// two pointers of the same type are identical or distinct; bodies of
+// different types are distinct; two non-pointer values of the same type
+// cannot be told apart without comparing them, which is never done.
+func samePointer(a, b io.ReadCloser) identity {
+	ta, tb := reflect.TypeOf(a), reflect.TypeOf(b)
+	if ta != tb {
+		return distinct
+	}
+
+	if ta.Kind() != reflect.Pointer {
+		return undecidable
+	}
+
+	if reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer() {
+		return identical
+	}
+
+	return distinct
 }
 
 // settle disposes of the bodies of the round trip's outcome, enforcing the
