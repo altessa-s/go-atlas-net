@@ -100,7 +100,12 @@ type VerbClient interface {
 	Get(ctx context.Context, url string) (*http.Response, error)
 
 	// Post performs an HTTP POST request with the specified content type and body.
-	// The request will be retried automatically for transient failures.
+	// POST is not idempotent: without an idempotency key the request is
+	// attempted once, and a retryable failure is returned as a
+	// [RetryExhaustedError] after that attempt. Use PostWithOptions with
+	// exactly one Idempotency-Key (or X-Idempotency-Key) to have transient
+	// failures retried; an ambiguous key is refused with
+	// [ErrAmbiguousIdempotencyKey] before it is sent.
 	//
 	// Parameters:
 	//   - ctx: Context for request cancellation and timeout
@@ -363,14 +368,9 @@ func attachCancel(resp *http.Response, cancel context.CancelFunc) *http.Response
 		return resp
 	}
 
-	body := cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
-	if w, ok := resp.Body.(io.Writer); ok {
-		// 101 Switching Protocols bodies are writable; keep that capability.
-		resp.Body = cancelOnCloseReadWriteBody{cancelOnCloseBody: body, Writer: w}
-		return resp
-	}
-
-	resp.Body = body
+	// 101 Switching Protocols bodies are writable (and may half-close): the
+	// wrapper keeps those capabilities.
+	resp.Body = withWriteSide(&cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}, resp.Body)
 
 	return resp
 }
@@ -381,18 +381,11 @@ type cancelOnCloseBody struct {
 	cancel context.CancelFunc
 }
 
-func (b cancelOnCloseBody) Close() error {
+func (b *cancelOnCloseBody) Close() error {
 	err := b.ReadCloser.Close()
 	b.cancel()
 
 	return err
-}
-
-// cancelOnCloseReadWriteBody is a [cancelOnCloseBody] that keeps the
-// [io.Writer] of a writable (protocol-switch) response body.
-type cancelOnCloseReadWriteBody struct {
-	cancelOnCloseBody
-	io.Writer
 }
 
 func doJSONRequest(ctx context.Context, client httpx.Doer, method, url string, body any) (*http.Response, error) {
@@ -404,7 +397,10 @@ func doJSONRequest(ctx context.Context, client httpx.Doer, method, url string, b
 		return nil, coreerrs.WrapOperation(err, "marshal JSON body")
 	}
 
-	return doRequest(ctx, client, method, url, bytes.NewReader(buf.Bytes()), "application/json", "")
+	// The request owns its bytes: the transport may still be reading the body
+	// after doRequest returned (an early or full-duplex reply), while the
+	// pooled buffer is reused.
+	return doRequest(ctx, client, method, url, bytes.NewReader(bytes.Clone(buf.Bytes())), "application/json", "")
 }
 
 // NewHTTPClient creates a new [HTTPClient] with convenient helper methods for common HTTP operations.
@@ -594,13 +590,15 @@ func WithHeader(key, value string) RequestOption {
 	}
 }
 
-// WithHeaders adds multiple headers from an iterator of key-value pairs.
-// Later entries overwrite earlier ones when keys collide.
+// WithHeaders adds multiple headers from an iterator of key-value pairs, in
+// iteration order: a later entry replaces an earlier one of the same header,
+// whatever the case of its key. Idempotency-Key and X-Idempotency-Key are the
+// exception: their case variants (one value per exact key, the later winning)
+// are all kept, replacing any earlier value of the header, so the client
+// refuses them with [ErrAmbiguousIdempotencyKey] instead of sending one.
 func WithHeaders(seq iter.Seq2[string, string]) RequestOption {
 	return func(req *http.Request) {
-		for k, v := range seq {
-			req.Header.Set(k, v)
-		}
+		setHeaderSeq(req.Header, seq)
 	}
 }
 

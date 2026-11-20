@@ -101,7 +101,12 @@ func (p *Pool) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	body := &responseBody{ReadCloser: resp.Body, cleanup: func() { p.cleanup(e) }}
 	if writer, ok := resp.Body.(io.Writer); ok {
-		resp.Body = &responseReadWriteBody{responseBody: body, Writer: writer}
+		if cw, ok := resp.Body.(interface{ CloseWrite() error }); ok {
+			// Keep the optional half-close of the upgraded stream.
+			resp.Body = &responseReadWriteCloseWriteBody{responseBody: body, Writer: writer, cw: cw}
+		} else {
+			resp.Body = &responseReadWriteBody{responseBody: body, Writer: writer}
+		}
 	} else {
 		resp.Body = body
 	}
@@ -262,3 +267,15 @@ type responseReadWriteBody struct {
 	*responseBody
 	io.Writer
 }
+
+// responseReadWriteCloseWriteBody is a [responseReadWriteBody] whose stream
+// can half-close: CloseWrite is forwarded, and Close still releases the pool
+// entry.
+type responseReadWriteCloseWriteBody struct {
+	responseReadWriteBody
+
+	cw interface{ CloseWrite() error }
+}
+
+// CloseWrite half-closes the upgraded stream.
+func (b *responseReadWriteCloseWriteBody) CloseWrite() error { return b.cw.CloseWrite() }

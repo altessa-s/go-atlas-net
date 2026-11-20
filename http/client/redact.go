@@ -420,7 +420,7 @@ func rateLimitMessage(e *limiters.RateLimitError) string {
 // renderSentinel renders the fixed text of a known sentinel in err's chain.
 func renderSentinel(err error) (string, bool) {
 	for _, sentinel := range []error{
-		ErrSSRFBlocked, limiters.ErrRateLimited, gobreaker.ErrOpenState, gobreaker.ErrTooManyRequests,
+		ErrSSRFBlocked, ErrAmbiguousIdempotencyKey, limiters.ErrRateLimited, gobreaker.ErrOpenState, gobreaker.ErrTooManyRequests,
 		context.Canceled, context.DeadlineExceeded,
 	} {
 		if errors.Is(err, sentinel) {

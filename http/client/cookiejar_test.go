@@ -6,6 +6,7 @@ package client_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -289,17 +290,54 @@ func TestCookiesFollowTheHostHeader(t *testing.T) {
 
 // TestRedirectDropsInitialCookiesTheChainSet: like http.Client with a jar, an
 // initial cookie that a redirect reply replaces or deletes is not forwarded
-// to the next hops (the jar's value is sent instead, if any).
+// to the next hops (the jar's value is sent instead, if any). A retry policy
+// that strips Set-Cookie from the reply it sees and from the previous reply
+// of the chain changes nothing: the filtering uses what was received, and the
+// reply's request view exposes no redirect history.
 func TestRedirectDropsInitialCookiesTheChainSet(t *testing.T) {
 	t.Parallel()
 
+	strip := httpclient.WithRetryPolicyHandler(func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		if resp != nil {
+			resp.Header.Del("Set-Cookie")
+
+			if resp.Request != nil && resp.Request.Response != nil {
+				resp.Request.Response.Header.Del("Set-Cookie")
+			}
+		}
+
+		return httpclient.DefaultRetryPolicy(ctx, resp, err)
+	})
+	// stripAndReplace also replaces the view's context, dropping the cookie
+	// names recorded there: the reply handed back to http.Client gets a
+	// fresh view.
+	stripAndReplace := httpclient.WithRetryPolicyHandler(func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		if resp != nil {
+			resp.Header.Del("Set-Cookie")
+
+			if resp.Request != nil {
+				resp.Request = resp.Request.WithContext(context.Background())
+			}
+		}
+
+		return httpclient.DefaultRetryPolicy(ctx, resp, err)
+	})
+
 	for _, tc := range []struct {
-		name string
-		set  *http.Cookie
-		want string
+		name    string
+		set     *http.Cookie
+		want    string
+		opts    []httpclient.Option
+		timeout bool
 	}{
-		{"replaced", &http.Cookie{Name: "session", Value: "new", Path: "/"}, "user=1; session=new"},
-		{"deleted", &http.Cookie{Name: "session", Path: "/", MaxAge: -1}, "user=1"},
+		{"replaced", &http.Cookie{Name: "session", Value: "new", Path: "/"}, "user=1; session=new", nil, false},
+		{"deleted", &http.Cookie{Name: "session", Path: "/", MaxAge: -1}, "user=1", nil, false},
+		{"replaced, policy strips", &http.Cookie{Name: "session", Value: "new", Path: "/"}, "user=1; session=new", []httpclient.Option{strip}, false},
+		{"deleted, policy strips", &http.Cookie{Name: "session", Path: "/", MaxAge: -1}, "user=1", []httpclient.Option{strip}, false},
+		// http.Client.Timeout wraps every reply body (cancelTimerBody): the
+		// names received travel with the reply's request view instead.
+		{"deleted, policy strips, client timeout", &http.Cookie{Name: "session", Path: "/", MaxAge: -1}, "user=1", []httpclient.Option{strip}, true},
+		{"deleted, policy replaces the view", &http.Cookie{Name: "session", Path: "/", MaxAge: -1}, "user=1", []httpclient.Option{stripAndReplace}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -332,7 +370,11 @@ func TestRedirectDropsInitialCookiesTheChainSet(t *testing.T) {
 			srv := httptest.NewServer(mux)
 			t.Cleanup(srv.Close)
 
-			c := httpclient.New(loopback, httpclient.WithCookieJar(newCountingJar(t)))
+			c := httpclient.New(append([]httpclient.Option{loopback, httpclient.WithCookieJar(newCountingJar(t))}, tc.opts...)...)
+			if tc.timeout {
+				c.Timeout = time.Minute
+			}
+
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/from", nil)
 			require.NoError(t, err)
 			req.Header.Set("Cookie", "session=old; user=1")
@@ -477,4 +519,421 @@ func TestDefaultRedirectLimitWithJar(t *testing.T) {
 	// is the only way to recognize it.
 	require.ErrorContains(t, err, "stopped after 10 redirects")
 	require.Equal(t, int32(10), hits.Load(), "the 10th redirect reply is the last request sent")
+}
+
+// TestUpgradeWithJarKeepsBodyWritable checks that a 101 Switching Protocols
+// reply through a client with a cookie jar keeps its writable body (the
+// connection) and stores its cookies.
+func TestUpgradeWithJarKeepsBodyWritable(t *testing.T) {
+	t.Parallel()
+
+	for name, opts := range map[string][]httpclient.Option{
+		"default":         nil,
+		"attempt timeout": {httpclient.WithAttemptTimeout(time.Minute)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			testUpgradeWithJar(t, opts...)
+		})
+	}
+}
+
+func testUpgradeWithJar(t *testing.T, opts ...httpclient.Option) {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, brw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: echo\r\n" +
+			"Set-Cookie: up=1; Path=/\r\n\r\n")
+		_ = brw.Flush()
+
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(brw, buf); err == nil {
+			_, _ = conn.Write(buf)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	jar := newCountingJar(t)
+	c := httpclient.New(append([]httpclient.Option{loopback, httpclient.WithCookieJar(jar)}, opts...)...)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "echo")
+
+	resp, err := c.Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
+
+	rw, ok := resp.Body.(io.ReadWriteCloser)
+	require.True(t, ok, "the 101 body stays writable, got %T", resp.Body)
+
+	_, err = rw.Write([]byte("ping"))
+	require.NoError(t, err)
+
+	echo := make([]byte, 4)
+	_, err = io.ReadFull(rw, echo)
+	require.NoError(t, err)
+	require.Equal(t, "ping", string(echo))
+
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+	require.Len(t, jar.Cookies(u), 1)
+}
+
+// TestMalformedRedirectPolicyClearsViewURL checks that a policy clearing the
+// URL of the view it sees on a redirect with a malformed Location cannot
+// break the redirect handling: the reply goes back with a fresh view.
+func TestMalformedRedirectPolicyClearsViewURL(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "http://[::1")
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := httpclient.New(loopback, httpclient.WithCookieJar(newCountingJar(t)),
+		httpclient.WithRetryPolicyHandler(func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+			if resp != nil && resp.Request != nil {
+				resp.Request.URL = nil
+			}
+
+			return httpclient.DefaultRetryPolicy(ctx, resp, err)
+		}))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+
+	require.NotPanics(t, func() {
+		resp, doErr := c.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+
+		require.Error(t, doErr, "the malformed Location fails the redirect")
+	})
+}
+
+// TestRedirectDropsCookieDeletedByDiscardedAttempt checks that the cookie
+// names a hop's discarded attempts set count for the redirect filtering: the
+// first reply (503, retried) deletes the session, the retry's 302 sets no
+// cookie, and the next hop still does not get the initial session.
+func TestRedirectDropsCookieDeletedByDiscardedAttempt(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu    sync.Mutex
+		seen  []string
+		froms atomic.Int32
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/from", func(w http.ResponseWriter, r *http.Request) {
+		if froms.Add(1) == 1 {
+			http.SetCookie(w, &http.Cookie{Name: "session", Path: "/", MaxAge: -1})
+			w.WriteHeader(http.StatusServiceUnavailable)
+
+			return
+		}
+
+		http.Redirect(w, r, "/to", http.StatusFound)
+	})
+	mux.HandleFunc("/to", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+
+		seen = append(seen, strings.Join(r.Header.Values("Cookie"), "|"))
+		mu.Unlock()
+
+		_, _ = io.WriteString(w, "ok")
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := httpclient.New(loopback, httpclient.WithCookieJar(newCountingJar(t)),
+		httpclient.WithRetryWait(time.Millisecond, time.Millisecond))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/from", nil)
+	require.NoError(t, err)
+	req.Header.Set("Cookie", "session=old; user=1")
+
+	resp, err := c.Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	require.Equal(t, int32(2), froms.Load())
+	require.Equal(t, []string{"user=1"}, seen)
+}
+
+// TestRedirectFromErrorHandlerReplyCarriesCookieNames checks that a redirect
+// reply made by an ErrorHandler carries the cookie names this hop's replies
+// set: the discarded 503 deleted the session, so the destination hop does not
+// get the initial one.
+func TestRedirectFromErrorHandlerReplyCarriesCookieNames(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu   sync.Mutex
+		seen []string
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/from", func(w http.ResponseWriter, _ *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "session", Path: "/", MaxAge: -1})
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	mux.HandleFunc("/to", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+
+		seen = append(seen, strings.Join(r.Header.Values("Cookie"), "|"))
+		mu.Unlock()
+
+		_, _ = io.WriteString(w, "ok")
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := httpclient.New(loopback, httpclient.WithCookieJar(newCountingJar(t)), httpclient.WithRetryMax(0),
+		httpclient.WithErrorHandler(func(resp *http.Response, _ error, _ int) (*http.Response, error) {
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": {"/to"}},
+				Body:       http.NoBody,
+			}, nil
+		}))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/from", nil)
+	require.NoError(t, err)
+	req.Header.Set("Cookie", "session=old; user=1")
+
+	resp, err := c.Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	require.Equal(t, []string{"user=1"}, seen)
+}
+
+// TestErrorHandlerRedirectWithoutRequest checks that an ErrorHandler's own
+// redirect reply with no request, and a malformed Location, is handled
+// without a panic, with and without a cookie jar: it gets a fresh view of
+// the attempted request.
+func TestErrorHandlerRedirectWithoutRequest(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	for name, jar := range map[string]bool{"with jar": true, "without jar": false} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			opts := []httpclient.Option{loopback, httpclient.WithRetryMax(0),
+				httpclient.WithErrorHandler(func(resp *http.Response, _ error, _ int) (*http.Response, error) {
+					if resp != nil {
+						_ = resp.Body.Close()
+					}
+
+					return &http.Response{
+						StatusCode: http.StatusFound,
+						Header:     http.Header{"Location": {"http://[::1"}},
+						Body:       http.NoBody,
+					}, nil
+				})}
+			if jar {
+				opts = append(opts, httpclient.WithCookieJar(newCountingJar(t)))
+			}
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+			require.NoError(t, err)
+			req.Header.Set("Cookie", "session=old")
+
+			require.NotPanics(t, func() {
+				resp, doErr := httpclient.New(opts...).Do(req)
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+
+				require.Error(t, doErr, "the malformed Location fails the redirect")
+			})
+		})
+	}
+}
+
+// TestErrorHandlerReplyGetsRequestView checks that an ErrorHandler's own
+// reply with no request reaches the caller with a view of the attempted
+// request.
+func TestErrorHandlerReplyGetsRequestView(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := httpclient.New(loopback, httpclient.WithRetryMax(0),
+		httpclient.WithErrorHandler(func(resp *http.Response, _ error, _ int) (*http.Response, error) {
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody}, nil
+		}))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/path", nil)
+	require.NoError(t, err)
+
+	resp, err := c.Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	require.NotNil(t, resp.Request)
+	require.Equal(t, srv.URL+"/path", resp.Request.URL.String())
+}
+
+// alwaysFailingReader fails every Read.
+type alwaysFailingReader struct{}
+
+func (alwaysFailingReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+
+// TestErrorHandlerReplyAfterFailureGetsView checks that an ErrorHandler's own
+// reply after a failure with no reply gets a view of the request: of the
+// attempt after a dial failure, of the snapshot after a buffering failure
+// (no attempt), for a 200 and for a malformed redirect (no panic).
+func TestErrorHandlerReplyAfterFailureGetsView(t *testing.T) {
+	t.Parallel()
+
+	const target = "http://127.0.0.1:1/path" // nothing listens: the dial fails
+
+	tests := map[string]struct {
+		redirect bool
+		buffer   bool
+	}{
+		"dial failure, 200":                  {},
+		"dial failure, malformed redirect":   {redirect: true},
+		"buffer failure, 200":                {buffer: true},
+		"buffer failure, malformed redirect": {buffer: true, redirect: true},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			c := httpclient.New(loopback, httpclient.WithRetryMax(1), httpclient.WithRetryWait(time.Millisecond, time.Millisecond),
+				httpclient.WithErrorHandler(func(*http.Response, error, int) (*http.Response, error) {
+					if tc.redirect {
+						return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": {"http://[::1"}}, Body: http.NoBody}, nil
+					}
+
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody}, nil
+				}))
+
+			var (
+				body   io.Reader
+				method = http.MethodGet
+			)
+
+			if tc.buffer {
+				method = http.MethodPost
+				body = io.NopCloser(alwaysFailingReader{})
+			}
+
+			req, err := http.NewRequestWithContext(t.Context(), method, target, body)
+			require.NoError(t, err)
+
+			if tc.buffer {
+				req.Header.Set("Idempotency-Key", "k1")
+			}
+
+			require.NotPanics(t, func() {
+				resp, doErr := c.Do(req)
+				if tc.redirect {
+					require.Error(t, doErr)
+					return
+				}
+
+				require.NoError(t, doErr)
+				t.Cleanup(func() { _ = resp.Body.Close() })
+
+				require.NotNil(t, resp.Request)
+				require.Equal(t, target, resp.Request.URL.String())
+				require.Equal(t, method, resp.Request.Method)
+			})
+		})
+	}
+}
+
+// closeCountingBody counts its Close calls.
+type closeCountingBody struct {
+	io.Reader
+
+	closes *atomic.Int32
+}
+
+func (b closeCountingBody) Close() error {
+	b.closes.Add(1)
+	return nil
+}
+
+// TestSeeOtherClosesBodyLikeNetHTTP checks a 303 redirect of a buffered POST
+// body through the public client: the redirected request is a GET, and the
+// body is closed as by net/http's own client and transport (once by the
+// round tripper, which must close it, and once more by http.Client after the
+// redirect reply).
+func TestSeeOtherClosesBodyLikeNetHTTP(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/from", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		http.Redirect(w, r, "/to", http.StatusSeeOther)
+	})
+	mux.HandleFunc("/to", func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, r.Method) })
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	run := func(c *http.Client) (string, int32) {
+		var closes atomic.Int32
+
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/from",
+			closeCountingBody{Reader: strings.NewReader("order"), closes: &closes})
+		require.NoError(t, err)
+		req.Header.Set("Idempotency-Key", "k1")
+
+		resp, err := c.Do(req)
+		require.NoError(t, err)
+
+		method, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+
+		return string(method), closes.Load()
+	}
+
+	method, closes := run(httpclient.New(loopback))
+	stdMethod, stdCloses := run(&http.Client{})
+
+	require.Equal(t, http.MethodGet, method)
+	require.Equal(t, stdMethod, method)
+	require.Equal(t, stdCloses, closes, "the body is closed as by net/http")
 }

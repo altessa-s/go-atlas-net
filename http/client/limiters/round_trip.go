@@ -44,7 +44,7 @@ func NewRoundTripper(next http.RoundTripper, limiter RequestsLimiter) *RoundTrip
 
 // RoundTrip checks [RequestsLimiter.Allow] using the request hostname as key.
 // If the limiter returns a non-nil error the request is rejected without
-// reaching the network with a [*RateLimitError] wrapping that error (a
+// reaching the network, its body closed, with a [*RateLimitError] wrapping that error (a
 // limiter that already returns a *RateLimitError, for example with RetryAfter
 // set, is passed through); otherwise the request is forwarded to the next
 // [net/http.RoundTripper]. Without a limiter the request is forwarded as is.
@@ -55,6 +55,12 @@ func (rt *RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	host := req.URL.Hostname()
 	if err := rt.limiter.Allow(req.Context(), host); err != nil {
+		// The request is not handed on: its body is ours to close, as
+		// http.RoundTripper requires.
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+
 		if IsRateLimitError(err) != nil {
 			return nil, err
 		}
