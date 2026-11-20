@@ -50,9 +50,22 @@
 //     reply wait at least its Retry-After ([WithRetryAfterMax], [httpx.ParseRetryAfter]). The built-in classification retries
 //     [DefaultRetryableStatuses] (change them with [WithRetryableStatuses]) and is exported as [DefaultRetryPolicy] for
 //     custom policies set with [WithRetryPolicyHandler]. The built-in classification replays only requests that are
-//     safe to repeat, as net/http does: an idempotent method (GET, HEAD, OPTIONS, TRACE, PUT, DELETE) or a request
-//     with an Idempotency-Key or X-Idempotency-Key header; a POST or PATCH without one is sent once. A policy set
-//     with [WithRetryPolicyHandler] decides for every method. [WithClock] sets the time source of the retry layer (a clock.Fake in tests).
+//     safe to repeat: an idempotent method of RFC 9110 (GET, HEAD, OPTIONS, TRACE, PUT, DELETE; case-sensitive, an
+//     empty method is GET) or a request with exactly one non-blank idempotency key — one value in total across
+//     Idempotency-Key and X-Idempotency-Key, header names matched ASCII case-insensitively. The outcomes are the same
+//     under any policy: an eligible request may be retried; a non-idempotent request without a key is attempted
+//     once (a policy set with [WithRetryPolicyHandler] only classifies that attempt); one with an ambiguous key —
+//     several values, keys under both names, a present but blank one, or one whose carrying header a Connection
+//     header names — is refused with [ErrAmbiguousIdempotencyKey] before any transmission and before the policy,
+//     since net/http replays a request carrying either header whatever its values. What is sent is a private snapshot of the request taken before
+//     the first transmission (method, URL, Host, header, framing), copied afresh per attempt, so callbacks that edit
+//     the request they see change nothing sent; separately, a change to one of those compared fields of the request
+//     handed to the retry layer stops the retries (with http.Client.Timeout that is a shallow copy of the caller's,
+//     so only header edits of the original are seen). [ContextWithoutRetry] limits the retry loop to at most one call to the next round tripper
+//     whatever the method, key or policy ([RetryDisabled] reports the mark); the transport's own retries — a replay
+//     after possible processing of an idempotent or validly keyed request, a retry of any request when no processing
+//     occurred — are outside its scope (see [ContextWithoutRetry] and [TransportDriver]).
+//     [WithClock] sets the time source of the retry layer (a clock.Fake in tests).
 //   - Protection: a circuit breaker per destination host, so one failing endpoint never rejects requests to
 //     another; tune hosts with [WithCircuitBreakerSettings] and bound lazily created breakers with [WithMaxHostBreakers].
 //     [WithBreakerIsSuccessful] classifies the original transport error before redaction for every breaker;
@@ -85,6 +98,8 @@
 //   - [IsRetryExhaustedError] extracts [RetryExhaustedError] (matches [ErrMaxRetriesExceeded]).
 //   - [IsSSRFError] extracts [SSRFError] (matches [ErrSSRFBlocked]).
 //   - [IsTemporaryError] checks for transient conditions that may succeed on retry.
+//   - [ErrAmbiguousIdempotencyKey] is returned, before any transmission, for a non-idempotent request whose
+//     idempotency key is not exactly one non-blank value.
 //
 // # Redaction
 //

@@ -394,7 +394,10 @@ func (c *circuitBreakerClient) newCircuitBreakerRoundTripper(next http.RoundTrip
 		// Get the appropriate circuit breaker for this host
 		breaker := c.getBreakerForHost(req.URL.Host)
 
+		invoked := false
+
 		res, err := breaker.Execute(func() (*http.Response, error) {
+			invoked = true
 			res, err := next.RoundTrip(req) //nolint:bodyclose
 			// Bound the graph before gobreaker invokes the predicate under its
 			// lock; errors.Is and errors.As must not block every request.
@@ -405,6 +408,13 @@ func (c *circuitBreakerClient) newCircuitBreakerRoundTripper(next http.RoundTrip
 			return res, err
 		})
 		if err != nil {
+			if !invoked && req.Body != nil {
+				// Rejected before delegation (an open or saturated breaker):
+				// the body never reached the next round tripper, which would
+				// have closed it, so it is closed here, once.
+				_ = req.Body.Close()
+			}
+
 			// Bound the cause graph and render trusted text before the error
 			// reaches wrappers, retry classification, logging or callers.
 			err = redactTransportError(err)

@@ -134,12 +134,17 @@ type options struct {
 	// causes intact). It overrides retryMax
 	// and retryPolicyHandler. Set it with the generated WithoutRetry when the
 	// caller classifies replies itself or retries around the client.
-	// It does not disable transport retries. On reused HTTP/1.1 connections,
-	// net/http may resend even a possibly processed request with no body
-	// (nil or http.NoBody) or GetBody and method GET, HEAD, OPTIONS, TRACE
-	// or an Idempotency-Key or X-Idempotency-Key header. An ordinary POST/PATCH
-	// without either header is not replayed after it may have been processed;
-	// net/http may retry it if nothing was written and it has no body or GetBody.
+	// It does not disable all transport retries. On reused HTTP/1.1
+	// connections, net/http may resend even a possibly processed request with
+	// no body (nil or http.NoBody) or GetBody and method GET, HEAD, OPTIONS,
+	// TRACE or an Idempotency-Key or X-Idempotency-Key header (any value or
+	// count; a non-idempotent request with an ambiguous key is refused with
+	// ErrAmbiguousIdempotencyKey before it is sent). WithoutRetry and
+	// ContextWithoutRetry bound the client retry loop only, not that replay,
+	// which is safe for the idempotent or validly keyed requests it applies
+	// to. An ordinary POST/PATCH without either header is not replayed after
+	// it may have been processed; net/http may retry any request, unkeyed
+	// ones included, if nothing was written and it has no body or GetBody.
 	// On HTTP/2, only proven unprocessed requests with replayable bodies may
 	// be resent. See TransportDriver for the transport replay contract.
 	withoutRetry bool `opt:"Retry" optval:"invert"`
@@ -177,16 +182,23 @@ type options struct {
 	// observer receives the client's telemetry events (see [Observer]).
 	// Defaults to [NoopObserver]; set it with the generated WithObserver.
 	observer Observer `optgen:"default=defaultObserver(),notnil"`
-	// proxy resolves the proxy URL for outgoing requests. The auto-generated
-	// setter is named WithProxyFunc to free the WithProxy name for the more
-	// common host/port/auth convenience setter declared below.
+	// proxy resolves the proxy URL for outgoing requests. As with
+	// http.Transport.Proxy, it receives the request being transmitted and
+	// must treat it as read-only: the client does not give it a copy. With
+	// proxyTLSConfig (and no transport driver) it is called at dial time
+	// instead, once per new connection, with a synthesized request that
+	// carries only the destination as an https URL (host:port): no method,
+	// header, body, context values or path. The
+	// auto-generated setter is named WithProxyFunc to free the WithProxy name
+	// for the more common host/port/auth convenience setter declared below.
 	proxy ProxyFunc `opt:"ProxyFunc"`
 	// proxyTLSConfig customizes the TLS handshake to https:// proxies
 	// (e.g. a corporate proxy fronted by a self-signed cert). When set,
 	// the client routes outbound requests through a custom DialContext
 	// that performs TCP+TLS+CONNECT manually, isolating proxy TLS from
 	// the destination's TLSClientConfig. Has no effect for plain http://
-	// or socks5:// proxies.
+	// or socks5:// proxies. The proxy resolver (proxy) is then consulted per
+	// dial with a synthesized https://host:port request, not per request.
 	proxyTLSConfig *tls.Config
 	// retryAfterStatuses are the reply statuses whose Retry-After the retry
 	// layer honors (see retryAfterMax). Defaults to 429 and 503.
@@ -338,6 +350,10 @@ func WithSSRFAllowedCIDRs(cidrs ...netip.Prefix) Option {
 // its WithSSRFGuard option instead. WithTransportDriver does this automatically
 // for HTTPS: proxy routes are selected per request, and destinations are resolved,
 // guarded and pinned locally before opening their tunnels.
+//
+// A ProxyFunc, like every transport hook (custom round trippers, dialers),
+// receives the request being transmitted and must treat it as read-only, as
+// net/http requires of http.Transport.Proxy: the client does not isolate it.
 type ProxyFunc = func(*http.Request) (*url.URL, error)
 
 // WithProxy routes all requests through an HTTP proxy at host:port with

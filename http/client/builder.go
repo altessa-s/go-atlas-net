@@ -89,7 +89,12 @@ type RequestBuilder interface {
 	// BytesBody sets a byte slice as the request body.
 	BytesBody(body []byte) RequestBuilder
 
-	// Header sets a single header.
+	// Header sets a single header. Entries whose keys differ only in case
+	// are applied in key order, the later replacing the earlier (so
+	// "content-type" wins over "Content-Type"), except Idempotency-Key and
+	// X-Idempotency-Key: their case variants are all sent, which the client
+	// refuses with ErrAmbiguousIdempotencyKey. Send refuses them itself when
+	// the doer is not a client of this package.
 	Header(key, value string) RequestBuilder
 	// Headers sets multiple headers from an iterator.
 	Headers(seq iter.Seq2[string, string]) RequestBuilder
@@ -131,9 +136,11 @@ type RequestBuilder interface {
 
 	// Send executes the HTTP request with the provided context.
 	Send(ctx context.Context) (*http.Response, error)
-	// SendWithoutContext executes the HTTP request using context.Background().
+	// SendWithoutContext executes the HTTP request with the builder's context
+	// (see Context), or context.Background() when none was set.
 	SendWithoutContext() (*http.Response, error)
-	// Build creates an http.Request with context.Background().
+	// Build creates an http.Request with the builder's context (see Context),
+	// or context.Background() when none was set.
 	Build() (*http.Request, error)
 	// BuildWithContext creates an http.Request with the specified context.
 	BuildWithContext(ctx context.Context) (*http.Request, error)
@@ -486,6 +493,21 @@ func (rb *requestBuilder) Send(ctx context.Context) (*http.Response, error) {
 	}
 
 	cancel := cancelFromContext(req.Context()) //nolint:contextcheck // context attached by builder
+
+	// A client of this package refuses an ambiguous idempotency key itself
+	// (and reports it); any other doer gets the request only if it is not.
+	if !guardsIdempotencyKey(rb.client) {
+		if refused := refuseAmbiguousIdempotencyKey(req); refused != nil {
+			rb.Release()
+
+			if cancel != nil {
+				cancel()
+			}
+
+			return nil, refused
+		}
+	}
+
 	resp, err := rb.client.Do(req)
 	rb.Release()
 
@@ -506,17 +528,25 @@ func (rb *requestBuilder) Release() {
 	requestBuilderPool.Put(rb)
 }
 
-// SendWithoutContext executes the HTTP request using context.Background().
+// SendWithoutContext executes the HTTP request with the builder's context
+// (see [RequestBuilder.Context]), or context.Background() when none was set.
 func (rb *requestBuilder) SendWithoutContext() (*http.Response, error) {
 	// Note: rb.Send() handles returning to pool
-	return rb.Send(context.Background())
+	return rb.Send(rb.storedContext())
 }
 
-// Build creates an http.Request with context.Background().
+// storedContext returns the builder's context, or context.Background() when
+// none was set.
+func (rb *requestBuilder) storedContext() context.Context {
+	return corecontext.OrBackground(rb.ctx)
+}
+
+// Build creates an http.Request with the builder's context (see
+// [RequestBuilder.Context]), or context.Background() when none was set.
 // Note: Build does not return the requestBuilder to the pool since the caller
 // may want to reuse it. Use Send() or SendWithoutContext() for automatic pooling.
 func (rb *requestBuilder) Build() (*http.Request, error) {
-	return rb.BuildWithContext(context.Background())
+	return rb.BuildWithContext(rb.storedContext())
 }
 
 // BuildWithContext creates an [net/http.Request] from the builder state using the given context.
@@ -547,10 +577,7 @@ func (rb *requestBuilder) BuildWithContext(ctx context.Context) (*http.Request, 
 		return nil, coreerrs.Wrapf(RedactError(err), "failed to create %s request for %s", rb.method, redactedRawURL(rb.url))
 	}
 
-	// Set headers
-	for k, v := range rb.headers {
-		req.Header.Set(k, v)
-	}
+	setHeaders(req.Header, rb.headers)
 
 	rb.applyAuth(req)
 

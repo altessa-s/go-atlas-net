@@ -42,7 +42,7 @@ constructors are available: `New` returns a bare `*http.Client` suitable for any
 | `WithCircuitBreakerSettings` | --            | Per-host circuit breaker configuration                                                                                                               |
 | `WithMaxHostBreakers`        | 1024          | Cap on breakers created lazily for hosts without explicit settings; further hosts share one breaker (0 = all such hosts share it)                   |
 | `WithMaxResponseSize`        | 0             | Maximum response body size in bytes (0 = unlimited)                                                                                                  |
-| `WithLimiter`                | nil           | Pluggable client-side rate limiter                                                                                                                   |
+| `WithLimiter`                | nil           | Pluggable client-side rate limiter; a refused request's body is closed (as by an open breaker), exactly once                                         |
 | `WithLimiterPerAttempt`      | off           | Place the limiter under the retry layer so every retry attempt passes it; a refusal is never retried                                               |
 | `WithSSRFProtection`         | true          | Enable blocking of connections to private/local IP addresses                                                                                         |
 | `WithoutSSRFProtection`      | --            | Disable SSRF protection; required for explicit proxies, custom TLS dialers, and non-`*http.Transport` round trippers                                 |
@@ -54,9 +54,9 @@ constructors are available: `New` returns a bare `*http.Client` suitable for any
 | `WithTransport`              | --            | Custom `*http.Transport` override; start from `DefaultPooledTransport()` (a fresh clone of the default) to keep the pool tuning                      |
 | `WithProxy`                  | none          | Route requests through `http://host:port` with optional `*url.Userinfo`                                                                              |
 | `WithProxyURL`               | none          | Route requests through any proxy URL (http, https, socks5, socks5h)                                                                                  |
-| `WithProxyFunc`              | none          | Custom resolver matching `http.Transport.Proxy` signature                                                                                            |
+| `WithProxyFunc`              | none          | Custom resolver matching `http.Transport.Proxy` signature; it receives the request being sent and must treat it as read-only. Without a transport driver and with `WithProxyTLSConfig` it runs at dial time, once per new connection, on a synthesized `https://host:port` request (no method, header, path or context values); with `WithTransportDriver` an HTTPS request's route is resolved per request, before pooling, with the request itself |
 | `WithoutProxy`               | none          | Disable proxy resolution, including `HTTP_PROXY`/`HTTPS_PROXY` defaults                                                                              |
-| `WithProxyTLSConfig`         | system        | Custom `*tls.Config` for the handshake to an `https://` proxy (self-signed CA, mTLS); isolates proxy TLS from destination TLS via custom DialContext |
+| `WithProxyTLSConfig`         | system        | Custom `*tls.Config` for the handshake to an `https://` proxy (self-signed CA, mTLS); isolates proxy TLS from destination TLS; without a transport driver via a custom DialContext, which consults the `WithProxyFunc` resolver per dial, with `WithTransportDriver` for the proxy connection of each per-request route |
 | `WithErrorHandler`           | nil           | Custom error handler                                                                                                                                 |
 | `WithRetryPolicyHandler`     | nil           | Custom retry policy handler; delegate to `DefaultRetryPolicy` for the cases it does not decide                                                      |
 | `WithoutRetry`               | --            | One client-layer attempt per request (transport retries remain possible); the response for any status (body unread) or the transport error (redacted text, causes intact) is returned; overrides `WithRetryMax` and `WithRetryPolicyHandler` |
@@ -95,6 +95,7 @@ Callers with their own retry loop can use `httpx.ParseRetryAfter(h, now, max)`. 
 | `RetryExhaustedError`   | `ErrMaxRetriesExceeded`   | All retry attempts exhausted, wraps last error (see below) |
 | `SSRFError`             | `ErrSSRFBlocked`          | Connection to private/local address blocked, or refused by an egress rule (`Rule`) |
 | `NonRetryableError`     | `ErrNonRetryable`         | Error that must not be retried (context, TLS, SSRF) |
+| --                      | `ErrAmbiguousIdempotencyKey` | Non-idempotent request with several idempotency key values, a blank one or one named by `Connection`, refused before any transmission |
 | --                      | `ErrUninspectableCause`   | Stands for the causes of an error whose cause graph is too large to search (more than 1024 visits: causes shared exponentially, a cause unwrapping to itself); they are dropped |
 
 A request whose retry loop stops on a retryable failure because no further attempt is allowed — the retries, the `WithRetryMaxElapsed` budget or
@@ -125,13 +126,71 @@ of 400 and above fails with `UnexpectedStatusError`, and the rest is returned. `
 c := httpclient.New(httpclient.WithRetryableStatuses(408, 429, 500, 502, 503, 504))
 ```
 
-The built-in classification replays only requests that are safe to repeat: an idempotent method
-(GET, HEAD, OPTIONS, TRACE, PUT, DELETE) or a request carrying an `Idempotency-Key` or `X-Idempotency-Key` header. A POST or PATCH without one is sent
-once — a server that processed it before failing never sees it twice — and a retryable failure is returned as a `RetryExhaustedError` after that
-single attempt. A policy set with `WithRetryPolicyHandler` decides for every method, so it can replay a POST the server deduplicates otherwise.
+The built-in classification replays only requests that are safe to repeat: an idempotent method of RFC 9110
+(GET, HEAD, OPTIONS, TRACE, PUT, DELETE; method names are case-sensitive, so `post` or `put` is not idempotent, and an empty method is GET) or a
+request carrying exactly one non-blank idempotency key. The values of `Idempotency-Key` and `X-Idempotency-Key` are counted together, under every
+header map key that matches either name ASCII case-insensitively (no Unicode folding); the total must be one and the value non-empty after
+trimming spaces and tabs. A request therefore has one of three outcomes, the same under any `WithRetryPolicyHandler` policy:
+
+- **eligible** (an idempotent method, or exactly one valid key): it may be retried;
+- **non-idempotent without a key**: it is attempted once — a server that processed it before failing never sees it twice — and a retryable
+  failure is returned as a `RetryExhaustedError` after that single attempt; a policy only classifies that attempt. To replay a POST the
+  server deduplicates, give it exactly one key;
+- **non-idempotent with an ambiguous key** — several values (under one name, both names or differently cased map keys), a present but blank
+  one, or a single key whose carrying header a `Connection` header names (any value, comma-separated, case-insensitive; hop-by-hop, so an
+  intermediary drops it; a token naming the other key header is harmless): it is refused with `ErrAmbiguousIdempotencyKey` (match it with
+  `errors.Is`) before any transmission, the limiter, the policy and the `ErrorHandler`. net/http's transport replays a request carrying
+  either header whatever its values, and the server may dedupe on another value than the caller meant, so such a request can be sent
+  neither once reliably nor safely twice. Idempotent methods are not checked.
 
 ```go
 req.Header.Set("Idempotency-Key", orderID) // the POST is now retried like a GET
+```
+
+**Snapshot isolation.** What is sent is a private snapshot of the request — method, URL, Host, header, `ContentLength`, `TransferEncoding`,
+taken before the first transmission — copied afresh for every attempt. Policies, the `ErrorHandler` and the caller get the reply with a
+metadata-only view of its request: no `Body`, `GetBody` or `Response` (the redirect history stays with `http.Client`; redirect cookie
+filtering uses the cookie names each reply set as received, recorded on that view's context, so `http.Client.Timeout` body wrapping and
+writable 101 bodies are untouched), its own header, URL and `TransferEncoding`, and trailers copied from the final
+snapshot or, while the upload may still be writing them (an early or full-duplex reply), from the declaration made before sending — never
+from the live map. Editing the view changes nothing being or to be sent; telemetry and logs report the snapshot. Transport hooks — a `WithProxyFunc` resolver or one on a caller transport, custom round trippers and dialers — receive the
+request being transmitted and must treat it as read-only, as in net/http; go-atlas does not isolate them. Cookies are looked up and stored
+for the snapshot's origin, starting from its `Cookie` header. A body without `GetBody` is buffered privately for replay; the caller's `Body`,
+`GetBody` and `ContentLength` are never assigned, and every attempt keeps the original framing (an unknown length is sent chunked each time).
+Trailers: every attempt hands the transport its own trailer map — a copy of the final trailers once known, else of the declaration made
+before the first transmission — never the caller's. A caller body (the original or a `GetBody` result, the transport's rewinds included)
+fills the caller's map as it is read; at its end a hook records those values as final and updates the attempt's map in place — only the
+values of the keys declared before sending, only where they differ (static trailers are never written) — before the transport writes the
+trailers. An end met by what may be the probe's first Read waits for the next Read: net/http may probe a body of unknown length (GET, HEAD,
+DELETE, ...) on its own goroutine while it writes the headers that list the trailer keys, and reads the body again only after them. A body
+closed before or during a Read captures and publishes nothing, so an aborted attempt never fixes the trailers a retry sends. Every such body is tracked for the whole call: before the caller's `GetBody` is asked for the next body, the
+retry waits (bounded by the request context) until each earlier one is closed with no read in flight, so two never write the caller's map
+at once. A buffered body is read to its end by buffering. The caller's request gets no `GetBody`, so `http.Client` does not follow a 307/308
+redirect of a body without one. The caller's request body is closed by the round tripper, as `http.RoundTripper` requires: by buffering, which reads it to its end, or by
+the transport that sends it; `http.Client` closes it once more after a redirect reply, exactly as with net/http's own transport.
+
+**Change detection.** Before each retry the request handed to the retry layer is compared with its snapshot on Method, URL, Host, Header,
+`ContentLength` and `TransferEncoding` (the URL field by field, so a Host change of an opaque URL counts); on a difference the loop stops
+with an error and nothing more is sent. The request belongs to net/http while it is in flight: its URL must stay set (`http.Client` itself
+fails on a nil one). It sees the request
+`http.Client` hands its transport: with `http.Client.Timeout` set (or on a redirect hop) that is a shallow copy of the caller's request, so a
+change to a field of the original (its `ContentLength`, say) is not detected, while a change to the shared header map is. Either way the
+snapshot is what is sent.
+
+`ContextWithoutRetry` opts a single request out of the retry loop: the retry layer makes at most one call to the next round tripper whatever
+the method, key, the client's retry options or policy (`RetryDisabled` reports the mark). An eligible request still gets a replayable body
+(buffered when it has no `GetBody`), so the transport can rewind it — except with no retries configured (`WithRetryMax(0)`,
+`WithoutRetry`), where no body is ever buffered and the caller's is handed on as is. Its scope is the client's retry loop only; the
+transport keeps its own retries, of two kinds:
+
+- after a possible processing: on a reused HTTP/1.1 connection net/http may resend a request it already wrote when it is idempotent by
+  method or carries an idempotency key (and has no body or a `GetBody`). The method or the single key makes that repeat safe; an unkeyed
+  POST or PATCH is never resent once it may have been processed, and an ambiguous key is refused above.
+- when no processing occurred: net/http may retry any request, unkeyed ones included, when nothing was written on a reused HTTP/1.1
+  connection, or when HTTP/2 proves the stream unprocessed (REFUSED_STREAM, a GOAWAY below its stream ID).
+
+```go
+req, _ := http.NewRequestWithContext(httpclient.ContextWithoutRetry(ctx), http.MethodPost, url, body)
 ```
 
 The Content-Length precheck of `WithMaxResponseSize` closes an oversized reply unread and fails with a `ResponseSizeError` that keeps its `Status` and
@@ -389,13 +448,21 @@ exception inherited from `net/http`: after certain connection failures on a
 body (`nil` or `http.NoBody`) or `GetBody`, and uses GET, HEAD, OPTIONS, TRACE
 or carries an `Idempotency-Key` or `X-Idempotency-Key` header. Unlike the client's
 retry classification above, net/http does not classify PUT/DELETE as idempotent
-without such a header. There is no transport option to disable this replay;
-it occurs below the client retry layer and `WithoutRetry` does not prevent it.
+without such a header; it checks only that the header is present, so a blank or
+duplicate key would count — the client refuses such a non-idempotent request with
+`ErrAmbiguousIdempotencyKey` before the limiter and the transport. The two scans
+differ: net/http looks the header up under its canonical map keys only
+(`Idempotency-Key`, `X-Idempotency-Key`), while go-atlas scans every map key ASCII
+case-insensitively. A key stored under a non-canonical map key (`idempotency-key`)
+therefore counts for go-atlas's eligibility and ambiguity rules but does not make
+net/http replay the request on HTTP/1. There is no
+transport option to disable this replay; it occurs below the client retry layer and
+neither `WithoutRetry` nor `ContextWithoutRetry` prevents it.
 This applies to the non-driver client, the conformance reference driver, and
 drivers using the standard HTTP/1.1 transport.
 An ordinary POST/PATCH without either header is never replayed after it may have
-been processed. If nothing was written, net/http may retry it with no body or
-`GetBody`. Consumed non-rewindable bodies must not be replayed.
+been processed. If nothing was written, net/http may retry it (any request) with no
+body or `GetBody`: the server never saw the earlier transmission. Consumed non-rewindable bodies must not be replayed.
 On HTTP/2, only requests proven unprocessed by HTTP/2 REFUSED_STREAM or GOAWAY below their stream ID may
 be retried with a rewindable body, including when the client uses `WithoutRetry`.
 These retries are bounded by the request, not a transmission count: persistent
