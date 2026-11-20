@@ -1645,3 +1645,143 @@ func TestRetryRoundTripper_ReadAfterCloseTouchesNothing(t *testing.T) {
 	require.ErrorIs(t, readErr, http.ErrBodyReadAfterClose)
 	require.Empty(t, req.Trailer.Get("X-Sum"), "the caller's body was not read after the close")
 }
+
+// TestRetryRoundTripper_CloseDropsProbePublication checks that a Close after
+// what may be net/http's probe met the end (deferring the publication) does
+// not publish: the attempt's trailer map, which the transport may still be
+// enumerating, keeps its declaration.
+func TestRetryRoundTripper_CloseDropsProbePublication(t *testing.T) {
+	t.Parallel()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com", nil)
+	require.NoError(t, err)
+
+	req.Trailer = http.Header{"X-Sum": nil}
+	req.Body = &trailerBody{r: strings.NewReader(""), trailer: req.Trailer} // empty, of unknown length
+
+	var afterClose []string
+
+	rt := &retryRoundTripper{
+		observer:          NoopObserver{},
+		retryableStatuses: DefaultRetryableStatuses(),
+		next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			probe := make([]byte, 1)
+			_, _ = r.Body.Read(probe) // the probe meets the end: publication deferred
+			_ = r.Body.Close()
+
+			afterClose = r.Trailer.Values("X-Sum")
+
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+		}),
+		retryOpts:   newTestRetryOpts(0),
+		maxAttempts: 0,
+	}
+
+	resp, err := rt.RoundTrip(req)
+	require.NoError(t, err)
+
+	_ = resp.Body.Close()
+
+	require.Empty(t, afterClose, "Close published nothing into the attempt's trailers")
+}
+
+// valueTrailerBody's first Read waits for release; on its end it sets the
+// trailer's X-Sum to value.
+type valueTrailerBody struct {
+	r       io.Reader
+	trailer http.Header
+	value   string
+	release chan struct{} // nil: no wait
+	started chan struct{}
+	once    sync.Once
+}
+
+func (b *valueTrailerBody) Read(p []byte) (int, error) {
+	if b.started != nil {
+		b.once.Do(func() { close(b.started) })
+	}
+
+	if b.release != nil {
+		<-b.release
+	}
+
+	n, err := b.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		b.trailer.Set("X-Sum", b.value)
+	}
+
+	return n, err
+}
+
+func (b *valueTrailerBody) Close() error { return nil }
+
+// TestRetryRoundTripper_AbortedAttemptDoesNotFixTrailers checks that a body
+// closed while a Read of it was in flight captures nothing: the final
+// trailers the retry sends, and the reply's view shows, are the retry's own.
+func TestRetryRoundTripper_AbortedAttemptDoesNotFixTrailers(t *testing.T) {
+	t.Parallel()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, "http://example.com", nil)
+	require.NoError(t, err)
+
+	req.Trailer = http.Header{"X-Sum": nil}
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+
+	req.Body = &valueTrailerBody{r: strings.NewReader(""), trailer: req.Trailer, value: "aborted", release: release, started: started}
+	req.GetBody = func() (io.ReadCloser, error) {
+		return &valueTrailerBody{r: strings.NewReader("payload"), trailer: req.Trailer, value: "final"}, nil
+	}
+
+	var (
+		calls int
+		sent  string
+	)
+
+	rt := &retryRoundTripper{
+		observer:          NoopObserver{},
+		retryableStatuses: DefaultRetryableStatuses(),
+		next: httpx.RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 {
+				body := r.Body
+				readDone := make(chan struct{})
+
+				go func() {
+					defer close(readDone)
+
+					buf := make([]byte, 64)
+					_, _ = body.Read(buf) // meets the end after the Close below
+				}()
+
+				<-started
+
+				_ = body.Close()
+
+				close(release)
+				<-readDone
+
+				return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Request: r}, nil
+			}
+
+			_, _ = io.Copy(io.Discard, r.Body)
+			_ = r.Body.Close()
+
+			sent = r.Trailer.Get("X-Sum")
+
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+		}),
+		retryOpts:   newTestRetryOpts(2),
+		maxAttempts: 2,
+	}
+
+	resp, err := rt.RoundTrip(req)
+	require.NoError(t, err)
+
+	_ = resp.Body.Close()
+
+	require.Equal(t, 2, calls)
+	require.Equal(t, "final", sent)
+	require.Equal(t, "final", resp.Request.Trailer.Get("X-Sum"), "the final trailers are the retry's")
+}

@@ -973,9 +973,12 @@ func (c *retryCall) setFinalTrailers(t http.Header) {
 // PROPFIND or SEARCH): the probe runs on its own goroutine while the request
 // headers, which enumerate the trailer keys, are written, so a write to the
 // map then would race with that enumeration. The publication waits for the
-// next Read or for Close, both of which net/http makes after the headers (the
-// transport reads the probed body again before writing a chunked body's
-// trailers, and closes it before writing them).
+// next Read, which net/http always makes after the headers when it sends the
+// body (its MultiReader reads the probed body again before the chunked
+// body's trailers). A body closed before or during a Read never captures or
+// publishes anything: Close drops a pending publication, so an aborted
+// attempt neither writes a map the transport may still be enumerating nor
+// fixes the final trailers a retry will send.
 type eofHookBody struct {
 	io.ReadCloser
 	capture func()
@@ -997,17 +1000,14 @@ type eofHookBody struct {
 	closeOnce    sync.Once
 }
 
-// Close closes the body, makes a deferred publication, and signals closed once
-// no Read is in flight.
+// Close closes the body, drops any deferred publication, and signals closed
+// once no Read is in flight.
 func (b *eofHookBody) Close() error {
 	err := b.ReadCloser.Close()
 
 	b.mu.Lock()
-	if !b.isClosedFlag {
-		b.publishPending()
-		b.isClosedFlag = true
-	}
-
+	b.isClosedFlag = true
+	b.pending, b.eofNext = false, false
 	b.signalIdle()
 	b.mu.Unlock()
 
@@ -1045,15 +1045,12 @@ func (b *eofHookBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 
 	b.mu.Lock()
-	if err == io.EOF && !b.ended { //nolint:errorlint // io.Reader returns io.EOF itself, never wrapped
+	// A body closed during this Read captures and publishes nothing.
+	if err == io.EOF && !b.ended && !b.isClosedFlag { //nolint:errorlint // io.Reader returns io.EOF itself, never wrapped
 		b.ended = true
 		b.capture()
 
 		switch {
-		case b.isClosedFlag:
-			// Closed during this Read: nothing is deferred past the idle
-			// signal below; the transport no longer sends these trailers.
-			b.publish()
 		case n > 0:
 			// Data with the end: the data goes now, the end on the next Read,
 			// which publishes first. A transport writes the trailers only

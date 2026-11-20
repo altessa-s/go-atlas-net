@@ -161,8 +161,9 @@ Trailers: every attempt hands the transport its own trailer map — a copy of th
 before the first transmission — never the caller's. A caller body (the original or a `GetBody` result, the transport's rewinds included)
 fills the caller's map as it is read; at its end a hook records those values as final and updates the attempt's map in place — only the
 values of the keys declared before sending, only where they differ (static trailers are never written) — before the transport writes the
-trailers. An end met by the body's first Read waits for the next Read or `Close`: net/http may probe a body of unknown length (GET, HEAD,
-DELETE, ...) on its own goroutine while it writes the headers that list the trailer keys, and it reads or closes the body again only after. Every such body is tracked for the whole call: before the caller's `GetBody` is asked for the next body, the
+trailers. An end met by what may be the probe's first Read waits for the next Read: net/http may probe a body of unknown length (GET, HEAD,
+DELETE, ...) on its own goroutine while it writes the headers that list the trailer keys, and reads the body again only after them. A body
+closed before or during a Read captures and publishes nothing, so an aborted attempt never fixes the trailers a retry sends. Every such body is tracked for the whole call: before the caller's `GetBody` is asked for the next body, the
 retry waits (bounded by the request context) until each earlier one is closed with no read in flight, so two never write the caller's map
 at once. A buffered body is read to its end by buffering. The caller's request gets no `GetBody`, so `http.Client` does not follow a 307/308
 redirect of a body without one. The caller's request body is closed by the round tripper, as `http.RoundTripper` requires: by buffering, which reads it to its end, or by
