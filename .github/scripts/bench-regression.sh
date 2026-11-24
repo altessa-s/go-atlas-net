@@ -5,7 +5,7 @@
 #
 # The base is checked out into a temporary worktree, both trees run every
 # benchmark BENCH_COUNT times, and benchstat compares them. A benchmark fails
-# the run when benchstat reports a statistically significant increase in
+# the run when benchstat reports a significant increase (alpha 0.01) in
 # sec/op or allocs/op larger than BENCH_THRESHOLD percent. Benchmarks that
 # exist on only one side are reported by benchstat but never fail the run.
 #
@@ -55,26 +55,34 @@ echo "Running benchmarks on HEAD ..."
 run_benchmarks "$repo_dir" "$work/head.txt"
 
 go -C "$repo_dir/devtools" build -o "$work/benchstat" golang.org/x/perf/cmd/benchstat
-"$work/benchstat" base="$work/base.txt" head="$work/head.txt" | tee "$work/report.txt"
+"$work/benchstat" -alpha 0.01 base="$work/base.txt" head="$work/head.txt" | tee "$work/report.txt"
 if [[ -n "${BENCH_REPORT:-}" ]]; then
     cp "$work/report.txt" "$BENCH_REPORT"
 fi
 
-# CSV rows: name,base,CI,head,CI,vs base,P. A unit header row carries the unit
-# in column 2; "vs base" is "~" when the change is not significant.
-"$work/benchstat" -format csv base="$work/base.txt" head="$work/head.txt" 2>/dev/null |
-    awk -F, -v threshold="$threshold" '
-        $1 == "" && $2 != "" { unit = $2; next }
-        unit != "sec/op" && unit != "allocs/op" { next }
-        $1 == "geomean" || $6 !~ /^\+/ { next }
-        {
-            pct = $6
-            gsub(/[+%]/, "", pct)
-            if (pct + 0 > threshold + 0) {
-                printf "REGRESSION %s %s: +%s%% (threshold %s%%)\n", $1, unit, pct, threshold
-                failed = 1
-            }
-        }
-        END { exit failed }
-    '
+# benchstat emits "~" for insignificant changes. Parse CSV so commas inside
+# quoted benchmark names cannot shift the delta into a different column.
+"$work/benchstat" -alpha 0.01 -format csv base="$work/base.txt" head="$work/head.txt" >"$work/report.csv"
+python3 - "$work/report.csv" "$threshold" <<'PYTHON'
+import csv
+import re
+import sys
+from decimal import Decimal
+
+threshold = Decimal(sys.argv[2])
+unit = None
+failed = False
+with open(sys.argv[1], newline="") as report:
+    for row in csv.reader(report):
+        if len(row) != 7:
+            continue
+        name, base, _, head, _, delta, comparison = row
+        if not name:
+            unit = base if delta == "vs base" and head == base else None
+        elif unit in ("sec/op", "allocs/op") and name != "geomean" and comparison:
+            if re.fullmatch(r"\+\d+(?:\.\d+)?%", delta) and Decimal(delta[:-1]) > threshold:
+                print(f"REGRESSION {name} {unit}: {delta} (threshold {threshold}%)")
+                failed = True
+sys.exit(int(failed))
+PYTHON
 echo "No benchmark regressed by more than ${threshold}%."
