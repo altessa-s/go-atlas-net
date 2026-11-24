@@ -44,7 +44,7 @@ type Config struct {
 	URL  redacted.RedactedString `yaml:"url,omitempty" json:"url,omitempty"`
 	Host string                  `yaml:"host" json:"host"`
 	Port int                     `yaml:"port" json:"port"`
-	Auth *Auth                   `yaml:"auth" json:"auth"`
+	Auth *Auth                   `yaml:"auth" json:"auth" default:"-"`
 }
 
 // Auth holds optional credentials for a host-mode proxy.

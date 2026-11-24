@@ -22,7 +22,10 @@ URL mode accepts optional userinfo. Percent-encode `@` and `/` in credentials. A
 and fragment delimiters (`?`, `#`, `?#`) are accepted. The returned URL preserves an empty query and drops an empty fragment, following `net/url`.
 
 Host mode accepts resolver-specific names, IPv4 and unbracketed IPv6, including scoped addresses such as `fe80::1%eth0`. Supply the port separately.
-Empty hosts, whitespace, control characters, `/` and `@` are rejected. An optional auth block requires a username and may include a password.
+Empty hosts, whitespace, control characters, `/` and `@` are rejected.
+
+Omitting `auth` leaves `Config.Auth` nil after loading. A supplied `auth` block requires host mode and a username, so `auth: {}` fails validation.
+The password is optional.
 
 URLValue returns nil for nil config, empty mode and none. Inspect Mode when translating these cases to transport options. The returned URL contains live
 credentials for the transport. Formatting Config and Auth hides credentials. Marshaling masks secret fields and validation errors omit the URL.
