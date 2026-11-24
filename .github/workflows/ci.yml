@@ -92,6 +92,10 @@ jobs:
           echo "Total coverage: ${COVERAGE}% (minimum ${COVERAGE_MIN}%)"
           awk -v actual="$COVERAGE" -v minimum="$COVERAGE_MIN" 'BEGIN { exit !(actual ~ /^[0-9]+([.][0-9]+)?$/ && actual + 0 >= minimum) }'
 
+      - name: Enforce package coverage floors
+        # Template parameter coverage_floors; a no-op when it is empty.
+        run: make --no-print-directory coverage-floors
+
       - name: Upload coverage artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

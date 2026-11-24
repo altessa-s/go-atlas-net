@@ -254,9 +254,30 @@ coverage-total: ## Print the total statement coverage of coverage.out
 	        if (stmts == 0) { print "coverage-total: no statements in coverage.out" > "/dev/stderr"; exit 1 } \
 	        printf "total:\t(statements)\t%.1f%%\n", covered * 100 / stmts }' coverage.out
 
+# Floors for single packages or package trees (template parameter
+# coverage_floors: <dir>=<percent>, <dir>/... for a tree), computed from
+# coverage.out like coverage-total, so an under-covered package cannot hide
+# behind the total. Empty enforces nothing beyond the total.
+COVERAGE_FLOORS			:=
+.PHONY: coverage-floors
+coverage-floors: ## Enforce the per-package coverage floors on coverage.out
+	@for f in $(COVERAGE_FLOORS); do \
+	  dir=$${f%=*}; min=$${f##*=}; tree=0; \
+	  case $$dir in */...) tree=1; dir=$${dir%/...};; esac; \
+	  if [ "$$dir" = "." ]; then t="github.com/altessa-s/go-atlas-net"; else t="github.com/altessa-s/go-atlas-net/$$dir"; fi; \
+	  awk -v t="$$t" -v tree="$$tree" -v min="$$min" -v name="$$f" 'NR == 1 { next } \
+	    { d = $$1; sub(/:.*$$/, "", d); sub(/\/[^\/]*$$/, "", d); \
+	      if (d != t && !(tree && index(d, t "/") == 1)) next; \
+	      size[$$1] = $$2; if ($$3 > 0) hit[$$1] = 1 } \
+	    END { for (b in size) { s += size[b]; if (b in hit) c += size[b] } \
+	          if (s == 0) { printf "coverage-floors: %s matches no statements\n", name > "/dev/stderr"; exit 1 } \
+	          pct = c * 100 / s; printf "%s:\t%.1f%% (minimum %s%%)\n", name, pct, min; exit !(pct >= min) }' coverage.out || exit 1; \
+	done
+
 .PHONY: test-all
 test-all: coverage ## Run tests with race detector, shuffle, and coverage
 	@$(MAKE) --no-print-directory coverage-total
+	@$(MAKE) --no-print-directory coverage-floors
 	@rm -f coverage.out
 
 .PHONY: test-integration
