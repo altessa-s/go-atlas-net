@@ -6,6 +6,7 @@ package client_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -233,6 +234,60 @@ func TestNewEgressPolicy_CopiesRules(t *testing.T) {
 var loopbackAllow = []httpclient.EgressRule{
 	{CIDR: netip.MustParsePrefix("127.0.0.0/8")},
 	{CIDR: netip.MustParsePrefix("::1/128")},
+}
+
+func TestEgressPolicy_ForUntrustedTargets(t *testing.T) {
+	t.Parallel()
+
+	trusted := mustEgressPolicy(t, loopbackAllow, []httpclient.EgressRule{
+		{Host: "8.8.8.8", CIDR: netip.MustParsePrefix("8.8.8.0/24"), Port: 443},
+	})
+	untrusted := trusted.AllowPrivateDestinations().ForUntrustedTargets()
+	stop := errors.New("stop before connect")
+	dial := untrusted.DialContext(&net.Dialer{Control: func(_, _ string, _ syscall.RawConn) error {
+		return stop
+	}})
+
+	_, err := dial(t.Context(), "tcp", "8.8.8.8:443")
+	require.ErrorIs(t, err, httpclient.ErrSSRFBlocked)
+	require.Contains(t, httpclient.IsSSRFError(err).Rule, "deny[0]")
+
+	_, err = dial(t.Context(), "tcp", "8.8.8.8:80")
+	require.ErrorIs(t, err, stop, "the guard admits the public address on an unblocked port")
+
+	_, err = dial(t.Context(), "tcp", "127.0.0.1:443")
+	require.ErrorIs(t, err, httpclient.ErrSSRFBlocked)
+	require.Empty(t, httpclient.IsSSRFError(err).Rule)
+	require.NoError(t, trusted.Check("localhost", netip.MustParseAddrPort("127.0.0.1:443")))
+
+	c := httpclient.New(httpclient.WithEgressPolicy(untrusted), httpclient.WithoutRetry())
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://8.8.8.8", nil)
+	require.NoError(t, err)
+
+	resp, err := c.Do(req)
+	require.ErrorIs(t, err, httpclient.ErrSSRFBlocked)
+	require.Nil(t, resp)
+	require.Contains(t, httpclient.IsSSRFError(err).Rule, "deny[0]")
+}
+
+func TestEgressPolicy_ForUntrustedTargetsRedirect(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://8.8.8.8:1", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	p := mustEgressPolicy(t, nil, []httpclient.EgressRule{{CIDR: netip.MustParsePrefix("8.8.8.0/24")}})
+	// Exempt loopback so the test server can provide the initial redirect.
+	loopback := httpclient.WithSSRFAllowedCIDRs(netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128"))
+	c := httpclient.New(httpclient.WithEgressPolicy(p.ForUntrustedTargets()), loopback, httpclient.WithoutRetry())
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+
+	_, err = c.Do(req)
+	require.ErrorIs(t, err, httpclient.ErrSSRFBlocked)
+	require.Contains(t, httpclient.IsSSRFError(err).Rule, "deny[0]")
 }
 
 func TestEgressPolicy_DialContext(t *testing.T) {

@@ -347,6 +347,11 @@ policy.
 | `policy.DialContext(dialer)`            | A transport the caller builds: a copy of `dialer` checks each resolved address, then runs the dialer's own hook       |
 | `proxydial.WithSSRFGuard(policy.Check)` | Proxied dials: the destination is resolved locally, every address checked, and the proxy asked for the approved IP    |
 
+For user-supplied targets, install `WithEgressPolicy(policy.ForUntrustedTargets())` on a direct client with SSRF protection enabled and no
+`WithSSRFAllowedCIDRs` exemptions. The derived policy keeps the configured deny rules and admits only public addresses. A nil policy gives the
+public-only default. The dial guard checks each resolved IP before connecting, including dials made when following redirects. For a transport you
+build yourself, use `policy.ForUntrustedTargets().DialContext(dialer)`.
+
 Every refusal is an `*SSRFError` matching `ErrSSRFBlocked` and is never retried; for a deny rule `SSRFError.Rule` names it (`deny[0] host=*.internal`).
 `EgressRule.Name` replaces the positional name in that label (`deny[7]`, `allowPrivate`), so a caller compiling a subset of its own rules can keep its
 numbering; it is not a matcher, and it must be 1 to 64 characters of `A-Z a-z 0-9 _ . - [ ]`, so the label survives the redaction of client errors.
