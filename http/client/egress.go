@@ -113,6 +113,22 @@ func (p *EgressPolicy) AllowPrivateDestinations() *EgressPolicy {
 	return &out
 }
 
+// ForUntrustedTargets returns a policy that admits only public destinations
+// that do not match a deny rule in p. It discards allow rules and restores
+// the default private-address block. A nil receiver yields a public-only
+// policy. The original policy is unchanged and both are safe for concurrent use.
+//
+// Install the result with [WithEgressPolicy] on a direct client with SSRF
+// protection enabled and no [WithSSRFAllowedCIDRs] exemptions, or use
+// [EgressPolicy.DialContext] for a caller-built transport.
+func (p *EgressPolicy) ForUntrustedTargets() *EgressPolicy {
+	if p == nil {
+		return &EgressPolicy{}
+	}
+
+	return &EgressPolicy{deny: p.deny}
+}
+
 // egressRule is a validated, normalized [EgressRule].
 type egressRule struct {
 	host  string       // lower-case glob; "" matches any host
