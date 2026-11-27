@@ -304,6 +304,37 @@ func TestCanonical(t *testing.T) {
 	require.Empty(t, urlx.Canonical(nil))
 }
 
+func TestCanonicalIPv6Zone(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "escapes the zone separator", raw: "https://[fe80::1%25en0]/hook", want: "https://[fe80::1%25en0]/hook"},
+		{name: "keeps the zone case", raw: "https://[FE80::1%25Ethernet0]:8443/x", want: "https://[fe80::1%25Ethernet0]:8443/x"},
+		{name: "escapes characters of the zone", raw: "https://[fe80::1%25en%200]/", want: "https://[fe80::1%25en%200]"},
+		{name: "address without zone", raw: "https://[FE80::1]/x", want: "https://[fe80::1]/x"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			u, err := urlx.ParseBaseURL(tc.raw)
+			require.NoError(t, err)
+
+			got := urlx.Canonical(u)
+			require.Equal(t, tc.want, got)
+
+			// The canonical form must parse back to the same endpoint.
+			again, err := urlx.ParseBaseURL(got)
+			require.NoError(t, err)
+			require.Equal(t, got, urlx.Canonical(again))
+		})
+	}
+}
+
 func TestCanonicalDistinguishesEncodedSeparator(t *testing.T) {
 	t.Parallel()
 

@@ -147,13 +147,35 @@ func JoinPath(base *url.URL, elem ...string) (string, error) {
 // scheme and host are lower-cased, the escaped path is kept (so "/a%2Fb" and
 // "/a/b" stay distinct) without trailing slashes, and userinfo, query and
 // fragment are dropped. An explicit port is kept, default or not, because it
-// changes the Host header a gateway may route on. A nil u yields "".
+// changes the Host header a gateway may route on. The zone of an IPv6
+// literal ("[fe80::1%25en0]") keeps its case and is re-escaped, so the result
+// parses back to the same endpoint. A nil u yields "".
 func Canonical(u *url.URL) string {
 	if u == nil {
 		return ""
 	}
 
-	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host) + strings.TrimRight(u.EscapedPath(), "/")
+	return strings.ToLower(u.Scheme) + "://" + canonicalHost(u.Host) + strings.TrimRight(u.EscapedPath(), "/")
+}
+
+// canonicalHost lower-cases host except the zone of an IPv6 literal, which
+// names an interface and is escaped as RFC 6874 requires ("%" becomes "%25").
+func canonicalHost(host string) string {
+	if !strings.HasPrefix(host, "[") {
+		return strings.ToLower(host)
+	}
+
+	literal, port, ok := strings.Cut(host[1:], "]")
+	if !ok {
+		return strings.ToLower(host)
+	}
+
+	addr, zone, hasZone := strings.Cut(literal, "%")
+	if !hasZone {
+		return "[" + strings.ToLower(literal) + "]" + port
+	}
+
+	return "[" + strings.ToLower(addr) + "%25" + url.PathEscape(zone) + "]" + port
 }
 
 // setEscapedPath sets the path of u from its escaped form ep, so that
