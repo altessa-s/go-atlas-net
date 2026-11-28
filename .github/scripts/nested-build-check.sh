@@ -1,28 +1,16 @@
 #!/bin/bash
-# Build every sub-module of the Makefile's NESTED_CHECK_MODULES (the nested
-# modules released with the root and the sub-modules released on their own)
-# against the root module without replace directives, the way a consumer's
-# module graph combines them. Below, "nested module" means one of these.
+# Vet the working-tree nested modules of go-atlas-net and build their released tags.
+# The staged pass uses the root and sibling module zips, with their module
+# boundaries intact. The declared pass checks the published dependency graph
+# of a module with a direct root requirement. An MVS upgrade fails the check:
+# the graph cannot demonstrate that the nested module's own code builds with
+# the declared root. Direct sibling versions are checked for publication,
+# and MVS selects the versions used in the build. Publication is inferred
+# from local tags and commits. GOPROXY=off skips the declared pass.
 #
-# Usage: nested-build-check.sh
-#
-# The nested go.mod files point at the working tree with replace directives,
-# which hides two kinds of breakage that only show up after a release: a
-# nested module that relies on something the root module zip does not carry
-# (an internal package, a file outside the module boundary), and a root change
-# that breaks a nested module version already released. This script:
-#
-#   1. Serves the root module and every nested module from the working tree
-#      through a local file:// GOPROXY at one pseudo-version derived from the
-#      tree contents, with every go-atlas-net requirement rewritten to it and the
-#      replace directives dropped.
-#   2. Vets each nested module from its served zip against the served root:
-#      go vet compiles every package together with its test files, but no
-#      test runs here (the module's own test targets run them).
-#   3. Builds (go build, no tests) the latest released tag of each nested
-#      module (<dir>/v*) against the served root, so a root change breaking a
-#      released nested module fails here. A nested module without a release
-#      is skipped.
+# Go ignores replacements in dependencies' manifests. Both passes discard
+# remote replacements, including third-party forks, to match that behavior.
+# Local replacements are allowed only for the root and checked nested modules.
 #
 # Environment:
 #   NESTED_BUILD_ACCEPT  space-separated <tag>@<commit> entries naming released
@@ -36,9 +24,9 @@
 # stale ones. Requires git, zip and the Go toolchain; GOWORK is ignored.
 set -euo pipefail
 
+cd "$(git rev-parse --show-toplevel)"
 module=github.com/altessa-s/go-atlas-net
-repo_dir=$(git rev-parse --show-toplevel)
-cd "$repo_dir"
+accept_indent="    "
 
 read -r -a nested <<<"$(make --no-print-directory -s print-nested-check-modules | tr '\n' ' ')"
 if [[ ${#nested[@]} -eq 0 ]]; then
@@ -48,6 +36,161 @@ fi
 
 work=$(mktemp -d)
 trap 'chmod -R u+w "$work" 2>/dev/null || true; rm -rf "$work"' EXIT
+
+# go mod edit -fmt renders both single-line directives and blocks. Extract
+# require and replace arguments, including whether a replacement is local.
+manifest_entries() {
+    go mod edit -fmt -print "$1" | awk '
+        function entry(kind, first,    path, version, rhs) {
+            path = $first
+            version = $(first + 1)
+            gsub(/"/, "", path)
+            if (kind == "replace") {
+                rhs = $(first + (version == "=>" ? 2 : 3))
+                gsub(/"/, "", rhs)
+                if (rhs ~ /^(\.\.?($|[\/\\])|[\/\\]|[[:alpha:]]:)/) {
+                    print kind, path, version, "local"
+                    return
+                }
+            }
+            print kind, path, version
+        }
+        /^[[:space:]]*\)/ { block = ""; next }
+        $1 == "require" || $1 == "replace" {
+            if ($2 == "(") { block = $1; next }
+            entry($1, 2)
+            next
+        }
+        block && NF && $1 !~ /^\/\// { entry(block, 1) }
+    '
+}
+
+drop_replacements() {
+    local file=$1 mode=${2:-drop} entries kind path old target owned args=()
+    entries=$(manifest_entries "$file") || return 1
+    while read -r kind path old target; do
+        [[ $kind == replace ]] || continue
+        if [[ $target == local ]]; then
+            for owned in "$module" "${nested[@]/#/$module/}"; do
+                [[ $path != "$owned" ]] || continue 2
+            done
+            echo "$file still replaces a module with a local directory" >&2
+            return 1
+        fi
+    done <<<"$entries"
+    [[ $mode != check ]] || return 0
+
+    while read -r kind path old target; do
+        [[ $kind == replace ]] || continue
+        [[ $old != '=>' ]] || old=""
+        args+=("-dropreplace=$path${old:+@$old}")
+    done <<<"$entries"
+    if [[ ${#args[@]} -gt 0 ]]; then
+        go mod edit "${args[@]}" "$file"
+    fi
+}
+
+# A path-wide replacement applies at every version MVS could select.
+# The RHS is a version served by the file proxy, so Go still loads module
+# zips and their manifests through the usual download path.
+pin_staged() {
+    local file=$1 self=$2 path args=()
+    drop_replacements "$file" || return 1
+    for path in "$module" "${nested[@]/#/$module/}"; do
+        [[ $path != "$self" ]] || continue
+        args+=("-replace=$path=$path@$version")
+    done
+    go mod edit "${args[@]}" "$file"
+}
+
+# Save the published dependency environment before enabling the staged proxy.
+# In the release tooling branch the staged cache is separate and may contain
+# artifacts served at a release version.
+published_proxy=$(go env GOPROXY)
+published_cache=$(go env GOMODCACHE)
+published_private=$(go env GOPRIVATE)
+published_noproxy=$(go env GONOPROXY)
+published_nosumdb=$(go env GONOSUMDB)
+
+has_published_ref() {
+    local path=${1%@*} required=${1##*@} prefix=""
+    if [[ $required =~ ^v[0-9]+\.(0\.0-|[0-9]+\.[0-9]+-([^+]*\.)?0\.)[0-9]{14}-([0-9a-f]{12})(\+incompatible)?$ ]]; then
+        git rev-parse --verify --quiet "${BASH_REMATCH[3]}^{commit}" >/dev/null
+        return
+    fi
+    [[ $path == "$module" ]] || prefix="${path#"$module/"}/"
+    git rev-parse --verify --quiet "refs/tags/$prefix${required%+incompatible}^{commit}" >/dev/null
+}
+
+manifest_requirements() {
+    manifest_entries "$1" | awk '$1 == "require" { print $2, $3 }' | LC_ALL=C sort
+}
+
+check_declared() (
+    local dir=$1 label=$2 check=$3 original=$4 action=$5
+    local manifest="$work/declared.mod" entries kind path required root_version=""
+    local before after selected graph parent
+    local requirements=()
+
+    [[ $published_proxy != off ]] || return 0
+    export GOPROXY="$published_proxy" GOMODCACHE="$published_cache" GOWORK=off
+    export GOPRIVATE="$published_private" GONOPROXY="$published_noproxy" GONOSUMDB="$published_nosumdb"
+    export GOFLAGS=-mod=mod
+    cp "$original" "$manifest" || return 1
+    rm -f "$work/declared.sum" || return 1
+    if [[ -f ${original%.mod}.sum ]]; then
+        cp "${original%.mod}.sum" "$work/declared.sum" || return 1
+    fi
+    entries=$(manifest_entries "$manifest") || return 1
+    while read -r kind path required _; do
+        [[ $kind == require ]] || continue
+        if [[ $path == "$module" ]]; then
+            root_version=$required
+        fi
+        if [[ $path == "$module" || $path == "$module/"* ]]; then
+            requirements+=("$path@$required")
+        fi
+    done <<<"$entries"
+    if [[ -z $root_version ]]; then
+        echo "    $dir ($label): no declared root requirement, skipped"
+        return 0
+    fi
+
+    echo "==> $dir ($label, declared requirements) against the root at $root_version"
+    for required in "${requirements[@]}"; do
+        if ! has_published_ref "$required"; then
+            echo "    $required is not published, skipped"
+            return 0
+        fi
+    done
+    for required in "${requirements[@]}"; do
+        (cd "$work" && go mod download "$required") || return 1
+    done
+
+    drop_replacements "$manifest" || return 1
+    before=$(manifest_requirements "$manifest") || return 1
+    cd "$check" || return 1
+    # The main module's edges in go mod graph contain the versions selected
+    # by MVS. This needs manifests, without fetching every module's metadata.
+    graph=$(go mod graph -modfile="$manifest") || return 1
+    selected=$(awk -v main="$module/$dir" -v target="$module@" '
+        $1 == main && index($2, target) == 1 { print substr($2, length(target) + 1); exit }
+    ' <<<"$graph")
+    if [[ $selected != "$root_version" ]]; then
+        parent=$(awk -v target="$module@$selected" '$1 ~ /@/ && $2 == target { print $1; exit }' <<<"$graph")
+        echo "    $dir ($label): declared $root_version, graph selects $selected${parent:+ through $parent}" >&2
+        return 1
+    fi
+
+    # Go can fill in checksums in the copy. A change to its requirements
+    # means the original manifest did not describe the build that ran.
+    go "$action" -modfile="$manifest" ./... || return 1
+    after=$(manifest_requirements "$manifest") || return 1
+    if [[ $before != "$after" ]]; then
+        echo "    $dir ($label): build requires changes to the declared go.mod requirements" >&2
+        return 1
+    fi
+)
 
 # Directories holding a go.mod other than the root: module boundaries that a
 # module zip never crosses.
@@ -80,20 +223,19 @@ done | shasum -a 256 | cut -c1-12)
 version="v0.0.0-20000101000000-$hash"
 echo "Serving the working tree as $version"
 
-# rewrite_gomod FILE drops the go-atlas-net replace directives of FILE and
-# requires every go-atlas-net module it names at $version.
+# Prepare the manifest included in the proxy artifact.
 rewrite_gomod() {
-    local file=$1 path args=()
-    for path in "$module" "${nested[@]/#/$module/}"; do
-        args+=("-dropreplace=$path")
-    done
-    for path in $(grep -oE "(^|[[:space:]])$module(/[^[:space:]]+)?[[:space:]]+v[^[:space:]]+" "$file" | awk '{print $1}' | sort -u); do
-        args+=("-require=$path@$version")
-    done
-    go mod edit "${args[@]}" "$file"
-    if grep -qE '=>[[:space:]]*\.' "$file"; then
-        echo "$file still replaces a module with a local directory" >&2
-        exit 1
+    local file=$1 entries kind path required args=()
+    drop_replacements "$file"
+    entries=$(manifest_entries "$file")
+    while read -r kind path required _; do
+        [[ $kind == require ]] || continue
+        if [[ $path == "$module" || $path == "$module/"* ]]; then
+            args+=("-require=$path@$version")
+        fi
+    done <<<"$entries"
+    if [[ ${#args[@]} -gt 0 ]]; then
+        go mod edit "${args[@]}" "$file"
     fi
 }
 
@@ -124,12 +266,11 @@ for dir in . "${nested[@]}"; do
     serve "$dir"
 done
 
-upstream=$(go env GOPROXY)
 export GOWORK=off
 export GOFLAGS=-mod=mod
-export GOPROXY="file://$proxy,$upstream"
+export GOPROXY="file://$proxy,$published_proxy"
 export GONOPROXY=none
-export GONOSUMDB="$module"
+export GONOSUMDB="$module${published_nosumdb:+,$published_nosumdb}"
 export GOSUMDB="${GOSUMDB:-$(go env GOSUMDB)}"
 
 # accepted TAG reports whether NESTED_BUILD_ACCEPT accepts the breakage of
@@ -143,37 +284,55 @@ accepted() {
     return 1
 }
 
-failed=""
+selected_tags() {
+    git tag -l "$1/v*" --sort=-v:refname | awk 'NR == 1'
+}
 
+if [[ $published_proxy == off ]]; then
+    echo "Declared requirements check skipped because GOPROXY=off."
+fi
+failed=""
 for dir in "${nested[@]}"; do
     content="$stage/$dir/$module/$dir@$version"
     check="$work/check/$dir"
     mkdir -p "$check"
     cp -R "$content/." "$check/"
     chmod -R u+w "$check"
+    pin_staged "$check/go.mod" "$module/$dir"
     echo "==> $dir (working tree) against the root at $version"
     (cd "$check" && go vet ./...) || failed="$failed $dir"
-done
+    check_declared "$dir" "working tree" "$check" "$dir/go.mod" vet ||
+        failed="$failed $dir (declared requirements)"
 
-for dir in "${nested[@]}"; do
-    tag=$(git tag -l "$dir/v*" --sort=-v:refname | head -n1)
-    if [[ -z $tag ]]; then
+    tags=$(selected_tags "$dir")
+    if [[ -z $tags ]]; then
         echo "==> $dir: no release tag, skipped"
         continue
     fi
 
-    released="$work/released"
-    mkdir -p "$released"
-    git archive "$tag" -- "$dir" | tar -x -C "$released"
-    rewrite_gomod "$released/$dir/go.mod"
-    echo "==> $dir ($tag) against the root at $version"
-    if ! (cd "$released/$dir" && go build ./...); then
-        if accepted "$tag"; then
-            echo "    $tag breakage accepted by NESTED_BUILD_ACCEPT"
-        else
-            failed="$failed $tag"
+    while IFS= read -r tag; do
+        released="$work/released/$tag"
+        mkdir -p "$released"
+        git archive "$tag" -- "$dir" | tar -x -C "$released"
+        cp "$released/$dir/go.mod" "$work/original.mod"
+        rm -f "$work/original.sum"
+        if [[ -f $released/$dir/go.sum ]]; then
+            cp "$released/$dir/go.sum" "$work/original.sum"
         fi
-    fi
+        pin_staged "$released/$dir/go.mod" "$module/$dir"
+        echo "==> $dir ($tag) against the root at $version"
+        tag_failed=""
+        (cd "$released/$dir" && go build ./...) || tag_failed=" $tag"
+        check_declared "$dir" "$tag" "$released/$dir" "$work/original.mod" build ||
+            tag_failed="$tag_failed $tag (declared requirements)"
+        if [[ -n $tag_failed ]]; then
+            if accepted "$tag"; then
+                echo "${accept_indent}$tag breakage accepted by NESTED_BUILD_ACCEPT"
+            else
+                failed="$failed$tag_failed"
+            fi
+        fi
+    done <<<"$tags"
 done
 
 if [[ -n $failed ]]; then
