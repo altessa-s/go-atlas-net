@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -253,4 +254,103 @@ func TestObserver_BreakerEvents(t *testing.T) {
 			require.True(t, obs.done[len(obs.done)-1].Failed, "the rejected request failed")
 		})
 	}
+}
+
+// TestWithoutCircuitBreaker sends every request to the transport however often it fails: no breaker rejects one, not
+// even a host with explicit settings, the observer sees no breaker event, the breakers stay closed and transport errors
+// keep their redaction. The same client with breakers rejects requests, which shows the failures do trip a breaker.
+func TestWithoutCircuitBreaker(t *testing.T) {
+	t.Parallel()
+
+	const attempts = 20
+
+	for _, disabled := range []bool{true, false} {
+		var calls atomic.Int64
+
+		transport := httpx.RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			calls.Add(1)
+
+			if req.URL.Host == "replies.test" {
+				return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader("busy")), Request: req}, nil
+			}
+
+			return nil, errors.New("connection refused for secret-token")
+		})
+		observer := &recordingObserver{}
+		opts := []httpclient.Option{
+			httpclient.WithoutSSRFProtection(), httpclient.WithClient(&http.Client{Transport: transport}),
+			httpclient.WithoutRetry(), httpclient.WithObserver(observer), httpclient.WithBreakerTimeout(time.Hour),
+			httpclient.WithCircuitBreakerSettings("configured.test", &httpclient.CircuitBreakerSettings{
+				Timeout:     time.Hour,
+				ReadyToTrip: func(gobreaker.Counts) bool { return true },
+			}),
+		}
+
+		if disabled {
+			opts = append(opts, httpclient.WithoutCircuitBreaker())
+		}
+
+		c := httpclient.New(opts...)
+
+		var rejected int
+
+		for i := range attempts {
+			host := []string{"down.test", "configured.test"}[i%2]
+			err := observePost(t, c, "http://"+host+"/")
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), "secret-token")
+
+			if httpclient.IsCircuitBreakerOpen(err) {
+				rejected++
+			}
+		}
+
+		if !disabled {
+			require.Positive(t, rejected, "the failures trip a breaker")
+			require.Less(t, calls.Load(), int64(attempts))
+
+			continue
+		}
+
+		require.Zero(t, rejected)
+		require.Equal(t, int64(attempts), calls.Load())
+
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://replies.test/", nil)
+		require.NoError(t, err)
+
+		resp, err := c.Do(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.Equal(t, "busy", string(body))
+		require.NoError(t, resp.Body.Close())
+
+		observer.mu.Lock()
+		require.Empty(t, observer.rejected)
+		require.Empty(t, observer.states)
+		require.Len(t, observer.done, attempts+1)
+		require.NotNil(t, observer.breakers)
+
+		for _, state := range observer.breakers.States() {
+			require.Equal(t, gobreaker.StateClosed, state)
+		}
+
+		require.Equal(t, gobreaker.StateClosed, observer.breakers.HostState("configured.test"))
+		observer.mu.Unlock()
+	}
+}
+
+func observePost(t *testing.T, c *http.Client, url string) error {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url, strings.NewReader("body"))
+	require.NoError(t, err)
+
+	resp, err := c.Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+
+	return err
 }

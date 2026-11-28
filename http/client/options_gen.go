@@ -105,6 +105,24 @@ func WithBreakerTimeout(v time.Duration) Option {
 	}
 }
 
+// WithoutCircuitBreaker disables the withoutCircuitBreaker option.
+//
+// withoutCircuitBreaker disables the circuit breakers: no breaker is
+// consulted, so none rejects a request and every request reaches the
+// transport, whose errors keep their bounded, redacted text. The breaker
+// options (WithBreaker*, WithCircuitBreakerSettings, WithMaxHostBreakers)
+// then have no effect, IsCircuitBreakerOpen never matches, Breakers
+// reports every breaker closed and the Observer receives no breaker
+// events. Set it with the generated WithoutCircuitBreaker when the
+// caller classifies failures and schedules retries itself, for example
+// from a work queue.
+func WithoutCircuitBreaker() Option {
+	return func(o *options) {
+		value := true
+		o.withoutCircuitBreaker = value
+	}
+}
+
 // WithClient sets the client option.
 func WithClient(v *http.Client) Option {
 	return func(o *options) {

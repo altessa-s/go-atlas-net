@@ -61,6 +61,7 @@ constructors are available: `New` returns a bare `*http.Client` suitable for any
 | `WithRetryPolicyHandler`     | nil           | Custom retry policy handler; delegate to `DefaultRetryPolicy` for the cases it does not decide                                                      |
 | `WithoutRetry`               | --            | One client-layer attempt per request (transport retries remain possible); the response for any status (body unread) or the transport error (redacted text, causes intact) is returned; overrides `WithRetryMax` and `WithRetryPolicyHandler` |
 | `WithoutRedirects`           | follow        | Never follow redirects; a 3xx reply is returned as the response (also over a `WithClient` client, left unchanged) |
+| `WithoutCircuitBreaker`      | breakers on   | No breaker is consulted: every request reaches the transport, whose errors stay bounded and redacted; the breaker options have no effect and the `Observer` receives no breaker events. For callers that classify failures and schedule retries themselves |
 | `WithClock`                  | system        | `clock.Clock` of the retry layer: elapsed budget, backoff and Retry-After waits, Retry-After dates, request duration; `clock.NewFake` in tests |
 | `WithObserver`               | no-op         | `Observer` receiving request, retry and circuit breaker events, for example to record metrics and health                                            |
 
