@@ -11,6 +11,7 @@ docs                        # Documentation
 
 # Packages
 clientip                         # Real client IP extraction
+dnslookup                        # Guarded DNS MX lookups
 egressrule                       # Egress rule grammar
 grpc/metadata                    # Incoming gRPC metadata getter
 hmacsign                         # HMAC signing and verification of request bodies
