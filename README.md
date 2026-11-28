@@ -28,6 +28,7 @@ build it.
 | Package                          | Description                                                                                      |
 |----------------------------------|--------------------------------------------------------------------------------------------------|
 | [clientip](./clientip)           | Real client IP behind trusted proxies, for HTTP and gRPC                                         |
+| [dnslookup](./dnslookup)         | Guarded DNS MX lookups with absolute names and resolver-ordered results                        |
 | [egressrule](./egressrule)       | Egress allow/deny rule grammar shared by configuration schemas and the HTTP client egress engine    |
 | [grpc/metadata](./grpc/metadata) | Adapts incoming gRPC metadata to the shared header getter                                        |
 | [http/client](./http/client)     | Resilient outbound HTTP client: retries, circuit breaker, SSRF guard, egress policy, proxies     |
