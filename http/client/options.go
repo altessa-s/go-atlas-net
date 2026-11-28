@@ -156,8 +156,18 @@ type options struct {
 	// supplied with WithClient (on a copy; the caller's client is unchanged).
 	// Set it with the generated WithoutRedirects.
 	withoutRedirects bool `opt:"Redirects" optval:"invert"`
-	logger           *slog.Logger
-	limiter          limiters.RequestsLimiter `optgen:"notnil"`
+	// withoutCircuitBreaker disables the circuit breakers: no breaker is
+	// consulted, so none rejects a request and every request reaches the
+	// transport, whose errors keep their bounded, redacted text. The breaker
+	// options (WithBreaker*, WithCircuitBreakerSettings, WithMaxHostBreakers)
+	// then have no effect, IsCircuitBreakerOpen never matches, Breakers
+	// reports every breaker closed and the Observer receives no breaker
+	// events. Set it with the generated WithoutCircuitBreaker when the
+	// caller classifies failures and schedules retries itself, for example
+	// from a work queue.
+	withoutCircuitBreaker bool `opt:"CircuitBreaker" optval:"invert"`
+	logger                *slog.Logger
+	limiter               limiters.RequestsLimiter `optgen:"notnil"`
 	// limiterPerAttempt, set by the generated WithLimiterPerAttempt, places
 	// the limiter under the retry layer instead of around it, so every retry
 	// attempt waits on (or is refused by) the limiter too, not only the

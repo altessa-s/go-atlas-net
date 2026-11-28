@@ -71,6 +71,7 @@
 //     [WithBreakerIsSuccessful] classifies the original transport error before redaction for every breaker;
 //     graphs exceeding the inspection bound are replaced by an error wrapping [ErrUninspectableCause] before classification;
 //     nil keeps the default (only nil errors succeed). Predicate panics propagate as in gobreaker.
+//     [WithoutCircuitBreaker] disables the breakers for callers that classify failures and schedule retries themselves.
 //   - Redirects: followed like net/http by default; [WithoutRedirects] returns a 3xx reply to the caller as the
 //     response instead, on every layer of the client.
 //   - Rate Limiting: pluggable client-side rate limiting via [WithLimiter] and [limiters.RequestsLimiter].

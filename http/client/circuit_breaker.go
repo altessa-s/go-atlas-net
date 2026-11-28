@@ -62,6 +62,8 @@ var (
 
 type circuitBreakerClient struct {
 	*gobreaker.CircuitBreaker[*http.Response]
+	// disabled sends every request to the transport without a breaker; see [WithoutCircuitBreaker]
+	disabled bool
 	client   *http.Client
 	logger   *slog.Logger
 	observer Observer
@@ -222,6 +224,7 @@ func newCircuitBreakerClient(opts options) *circuitBreakerClient {
 	}
 
 	client := &circuitBreakerClient{
+		disabled:            opts.withoutCircuitBreaker,
 		client:              httpClient,
 		logger:              opts.logger,
 		observer:            opts.observer,
@@ -391,12 +394,9 @@ func closeIdleConnections(rt http.RoundTripper) {
 // newCircuitBreakerRoundTripper creates a new round tripper with host-specific circuit breaker support
 func (c *circuitBreakerClient) newCircuitBreakerRoundTripper(next http.RoundTripper) http.RoundTripper {
 	return idleClosingRoundTripper{next: next, RoundTripperFunc: func(req *http.Request) (*http.Response, error) {
-		// Get the appropriate circuit breaker for this host
-		breaker := c.getBreakerForHost(req.URL.Host)
-
 		invoked := false
 
-		res, err := breaker.Execute(func() (*http.Response, error) {
+		attempt := func() (*http.Response, error) {
 			invoked = true
 			res, err := next.RoundTrip(req) //nolint:bodyclose
 			// Bound the graph before gobreaker invokes the predicate under its
@@ -406,7 +406,19 @@ func (c *circuitBreakerClient) newCircuitBreakerRoundTripper(next http.RoundTrip
 			}
 
 			return res, err
-		})
+		}
+
+		var (
+			res *http.Response
+			err error
+		)
+
+		if c.disabled {
+			res, err = attempt() //nolint:bodyclose
+		} else {
+			res, err = c.getBreakerForHost(req.URL.Host).Execute(attempt)
+		}
+
 		if err != nil {
 			if !invoked && req.Body != nil {
 				// Rejected before delegation (an open or saturated breaker):
