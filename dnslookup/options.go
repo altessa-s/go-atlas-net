@@ -14,8 +14,6 @@ import (
 )
 
 const (
-	// DefaultMaxRecords is the maximum number of MX records returned by default.
-	DefaultMaxRecords = 32
 	// DefaultMaxTimeout leaves the deadline to the caller's context.
 	DefaultMaxTimeout time.Duration = 0
 	// DefaultMaxConcurrent leaves the number of concurrent queries unlimited.
@@ -30,10 +28,6 @@ type options struct {
 
 	// egressPolicy applies name-only deny rules to the queried host.
 	egressPolicy *httpclient.EgressPolicy
-
-	// maxRecords caps the results after sorting. Nonpositive values use
-	// [DefaultMaxRecords].
-	maxRecords int `optgen:"default=DefaultMaxRecords"`
 
 	// maxTimeout bounds the lookup duration. Nonpositive values are ignored.
 	maxTimeout time.Duration `optgen:"default=DefaultMaxTimeout"`

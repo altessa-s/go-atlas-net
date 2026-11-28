@@ -118,7 +118,13 @@ func TestLookupMX_EgressPolicy(t *testing.T) {
 			mx, err := l.LookupMX(t.Context(), tc.name)
 			if tc.want != nil {
 				require.ErrorIs(t, err, tc.want)
+				require.ErrorIs(t, err, dnslookup.ErrRefused)
 				require.ErrorIs(t, err, httpclient.ErrSSRFBlocked)
+				require.Equal(t, tc.want.Error(), err.Error())
+
+				var cause *httpclient.SSRFError
+				require.ErrorAs(t, err, &cause)
+				require.Equal(t, "mx.corp.contoso.com", cause.Host)
 				require.Empty(t, mx)
 				require.Zero(t, calls)
 
@@ -141,15 +147,20 @@ func TestLookupMX_RecordSet(t *testing.T) {
 		want    []dnslookup.MX
 		err     error
 	}{
-		{"null MX", []*net.MX{{Host: "."}}, nil, nil},
-		{"nonzero root preference", []*net.MX{{Host: ".", Pref: 1}}, nil, dnslookup.ErrResolver},
-		{"mixed null and ordinary", []*net.MX{{Host: "smtp.google.com.", Pref: 1}, {Host: "."}}, nil, dnslookup.ErrResolver},
-		{"duplicate null MX", []*net.MX{{Host: "."}, {Host: "."}}, nil, dnslookup.ErrResolver},
+		{"null MX", []*net.MX{{Host: "."}}, []dnslookup.MX{{Host: "."}}, nil},
+		{"nonzero root preference", []*net.MX{{Host: ".", Pref: 1}}, []dnslookup.MX{{Host: ".", Pref: 1}}, nil},
+		{
+			"mixed null and ordinary",
+			[]*net.MX{{Host: "SMTP.GOOGLE.COM.", Pref: 1}, {Host: "."}},
+			[]dnslookup.MX{{Host: "smtp.google.com", Pref: 1}, {Host: "."}},
+			nil,
+		},
+		{"duplicate null MX", []*net.MX{{Host: "."}, {Host: "."}}, []dnslookup.MX{{Host: "."}, {Host: "."}}, nil},
 		{"missing record", []*net.MX{nil}, nil, dnslookup.ErrResolver},
 		{
 			"ordinary mixed exchanges",
 			[]*net.MX{{Host: "C.CONTOSO.COM.", Pref: 20}, {Host: "B.CONTOSO.COM.", Pref: 10}, {Host: "a.contoso.com", Pref: 10}},
-			[]dnslookup.MX{{Host: "a.contoso.com", Pref: 10}, {Host: "b.contoso.com", Pref: 10}, {Host: "c.contoso.com", Pref: 20}},
+			[]dnslookup.MX{{Host: "c.contoso.com", Pref: 20}, {Host: "b.contoso.com", Pref: 10}, {Host: "a.contoso.com", Pref: 10}},
 			nil,
 		},
 	} {
@@ -166,43 +177,42 @@ func TestLookupMX_RecordSet(t *testing.T) {
 	}
 }
 
-func TestLookupMX_MaxRecords(t *testing.T) {
+func TestLookupMX_PreservesAllRecordsInOrder(t *testing.T) {
 	t.Parallel()
+
+	const count = 33
+
+	failure := errors.New("server failure")
 
 	for _, tc := range []struct {
 		name  string
-		count int
-		opts  []dnslookup.Option
-		want  int
+		cause error
+		want  error
 	}{
-		{name: "32 records", count: 32, want: 32},
-		{name: "33 records", count: 33, want: 32},
-		{name: "custom limit", count: 33, opts: []dnslookup.Option{dnslookup.WithMaxRecords(1)}, want: 1},
-		{name: "nonpositive limit", count: 33, opts: []dnslookup.Option{dnslookup.WithMaxRecords(0)}, want: 32},
+		{name: "complete"},
+		{name: "partial", cause: failure, want: dnslookup.ErrResolver},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			records := make([]*net.MX, tc.count)
+			records := make([]*net.MX, count)
+			want := make([]dnslookup.MX, count)
+
 			for i := range records {
-				pref := uint16(tc.count - i)
+				pref := uint16(count - i)
 				records[i] = &net.MX{Host: fmt.Sprintf("MX%d.CONTOSO.COM.", pref), Pref: pref}
+				want[i] = dnslookup.MX{Host: fmt.Sprintf("mx%d.contoso.com", pref), Pref: pref}
 			}
 
-			l := dnslookup.New(append(tc.opts, dnslookup.WithResolver(resolverFunc(func(context.Context, string) ([]*net.MX, error) {
-				return records, nil
-			})))...)
+			l := dnslookup.New(dnslookup.WithResolver(resolverFunc(func(context.Context, string) ([]*net.MX, error) {
+				return records, tc.cause
+			})))
 			mx, err := l.LookupMX(t.Context(), "contoso.com")
-			require.NoError(t, err)
-			require.Len(t, mx, tc.want)
+			require.ErrorIs(t, err, tc.want)
+			require.ErrorIs(t, err, tc.cause)
+			require.Equal(t, want, mx)
 
-			for i, record := range mx {
-				pref := uint16(i + 1)
-				require.Equal(t, dnslookup.MX{Host: fmt.Sprintf("mx%d.contoso.com", pref), Pref: pref}, record)
-			}
-
-			require.Equal(t, uint16(tc.count), records[0].Pref)
-			require.Equal(t, fmt.Sprintf("MX%d.CONTOSO.COM.", tc.count), records[0].Host)
+			require.Equal(t, &net.MX{Host: "MX33.CONTOSO.COM.", Pref: 33}, records[0])
 		})
 	}
 }
@@ -210,17 +220,23 @@ func TestLookupMX_MaxRecords(t *testing.T) {
 func TestLookupMX_ResolverError(t *testing.T) {
 	t.Parallel()
 
-	failure := errors.New("server failure")
+	const name = "contoso.com."
 	for _, tc := range []struct {
-		name    string
-		records []*net.MX
-		cause   error
-		want    error
+		name        string
+		records     []*net.MX
+		cause       *net.DNSError
+		want        error
+		wantRecords []dnslookup.MX
 	}{
-		{"not found", nil, &net.DNSError{IsNotFound: true}, dnslookup.ErrNotFound},
-		{"resolver timeout", nil, &net.DNSError{IsTimeout: true}, dnslookup.ErrTimeout},
-		{"failure", nil, failure, dnslookup.ErrResolver},
-		{"partial answer", []*net.MX{{Host: "SMTP.GOOGLE.COM.", Pref: 10}}, failure, dnslookup.ErrResolver},
+		{"not found", nil, &net.DNSError{Name: name, Err: "no such host", IsNotFound: true}, dnslookup.ErrNotFound, nil},
+		{"resolver timeout", nil, &net.DNSError{Name: name, Err: "timeout", IsTimeout: true}, dnslookup.ErrTimeout, nil},
+		{
+			"partial answer with root exchange",
+			[]*net.MX{{Host: ".", Pref: 7}, {Host: "SMTP.GOOGLE.COM.", Pref: 10}},
+			&net.DNSError{Name: name, Err: "server failure"},
+			dnslookup.ErrResolver,
+			[]dnslookup.MX{{Host: ".", Pref: 7}, {Host: "smtp.google.com", Pref: 10}},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -228,19 +244,18 @@ func TestLookupMX_ResolverError(t *testing.T) {
 			l := dnslookup.New(dnslookup.WithResolver(resolverFunc(func(context.Context, string) ([]*net.MX, error) {
 				return tc.records, tc.cause
 			})))
-			mx, err := l.LookupMX(t.Context(), "contoso.com")
+			mx, err := l.LookupMX(t.Context(), name)
 			require.ErrorIs(t, err, tc.want)
 			require.ErrorIs(t, err, tc.cause)
+			require.Equal(t, tc.want.Error(), err.Error())
+			require.Equal(t, tc.wantRecords, mx)
 
 			var lookupErr *dnslookup.LookupError
 			require.ErrorAs(t, err, &lookupErr)
-			require.NotEmpty(t, lookupErr.Error())
 
-			if tc.records == nil {
-				require.Empty(t, mx)
-			} else {
-				require.Equal(t, []dnslookup.MX{{Host: "smtp.google.com", Pref: 10}}, mx)
-			}
+			var cause *net.DNSError
+			require.ErrorAs(t, err, &cause)
+			require.Same(t, tc.cause, cause)
 		})
 	}
 }

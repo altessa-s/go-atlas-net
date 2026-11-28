@@ -23,10 +23,9 @@ for _, mx := range records {
 }
 ```
 
-`LookupMX` uses [egressrule.NormalizeHost](../egressrule) for the query name and passes it to the resolver with a trailing dot. Returned MX hosts
-are lowercase and have no trailing dot. Results keep their DNS preference and sort by preference, then host, before truncation. A sole `0 .`
-record returns an empty result. A root exchange with another preference or any other record makes the set invalid. The limit applies to returned
-records after the resolver parses the DNS response.
+`LookupMX` uses [egressrule.NormalizeHost](../egressrule) for the query name and passes it to the resolver with a trailing dot. It returns all MX
+records in resolver order with their original preferences. Ordinary exchange names are normalized to lowercase without a trailing dot. The root
+exchange `.` keeps its original preference, including in mixed or partial answers. Callers interpret null MX records and apply any sorting or limits.
 
 ## Options
 
@@ -34,7 +33,6 @@ records after the resolver parses the DNS response.
 |---------------------|-----------------------|------------------------------------------------------------------------|
 | `WithResolver`      | `net.DefaultResolver` | Inject a resolver that honors context and supports concurrent calls    |
 | `WithEgressPolicy`  | None                  | Apply [HTTP egress policy](../http/client) with `CheckHost(name, 0)`   |
-| `WithMaxRecords`    | 32                    | Cap sorted results. Nonpositive values restore the default             |
 | `WithMaxTimeout`    | Caller context only   | Apply an upper bound while honoring any earlier context deadline       |
 | `WithMaxConcurrent` | Unlimited             | Cap concurrent lookups. A full limit returns `ErrBusy` immediately     |
 
@@ -43,16 +41,18 @@ MX hosts in the response are left to the caller's connection policy.
 
 ## Errors
 
-Use `errors.Is` to match a category and `errors.As` to inspect a `*LookupError` or its underlying cause. Caller cancellation propagates as
-`context.Canceled`. A resolver can return partial records with an error. Treat those records as incomplete.
+`LookupError.Error()` returns only the category text. Use `errors.Is` to match a category and `errors.Is` or `errors.As` to inspect the underlying
+cause. Caller cancellation propagates as `context.Canceled`. A resolver can return partial records with an error. Treat those records as incomplete.
 
-| Error         | Meaning                                           |
-|---------------|---------------------------------------------------|
-| `ErrNotFound` | The resolver reported that no MX was found        |
-| `ErrTimeout`  | The context deadline or resolver timeout elapsed |
-| `ErrRefused`  | The query name is invalid or special-use          |
-| `ErrDenied`   | The egress policy denied the query name           |
-| `ErrBusy`     | All concurrency slots are occupied                |
-| `ErrResolver` | The resolver failed or returned an invalid set    |
+| Error         | Meaning                                                              |
+|---------------|----------------------------------------------------------------------|
+| `ErrNotFound` | The resolver reported that no MX was found                           |
+| `ErrTimeout`  | The context deadline or resolver timeout elapsed                     |
+| `ErrRefused`  | The query name is invalid, special-use, or denied by egress policy   |
+| `ErrDenied`   | The egress policy denied the query name                              |
+| `ErrBusy`     | All concurrency slots are occupied                                   |
+| `ErrResolver` | The resolver failed or returned an invalid set                       |
+
+A policy denial matches `ErrRefused`, `ErrDenied`, and `httpclient.ErrSSRFBlocked` via `errors.Is`.
 
 [iana]: https://www.iana.org/assignments/special-use-domain-names

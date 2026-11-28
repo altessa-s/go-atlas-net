@@ -36,16 +36,6 @@ func WithMaxConcurrent(v int) Option {
 	}
 }
 
-// WithMaxRecords sets the maxRecords option.
-//
-// maxRecords caps the results after sorting. Nonpositive values use
-// [DefaultMaxRecords].
-func WithMaxRecords(v int) Option {
-	return func(o *options) {
-		o.maxRecords = v
-	}
-}
-
 // WithMaxTimeout sets the maxTimeout option.
 //
 // maxTimeout bounds the lookup duration. Nonpositive values are ignored.
@@ -79,7 +69,6 @@ func WithResolver(v Resolver) Option {
 func defaultOptions() *options {
 	return &options{
 		maxConcurrent: DefaultMaxConcurrent,
-		maxRecords:    DefaultMaxRecords,
 		maxTimeout:    DefaultMaxTimeout,
 		resolver:      net.DefaultResolver,
 	}

@@ -5,12 +5,9 @@
 package dnslookup
 
 import (
-	"cmp"
 	"context"
 	"errors"
-	"fmt"
 	"net"
-	"slices"
 	"strings"
 
 	"github.com/altessa-s/go-atlas-net/egressrule"
@@ -21,9 +18,9 @@ var (
 	ErrNotFound = errors.New("MX records not found")
 	// ErrTimeout means the lookup deadline expired or the resolver timed out.
 	ErrTimeout = errors.New("MX lookup timed out")
-	// ErrRefused means the query name is invalid or reserved for special use.
+	// ErrRefused means the query name is invalid, reserved for special use, or denied by egress policy.
 	ErrRefused = errors.New("MX lookup name refused")
-	// ErrDenied means the egress policy denied the query name.
+	// ErrDenied means the egress policy denied the query name. The lookup error also matches [ErrRefused].
 	ErrDenied = errors.New("MX lookup name denied")
 	// ErrBusy means the lookup could not acquire a concurrency slot.
 	ErrBusy = errors.New("MX lookup concurrency limit reached")
@@ -34,28 +31,25 @@ var (
 var errInvalidMX = errors.New("invalid MX record set")
 
 // LookupError classifies a lookup failure and preserves its underlying cause.
-// Use [errors.Is] to check the category or the cause.
+// Use [errors.Is] to check the category and [errors.Is] or [errors.As] to inspect the cause.
 type LookupError struct {
 	kind  error
 	cause error
 }
 
-// Error returns the error category and, when available, the underlying cause.
-func (e *LookupError) Error() string {
-	if e.cause == nil {
-		return e.kind.Error()
-	}
+// Error returns only the error category.
+func (e *LookupError) Error() string { return e.kind.Error() }
 
-	return fmt.Sprintf("%s: %v", e.kind, e.cause)
+// Is reports whether target matches this error's category, including [ErrRefused] for policy denials.
+func (e *LookupError) Is(target error) bool {
+	return e.kind == target || (e.kind == ErrDenied && target == ErrRefused)
 }
-
-// Is reports whether target is this error's category.
-func (e *LookupError) Is(target error) bool { return e.kind == target }
 
 // Unwrap returns the resolver, policy, or context error, if present.
 func (e *LookupError) Unwrap() error { return e.cause }
 
-// MX is a mail exchanger. Host is normalized and Pref is its DNS preference.
+// MX is a mail exchanger. Host is normalized, with "." preserved for the root exchange.
+// Pref is its DNS preference.
 type MX struct {
 	Host string
 	Pref uint16
@@ -76,23 +70,18 @@ type Lookup struct {
 
 // New creates an MX lookup with the given options.
 func New(opts ...Option) *Lookup {
-	o := newOptions(opts...)
-	if o.maxRecords <= 0 {
-		o.maxRecords = DefaultMaxRecords
-	}
-
-	l := &Lookup{options: o}
-	if o.maxConcurrent > 0 {
-		l.slots = make(chan struct{}, o.maxConcurrent)
+	l := &Lookup{options: newOptions(opts...)}
+	if l.options.maxConcurrent > 0 {
+		l.slots = make(chan struct{}, l.options.maxConcurrent)
 	}
 
 	return l
 }
 
 // LookupMX queries the absolute form of name after validation and policy checks.
-// Results are sorted by preference, then host, and capped at the configured
-// maximum. A sole MX with preference zero and exchange "." returns an empty
-// result. A resolver error can accompany partial results.
+// It returns all records in resolver order, with normalized hosts and original
+// preferences. The root exchange "." is preserved. A resolver error can accompany
+// partial results. The caller decides how to interpret, sort, and limit the records.
 func (l *Lookup) LookupMX(ctx context.Context, name string) ([]MX, error) {
 	if l.options.maxTimeout > 0 {
 		var cancel context.CancelFunc
@@ -134,7 +123,7 @@ func (l *Lookup) LookupMX(ctx context.Context, name string) ([]MX, error) {
 		return nil, classifyError(ctxErr)
 	}
 
-	mx, parseErr := parseMX(records, l.options.maxRecords)
+	mx, parseErr := parseMX(records)
 	if err != nil {
 		return mx, classifyError(err)
 	}
@@ -161,7 +150,7 @@ func classifyError(err error) error {
 	return &LookupError{kind: ErrResolver, cause: err}
 }
 
-func parseMX(records []*net.MX, maxRecords int) ([]MX, error) {
+func parseMX(records []*net.MX) ([]MX, error) {
 	if len(records) == 0 {
 		return nil, nil
 	}
@@ -172,23 +161,12 @@ func parseMX(records []*net.MX, maxRecords int) ([]MX, error) {
 			return nil, &LookupError{kind: ErrResolver, cause: errInvalidMX}
 		}
 
-		if record.Host == "." {
-			if len(records) == 1 && record.Pref == 0 {
-				return nil, nil
-			}
-
-			return nil, &LookupError{kind: ErrResolver, cause: errInvalidMX}
+		host := record.Host
+		if host != "." {
+			host = egressrule.NormalizeHost(host)
 		}
 
-		result = append(result, MX{Host: egressrule.NormalizeHost(record.Host), Pref: record.Pref})
-	}
-
-	slices.SortFunc(result, func(a, b MX) int {
-		return cmp.Or(cmp.Compare(a.Pref, b.Pref), cmp.Compare(a.Host, b.Host))
-	})
-
-	if len(result) > maxRecords {
-		return slices.Clone(result[:maxRecords]), nil
+		result = append(result, MX{Host: host, Pref: record.Pref})
 	}
 
 	return result, nil
